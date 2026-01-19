@@ -1,0 +1,1 @@
+{"rustc":4758242423518056681,"features":"[\"system\"]","declared_features":"[\"system\"]","target":9984249023422929134,"profile":2040997289075261528,"path":14512546588250339446,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/resolv-conf-dc1b8169bcd9740d/dep-lib-resolv_conf","checksum":false}}],"rustflags":[],"config":2069994364910194474,"compile_kind":0}
