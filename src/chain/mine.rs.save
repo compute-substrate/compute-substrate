@@ -1,0 +1,85 @@
+                    get_hidx(db, &parent_tip)?
+                } else {
+                    None
+                };
+
+                height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
+                epoch = current_epoch(height);
+
+                let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
+                txs = built.0;
+
+                merkle = merkle_root(&txs);
+                bits = expected_bits(db, height, parent_hi_opt.as_ref())?;
+                chosen_time = choose_block_time(db, &parent_tip, parent_hi_opt.as_ref());
+
+                hdr = BlockHeader {
+                    version: 1,
+                    prev: parent_tip,
+                    merkle,
+                    time: chosen_time,
+                    bits,
+                    nonce: 0,
+                };
+            }
+        }
+
+        let h = header_hash(&hdr);
+        if pow_ok(&h, hdr.bits) {
+            let block = Block {
+                header: hdr.clone(),
+                txs: txs.clone(),
+            };
+
+            // Persist block bytes
+            db.blocks.insert(k_block(&h), bincode::serialize(&block)?)?;
+
+            // Index header
+            let _hi = index_header(db, &hdr, parent_hi_opt.as_ref())?;
+
+            // Apply UTXO + app state (CONSENSUS)
+            validate_and_apply_block(db, &block, epoch, height)?;
+
+            // Select tip by chainwork
+            let _ = maybe_reorg_to(db, &h);
+
+            return Ok(h);
+        }
+
+        hdr.nonce = hdr.nonce.wrapping_add(1);
+        if hdr.nonce == 0 {
+            let now = now_unix();
+            hdr.time = hdr.time.max(now);
+        }
+    }
+}
+
+fn choose_block_time(
+    db: &Stores,
+    tip: &Hash32,
+    parent_hi: Option<&crate::chain::index::HeaderIndex>,
+) -> u64 {
+    let now = now_unix();
+
+    let parent_time = parent_hi.map(|h| h.time).unwrap_or(0);
+    let min_spacing_time = parent_time.saturating_add(MIN_BLOCK_SPACING_SECS);
+
+    let mtp = if *tip != [0u8; 32] {
+        median_time_past(db, tip).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Must be strictly greater than MTP
+    let mtp_time = mtp.saturating_add(1);
+
+    now.max(min_spacing_time).max(mtp_time)
+}
+
+fn now_unix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}

@@ -1,0 +1,176 @@
+    ///
+    /// This is intentionally marked deprecated to prevent accidental usage on the node path.
+    /// Prefer `insert_checked(db, tx)` everywhere that accepts external input (HTTP, gossip, etc).
+    ///
+    /// Enforces only:
+    /// - uniqueness by txid
+    /// - no in-mempool double spend
+    #[deprecated(
+        note = "Use insert_checked(db, tx) for all external inputs. Unchecked insert can desync nodes."
+    )]
+    pub fn insert(&self, tx: Transaction) -> bool {
+        self.insert_unchecked(tx)
+    }
+
+    /// Same as `insert`, but explicit name: no DB / consensus checks.
+    ///
+    /// Keep this for internal/testing use only.
+    pub fn insert_unchecked(&self, tx: Transaction) -> bool {
+        let id = txid(&tx);
+        let mut w = self.inner.write().unwrap();
+
+        if w.txs.contains_key(&id) {
+            return false;
+        }
+
+        // Detect in-mempool double spend
+        for inp in &tx.inputs {
+            let op = inp.prevout;
+            if w.spent.contains_key(&op) {
+                return false;
+            }
+        }
+
+        // Mark spent outpoints
+        for inp in &tx.inputs {
+            w.spent.insert(inp.prevout, id);
+        }
+
+        w.txs.insert(id, tx);
+        true
+    }
+
+    /// Insert WITH consensus-mempool validation against the current UTXO set.
+    ///
+    /// This should be the ONLY entrypoint for:
+    /// - /tx/submit
+    /// - gossipsub tx messages
+    /// - any "received from peer" path
+    ///
+    /// Returns:
+    /// - Ok(true)  => added
+    /// - Ok(false) => already present OR conflicts with an existing mempool spend
+    /// - Err(_)    => tx is invalid or not connectable to current UTXO set
+    pub fn insert_checked(&self, db: &Stores, tx: Transaction) -> anyhow::Result<bool> {
+        // Fast path: if already present, do nothing (avoid DB work).
+        let id = txid(&tx);
+        if self.contains(&id) {
+            return Ok(false);
+        }
+
+        // Strong checks: sigs, structure, fee floors, app sanity, and "connectable right now"
+        validate_tx_for_mempool(db, &tx)?;
+
+        // Explicitly ensure all inputs exist NOW (not just "eventually").
+        // This keeps mempool strictly mineable on the current canonical tip.
+        for inp in &tx.inputs {
+            if get_utxo(db, &inp.prevout)?.is_none() {
+                anyhow::bail!("missing utxo");
+            }
+        }
+
+        Ok(self.insert_unchecked(tx))
+    }
+
+    /// Remove tx by id, and free its spent outpoints.
+    ///
+    /// Returns true if the tx existed and was removed.
+    pub fn remove(&self, id: &Hash32) -> bool {
+        let mut w = self.inner.write().unwrap();
+
+        let Some(tx) = w.txs.remove(id) else {
+            return false;
+        };
+
+        // Free spent outpoints owned by this tx (defensive: only if still mapped to this txid)
+        for inp in &tx.inputs {
+            if let Some(spender) = w.spent.get(&inp.prevout) {
+                if spender == id {
+                    w.spent.remove(&inp.prevout);
+                }
+            }
+        }
+
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().unwrap().txs.len()
+    }
+
+    /// Cheaper than spent_outpoints().len() (no cloning).
+    pub fn spent_len(&self) -> usize {
+        self.inner.read().unwrap().spent.len()
+    }
+
+    /// Return up to `max_txs` transactions (cloned) without removing them.
+    ///
+    /// NOTE: order is arbitrary (HashMap iteration). Miner should fee-sort candidates.
+    pub fn sample(&self, max_txs: usize) -> Vec<Transaction> {
+        let r = self.inner.read().unwrap();
+        r.txs.values().take(max_txs).cloned().collect()
+    }
+
+    /// Optional: expose which outpoints are currently spent in the mempool.
+    pub fn spent_outpoints(&self) -> HashSet<OutPoint> {
+        let r = self.inner.read().unwrap();
+        r.spent.keys().cloned().collect()
+    }
+
+    /// Compatibility helper (some callers use this name).
+    pub fn revalidate(&self, db: &Stores) -> anyhow::Result<usize> {
+        Ok(self.prune(db))
+    }
+
+    /// Revalidate mempool txs against *current* canonical UTXO set.
+    ///
+    /// Removes txs that cannot be mined on the current tip:
+    /// - fails validate_tx_for_mempool (sigs/fees/app sanity/etc.)
+    /// - or any input is missing from current UTXO set (common after reorg)
+    ///
+    /// Returns number removed.
+    pub fn prune(&self, db: &Stores) -> usize {
+        // Snapshot txs so we don't hold the lock while hitting the DB.
+        let snapshot: Vec<(Hash32, Transaction)> = {
+            let r = self.inner.read().unwrap();
+            r.txs.iter().map(|(id, tx)| (*id, tx.clone())).collect()
+        };
+
+        let mut removed = 0usize;
+
+        for (id, tx) in snapshot {
+            // 1) full mempool validation
+            if validate_tx_for_mempool(db, &tx).is_err() {
+                if self.remove(&id) {
+                    removed += 1;
+                }
+                continue;
+            }
+
+            // 2) connectable to current UTXO set
+            let mut connectable = true;
+            for inp in &tx.inputs {
+                match get_utxo(db, &inp.prevout) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        connectable = false;
+                        break;
+                    }
+                    Err(_) => {
+                        // DB error: be conservative and keep it.
+                        connectable = true;
+                        break;
+                    }
+                }
+            }
+
+            if !connectable {
+                if self.remove(&id) {
+                    removed += 1;
+                }
+            }
+        }
+
+        removed
+    }
+}

@@ -1,4 +1,8 @@
-pub mod index;
-pub mod reorg;
-pub mod mine;
 pub mod genesis;
+pub mod index;
+pub mod lock;
+pub mod mine;
+pub mod pow;
+pub mod reorg;
+pub mod reorg_journal;
+pub mod time;

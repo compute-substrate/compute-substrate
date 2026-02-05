@@ -1,0 +1,631 @@
+        .heartbeat_interval(Duration::from_secs(1))
+        .message_id_fn(|m: &gossipsub::Message| {
+            use blake3::Hasher;
+            let mut h = Hasher::new();
+            h.update(&m.data);
+            gossipsub::MessageId::from(h.finalize().to_hex().to_string())
+        })
+        .build()
+        .unwrap();
+
+    let mut gossipsub =
+        gossipsub::Behaviour::new(MessageAuthenticity::Signed(local_key.clone()), gs_cfg)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+    gossipsub.subscribe(&IdentTopic::new(TOPIC_HDR))?;
+    gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
+
+    let rr_cfg = request_response::Config::default();
+    let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
+    let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
+
+    let behaviour = Behaviour { gossipsub, rr };
+
+    let mut swarm = Swarm::new(
+        transport,
+        behaviour,
+        peer_id,
+        libp2p::swarm::Config::with_tokio_executor(),
+    );
+
+    swarm.listen_on(cfg.listen.clone())?;
+    println!("[p2p] listening on {}", cfg.listen);
+
+    for a in &cfg.bootnodes {
+        println!("[p2p] dialing bootnode {a}");
+        let _ = swarm.dial(a.clone());
+    }
+
+    // ----------------- sync state -----------------
+
+    const MAX_HEADERS_PER_SYNC: u64 = 1024;
+    const MAX_INFLIGHT_BLOCKS: usize = 128;
+    const MAX_WANT_QUEUE: usize = 20_000;
+    const BLOCK_REQ_TIMEOUT_SECS: u64 = 10;
+
+    let mut connected: HashSet<PeerId> = HashSet::new();
+
+    // track peer tip info
+    let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
+    let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
+
+    // pick sync peer by chainwork
+    let mut sync_peer: Option<PeerId> = None;
+
+    // remember which peer first advertised a given block hash (for targeted block fetch)
+    let mut providers: HashMap<Hash32, PeerId> = HashMap::new();
+
+    // Track peers that have *failed* to serve a given block hash (e.g., responded "unknown block")
+    let mut bad_providers: HashMap<Hash32, HashSet<PeerId>> = HashMap::new();
+
+    let mut seen_blocks: HashSet<Hash32> = HashSet::new();
+
+    // inflight: hash -> (request_id, time_sent, peer_asked)
+    let mut inflight: HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)> =
+        HashMap::new();
+
+    // reverse map: request_id -> hash (only for GetBlock requests)
+    let mut rid_to_hash: HashMap<request_response::OutboundRequestId, Hash32> = HashMap::new();
+
+    let mut pending_apply: HashMap<Hash32, Block> = HashMap::new();
+    let mut want_blocks: VecDeque<Hash32> = VecDeque::new();
+
+    // Track best *indexed header* tip separately from applied (UTXO) tip.
+    let mut best_hdr_tip: Hash32 = [0u8; 32];
+    let mut best_hdr_height: u64 = 0;
+    let mut best_hdr_work: u128 = 0;
+
+    // periodic polling
+    let mut poll = interval(Duration::from_secs(5));
+
+    let is_bad = |bad: &HashMap<Hash32, HashSet<PeerId>>, h: &Hash32, p: &PeerId| -> bool {
+        bad.get(h).map(|s| s.contains(p)).unwrap_or(false)
+    };
+
+    // Request blocks, retry timed out, and prefer provider peer when known.
+    let pump_blocks =
+        |swarm: &mut Swarm<Behaviour>,
+         sync_peer: Option<PeerId>,
+         connected: &HashSet<PeerId>,
+         providers: &HashMap<Hash32, PeerId>,
+         bad_providers: &HashMap<Hash32, HashSet<PeerId>>,
+         rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
+         db: &Stores,
+         want_blocks: &mut VecDeque<Hash32>,
+         inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>|
+         -> Result<()> {
+            let now = Instant::now();
+            let mut timed_out: Vec<Hash32> = vec![];
+            for (h, (_rid, t0, _peer)) in inflight.iter() {
+                if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
+                    timed_out.push(*h);
+                }
+            }
+            for h in timed_out {
+                if let Some((rid, _t0, _peer)) = inflight.remove(&h) {
+                    rid_to_hash.remove(&rid);
+                }
+                if want_blocks.len() < MAX_WANT_QUEUE {
+                    want_blocks.push_back(h);
+                }
+                println!("[sync] requeue timed-out block {}", hex32(&h));
+            }
+
+            while inflight.len() < MAX_INFLIGHT_BLOCKS {
+                let Some(h) = want_blocks.pop_front() else {
+                    break;
+                };
+                if db.blocks.get(k_block(&h))?.is_some() {
+                    continue;
+                }
+                if inflight.contains_key(&h) {
+                    continue;
+                }
+
+                // Choose a peer for this block:
+                // 1) advertised provider if still connected and not known-bad
+                // 2) sync_peer if not known-bad
+                // 3) any connected peer not known-bad
+                let mut target: Option<PeerId> = None;
+
+                if let Some(p) = providers.get(&h) {
+                    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
+                        target = Some(*p);
+                    }
+                }
+                if target.is_none() {
+                    if let Some(sp) = sync_peer {
+                        if connected.contains(&sp) && !is_bad(bad_providers, &h, &sp) {
+                            target = Some(sp);
+                        }
+                    }
+                }
+                if target.is_none() {
+                    target = connected
+                        .iter()
+                        .find(|p| !is_bad(bad_providers, &h, p))
+                        .cloned();
+                }
+
+                let Some(peer) = target else { break };
+
+                let rid = swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&peer, SyncRequest::GetBlock { hash: h });
+
+                rid_to_hash.insert(rid, h);
+                inflight.insert(h, (rid, Instant::now(), peer));
+            }
+
+            Ok(())
+        };
+
+    let choose_best_sync_peer =
+        |connected: &HashSet<PeerId>, peer_work: &HashMap<PeerId, u128>| -> Option<PeerId> {
+            let mut best: Option<(PeerId, u128)> = None;
+            for p in connected.iter() {
+                let w = *peer_work.get(p).unwrap_or(&0);
+                match best {
+                    None => best = Some((*p, w)),
+                    Some((_bp, bw)) if w > bw => best = Some((*p, w)),
+                    _ => {}
+                }
+            }
+            best.map(|(p, _)| p)
+        };
+
+    loop {
+        tokio::select! {
+            _ = poll.tick() => {
+                // poll tips
+                for p in connected.iter() {
+                    let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
+                }
+
+                if sync_peer.is_none() {
+                    sync_peer = choose_best_sync_peer(&connected, &peer_work)
+                        .or_else(|| connected.iter().next().cloned());
+                }
+
+                let _ = pump_blocks(
+                    &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                    &db, &mut want_blocks, &mut inflight
+                );
+
+                try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
+            }
+
+            Some(ev) = mined_rx.recv() => {
+                let gh = GossipHeader { header: ev.header, hash: ev.hash };
+                let bytes = bincode::serialize(&gh)?;
+                let _ = swarm.behaviour_mut().gossipsub.publish(IdentTopic::new(TOPIC_HDR), bytes);
+            }
+
+            Some(tx) = tx_gossip_rx.recv() => {
+                // Local-origin tx (RPC submit). Gossip it.
+                let gt = GossipTx { tx };
+                let bytes = bincode::serialize(&gt)?;
+                let _ = swarm.behaviour_mut().gossipsub.publish(IdentTopic::new(TOPIC_TX), bytes);
+            }
+
+            swarm_ev = swarm.select_next_some() => {
+                match swarm_ev {
+                    SwarmEvent::NewListenAddr { address, .. } => {
+                        println!("[p2p] NewListenAddr: {}", address);
+                    }
+
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        println!("[p2p] connected: {peer_id}");
+                        connected.insert(peer_id);
+                        if sync_peer.is_none() {
+                            sync_peer = Some(peer_id);
+                        }
+                        let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
+                        println!("[sync] requested tip ({rid:?})");
+                    }
+
+                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                        connected.remove(&peer_id);
+                        peer_heights.remove(&peer_id);
+                        peer_work.remove(&peer_id);
+
+                        // Clean up inflight entries asked from this peer so we can retry elsewhere.
+                        let mut dead_hashes = vec![];
+                        for (h, (_rid, _t0, asked_peer)) in inflight.iter() {
+                            if *asked_peer == peer_id {
+                                dead_hashes.push(*h);
+                            }
+                        }
+                        for h in dead_hashes {
+                            if let Some((rid, _t0, _p)) = inflight.remove(&h) {
+                                rid_to_hash.remove(&rid);
+                            }
+                            if want_blocks.len() < MAX_WANT_QUEUE {
+                                want_blocks.push_back(h);
+                            }
+                        }
+
+                        if sync_peer == Some(peer_id) {
+                            sync_peer = None;
+                        }
+                    }
+
+                    SwarmEvent::Behaviour(event) => {
+                        // gossipsub
+                        if let Some((src, data, topic)) = handle_gossipsub_event(&event) {
+                            if topic == TOPIC_HDR {
+                                let gh: GossipHeader = bincode::deserialize(&data)?;
+
+                                if !accept_header_universe_pow(&cfg, &gh.header, &gh.hash) {
+                                    continue;
+                                }
+
+                                // remember provider
+                                if let Some(p) = src {
+                                    providers.entry(gh.hash).or_insert(p);
+                                }
+
+                                if seen_blocks.insert(gh.hash) {
+                                    if db.blocks.get(k_block(&gh.hash))?.is_none() && want_blocks.len() < MAX_WANT_QUEUE {
+                                        want_blocks.push_back(gh.hash);
+                                    }
+                                    if sync_peer.is_none() {
+                                        sync_peer = src;
+                                    }
+                                }
+
+                                let _ = pump_blocks(
+                                    &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                                    &db, &mut want_blocks, &mut inflight
+                                );
+                            } else if topic == TOPIC_TX {
+                                let gt: GossipTx = bincode::deserialize(&data)?;
+
+                                // IMPORTANT: never use unchecked insert for gossip.
+                                // This keeps miner+node aligned and prevents "miner saw it but node pruned it" drift.
+                                if mempool.insert_checked(&db, gt.tx).is_ok() {
+                                    // inserted or already-present; either way ok
+                                }
+                            }
+                        }
+
+                        // request-response
+                        if let Some(rr_ev) = as_rr_event(event) {
+                            use request_response::{Event, Message};
+
+                            match rr_ev {
+                                Event::Message { peer, message } => match message {
+                                    Message::Request { request, channel, .. } => {
+                                        // handle requests off the swarm loop
+                                        let db2 = db.clone();
+                                        let req2 = request;
+
+                                        let resp = tokio::task::spawn_blocking(move || {
+                                            handle_request_blocking(&db2, req2)
+                                        })
+                                        .await
+                                        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?;
+
+                                        let resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() });
+                                        let _ = swarm.behaviour_mut().rr.send_response(channel, resp);
+                                    }
+
+                                    Message::Response { request_id: rid, response } => {
+                                        match response {
+                                            SyncResponse::Tip { hash, height, chainwork } => {
+                                                peer_heights.insert(peer, height);
+                                                peer_work.insert(peer, chainwork);
+
+                                                // choose best by chainwork
+                                                let best = choose_best_sync_peer(&connected, &peer_work);
+                                                if best.is_some() && sync_peer != best {
+                                                    sync_peer = best;
+                                                } else if sync_peer.is_none() {
+                                                    sync_peer = Some(peer);
+                                                }
+
+                                                // Applied (UTXO) tip/work.
+                                                let (applied_tip, applied_h, applied_w) = local_tip_and_work(&db);
+
+                                                // Use best header work once we've indexed headers (headers-first sync).
+                                                let local_w = if best_hdr_work > 0 { best_hdr_work } else { applied_w };
+                                                let local_h = if best_hdr_work > 0 { best_hdr_height } else { applied_h };
+                                                let locator_tip = if best_hdr_tip != [0u8; 32] { best_hdr_tip } else { applied_tip };
+
+                                                // If peer has more WORK, request headers using LOCATOR (built from best header tip, not applied tip).
+                                                if chainwork > local_w && sync_peer == Some(peer) {
+                                                    println!(
+                                                        "[sync] peer tip {} height {} work {} (local height {} work {})",
+                                                        hex32(&hash), height, chainwork, local_h, local_w
+                                                    );
+
+                                                    let locator = build_locator(&db, &locator_tip);
+                                                    let rid2 = swarm.behaviour_mut().rr.send_request(
+                                                        &peer,
+                                                        SyncRequest::GetHeadersByLocator { locator, max: MAX_HEADERS_PER_SYNC }
+                                                    );
+                                                    println!("[sync] requested headers by locator ({rid2:?})");
+                                                }
+                                            }
+
+                                            SyncResponse::Headers { headers } => {
+                                                if !headers.is_empty() {
+                                                    println!("[sync] received {} headers", headers.len());
+                                                }
+
+                                                // only accept from sync_peer to avoid races
+                                                if sync_peer.is_some() && sync_peer != Some(peer) {
+                                                    // ignore racing peers
+                                                } else {
+                                                    if sync_peer.is_none() {
+                                                        sync_peer = Some(peer);
+                                                    }
+
+                                                    for (hdr, h, _height, _work) in headers {
+                                                        if !accept_header_universe_pow(&cfg, &hdr, &h) {
+                                                            continue;
+                                                        }
+
+                                                        // mark provider so block fetch is targeted
+                                                        providers.entry(h).or_insert(peer);
+
+                                                        // ---- HEADER INDEX WRITE (locked) ----
+                                                        let idx_res = {
+                                                            let _g = chain_lock.lock();
+                                                            if hdr.prev == [0u8;32] {
+                                                                index_header(&db, &hdr, None)
+                                                            } else {
+                                                                let parent = get_hidx(&db, &hdr.prev)?;
+                                                                let Some(p) = parent else { continue; };
+                                                                index_header(&db, &hdr, Some(&p))
+                                                            }
+                                                        };
+
+                                                        if let Err(e) = idx_res {
+                                                            println!("[sync] reject header {}: {}", hex32(&h), e);
+                                                            continue;
+                                                        }
+
+                                                        if let Ok(Some(hi2)) = get_hidx(&db, &h) {
+                                                            if hi2.chainwork > best_hdr_work {
+                                                                best_hdr_tip = h;
+                                                                best_hdr_height = hi2.height;
+                                                                best_hdr_work = hi2.chainwork;
+                                                            }
+                                                        }
+
+                                                        if db.blocks.get(k_block(&h))?.is_none()
+                                                            && !inflight.contains_key(&h)
+                                                            && want_blocks.len() < MAX_WANT_QUEUE
+                                                        {
+                                                            want_blocks.push_back(h);
+                                                        }
+                                                    }
+
+                                                    let _ = pump_blocks(
+                                                        &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                                                        &db, &mut want_blocks, &mut inflight
+                                                    );
+                                                }
+                                            }
+
+                                            SyncResponse::Block { block } => {
+                                                let bh = header_hash(&block.header);
+
+                                                if let Some((rid2, _t0, _asked_peer)) = inflight.remove(&bh) {
+                                                    rid_to_hash.remove(&rid2);
+                                                }
+
+                                                if !accept_header_universe_pow(&cfg, &block.header, &bh) {
+                                                    continue;
+                                                }
+
+                                                // Persist + index under lock, but DO NOT apply state here.
+                                                {
+                                                    let _g = chain_lock.lock();
+
+                                                    if db.blocks.get(k_block(&bh))?.is_none() {
+                                                        db.blocks.insert(k_block(&bh), bincode::serialize(&block)?)?;
+                                                    }
+
+                                                    // Index header if parent is known; otherwise keep pending
+                                                    let idx_res = if block.header.prev == [0u8; 32] {
+                                                        index_header(&db, &block.header, None)
+                                                    } else if let Some(p) = get_hidx(&db, &block.header.prev)? {
+                                                        index_header(&db, &block.header, Some(&p))
+                                                    } else {
+                                                        pending_apply.insert(bh, block);
+                                                        let _ = pump_blocks(
+                                                            &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                                                            &db, &mut want_blocks, &mut inflight
+                                                        );
+                                                        continue;
+                                                    };
+
+                                                    if let Err(e) = idx_res {
+                                                        println!("[sync] reject block header {}: {}", hex32(&bh), e);
+                                                        continue;
+                                                    }
+
+                                                    if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
+                                                        if hi2.chainwork > best_hdr_work {
+                                                            best_hdr_tip = bh;
+                                                            best_hdr_height = hi2.height;
+                                                            best_hdr_work = hi2.chainwork;
+                                                        }
+                                                    }
+                                                }
+
+                                                pending_apply.insert(bh, block);
+                                                try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
+
+                                                let _ = pump_blocks(
+                                                    &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                                                    &db, &mut want_blocks, &mut inflight
+                                                );
+                                            }
+
+                                            SyncResponse::Ack => {}
+
+                                            SyncResponse::Err { msg } => {
+                                                println!("[sync] error response from {peer}: {msg}");
+
+                                                if msg.contains("unknown block") {
+                                                    if let Some(h) = rid_to_hash.remove(&rid) {
+                                                        inflight.remove(&h);
+
+                                                        bad_providers.entry(h).or_default().insert(peer);
+
+                                                        if providers.get(&h) == Some(&peer) {
+                                                            providers.remove(&h);
+                                                        }
+
+                                                        if want_blocks.len() < MAX_WANT_QUEUE {
+                                                            want_blocks.push_back(h);
+                                                        }
+                                                    }
+                                                }
+
+                                                let _ = pump_blocks(
+                                                    &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                                                    &db, &mut want_blocks, &mut inflight
+                                                );
+                                            }
+                                        }
+
+                                        let _ = pump_blocks(
+                                            &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
+                                            &db, &mut want_blocks, &mut inflight
+                                        );
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+// ----------------- server side request handler (BLOCKING) -----------------
+
+fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse> {
+    match req {
+        SyncRequest::GetTip => {
+            let tip = get_tip(db)?.unwrap_or([0u8; 32]);
+
+            let (height, chainwork) = if tip == [0u8; 32] {
+                (0u64, 0u128)
+            } else if let Some(hi) = get_hidx(db, &tip)? {
+                (hi.height, hi.chainwork)
+            } else {
+                (0u64, 0u128)
+            };
+
+            Ok(SyncResponse::Tip {
+                hash: tip,
+                height,
+                chainwork,
+            })
+        }
+
+        SyncRequest::GetHeaders { from_height, max } => {
+            let tip = get_tip(db)?.unwrap_or([0u8; 32]);
+            if tip == [0u8; 32] {
+                return Ok(SyncResponse::Headers { headers: vec![] });
+            }
+
+            let mut out: Vec<(BlockHeader, Hash32, u64, u128)> = vec![];
+            let mut cur = tip;
+
+            while cur != [0u8; 32] {
+                let hi = get_hidx(db, &cur)?
+                    .ok_or_else(|| anyhow::anyhow!("missing idx for {}", hex32(&cur)))?;
+
+                if hi.height < from_height {
+                    break;
+                }
+
+                let Some(bv) = db.blocks.get(k_block(&cur))? else {
+                    break;
+                };
+                let blk: Block = bincode::deserialize(&bv)?;
+                out.push((blk.header.clone(), cur, hi.height, hi.chainwork));
+
+                if out.len() as u64 >= max {
+                    break;
+                }
+
+                cur = hi.parent;
+            }
+
+            out.reverse();
+            Ok(SyncResponse::Headers { headers: out })
+        }
+
+        SyncRequest::GetHeadersByLocator { locator, max } => {
+            let tip = get_tip(db)?.unwrap_or([0u8; 32]);
+            if tip == [0u8; 32] {
+                return Ok(SyncResponse::Headers { headers: vec![] });
+            }
+
+            // Find first locator hash we know
+            let mut anchor_height: Option<u64> = None;
+            for h in locator {
+                if h == [0u8; 32] {
+                    break;
+                }
+                if let Ok(Some(hi)) = get_hidx(db, &h) {
+                    anchor_height = Some(hi.height);
+                    break;
+                }
+            }
+
+            let Some(anchor_h) = anchor_height else {
+                return Ok(SyncResponse::Headers { headers: vec![] });
+            };
+
+            let mut out: Vec<(BlockHeader, Hash32, u64, u128)> = vec![];
+            let mut cur = tip;
+
+            while cur != [0u8; 32] {
+                let hi = get_hidx(db, &cur)?
+                    .ok_or_else(|| anyhow::anyhow!("missing idx for {}", hex32(&cur)))?;
+
+                if hi.height <= anchor_h {
+                    break;
+                }
+
+                let Some(bv) = db.blocks.get(k_block(&cur))? else {
+                    break;
+                };
+                let blk: Block = bincode::deserialize(&bv)?;
+                out.push((blk.header.clone(), cur, hi.height, hi.chainwork));
+
+                if out.len() as u64 >= max {
+                    break;
+                }
+
+                cur = hi.parent;
+            }
+
+            out.reverse();
+            Ok(SyncResponse::Headers { headers: out })
+        }
+
+        SyncRequest::GetBlock { hash } => {
+            let Some(v) = db.blocks.get(k_block(&hash))? else {
+                bail!("unknown block");
+            };
+            let blk: Block = bincode::deserialize(&v)?;
+            Ok(SyncResponse::Block { block: blk })
+        }
+
+        SyncRequest::SubmitTx { tx: _tx } => Ok(SyncResponse::Ack),
+    }
+}

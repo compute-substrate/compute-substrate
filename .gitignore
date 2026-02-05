@@ -1,0 +1,29 @@
+# Rust
+/target
+**/*.rs.bk
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode
+.idea
+
+# Logs
+*.log
+
+# Node (if any)
+node_modules
+
+# Databases / chain state
+cs.db
+*.db
+*.sled
+*.bin
+genesis.bin
+
+# Secrets
+.env
+*.key
+*.pem

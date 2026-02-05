@@ -1,43 +1,72 @@
+// src/chain/genesis.rs
 use anyhow::Result;
-use crate::types::{Block, BlockHeader};
-use crate::chain::mine::coinbase;
-use crate::chain::index::{header_hash, index_header};
-use crate::state::db::{Stores, get_tip, set_tip, k_block};
-use crate::state::utxo::validate_and_apply_block;
-use crate::state::app::current_epoch;
 use std::sync::Arc;
 
-fn merkle_root(txs: &[crate::types::Transaction]) -> crate::types::Hash32 {
-    let mut bytes = vec![];
-    for tx in txs {
-        bytes.extend_from_slice(&crate::crypto::txid(tx));
+use crate::chain::index::{header_hash, index_header};
+use crate::chain::mine::coinbase;
+use crate::chain::pow::pow_ok;
+use crate::params::{INITIAL_BITS, INITIAL_REWARD};
+use crate::state::app::current_epoch;
+use crate::state::db::{get_tip, k_block, set_tip, Stores};
+use crate::state::utxo::validate_and_apply_block;
+use crate::types::{Block, BlockHeader};
+
+/// Bitcoin-ish merkle root from txids.
+/// - leaves are txid bytes
+/// - internal nodes are sha256d(left || right), duplicating last if odd
+fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
+    if txids.is_empty() {
+        return [0u8; 32];
     }
-    crate::crypto::sha256d(&bytes)
+    let mut layer: Vec<[u8; 32]> = txids.to_vec();
+    while layer.len() > 1 {
+        let mut next: Vec<[u8; 32]> = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut i = 0usize;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() {
+                layer[i + 1]
+            } else {
+                layer[i]
+            };
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&left);
+            buf[32..].copy_from_slice(&right);
+            next.push(crate::crypto::sha256d(&buf));
+            i += 2;
+        }
+        layer = next;
+    }
+    layer[0]
 }
 
-fn target_ok(hash: &crate::types::Hash32, _bits: u32) -> bool {
-    // must match miner’s target_ok for consistency
-    hash[0] == 0
+fn merkle_root(txs: &[crate::types::Transaction]) -> crate::types::Hash32 {
+    let mut ids: Vec<[u8; 32]> = Vec::with_capacity(txs.len());
+    for tx in txs {
+        ids.push(crate::crypto::txid(tx));
+    }
+    merkle_root_txids(&ids)
 }
 
-pub fn make_genesis_block(burn_addr20: [u8;20]) -> Result<Block> {
-    let cb = coinbase(burn_addr20, crate::params::BLOCK_REWARD);
+pub fn make_genesis_block(burn_addr20: [u8; 20]) -> Result<Block> {
+    // height=0 for genesis coinbase
+    let cb = coinbase(burn_addr20, INITIAL_REWARD, 0);
     let txs = vec![cb];
 
     let merkle = merkle_root(&txs);
 
     let mut hdr = BlockHeader {
         version: 1,
-        prev: [0u8;32],
+        prev: [0u8; 32],
         merkle,
-        time: 1700000000, // fixed timestamp
-        bits: crate::params::INITIAL_BITS,
+        time: 1700000000, // fixed timestamp for determinism
+        bits: INITIAL_BITS,
         nonce: 0,
     };
 
     loop {
         let h = header_hash(&hdr);
-        if target_ok(&h, hdr.bits) {
+        if pow_ok(&h, hdr.bits) {
             return Ok(Block { header: hdr, txs });
         }
         hdr.nonce = hdr.nonce.wrapping_add(1);
@@ -53,14 +82,17 @@ pub fn ensure_genesis(db: Arc<Stores>, genesis: Block) -> Result<()> {
     let gh = header_hash(&genesis.header);
 
     // store raw block
-    db.blocks.insert(k_block(&gh), bincode::serialize(&genesis)?)?;
+    db.blocks.insert(
+        k_block(&gh),
+        crate::codec::consensus_bincode().serialize(&genesis)?,
+    )?;
 
-    // index header
+    // index header (also enforces bits/PoW rules)
     let _ = index_header(&db, &genesis.header, None)?;
 
     // apply state
     let epoch = current_epoch(0);
-    validate_and_apply_block(&db, &genesis, epoch)?;
+    validate_and_apply_block(&db, &genesis, epoch, 0)?;
     set_tip(&db, &gh)?;
     Ok(())
 }

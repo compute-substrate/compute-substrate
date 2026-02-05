@@ -1,0 +1,36 @@
+[0;1;34m# ]8;;file://ubuntu-4gb-hel1-4/etc/systemd/system/csd-bootnode.service/etc/systemd/system/csd-bootnode.service]8;;[0m
+[0;1;36m[Unit][0m
+Description=Compute Substrate Bootnode (csd)
+After=network-online.target
+Wants=network-online.target
+[0;1;38;5;245m[0m
+[0;1;36m[Service][0m
+Type=simple
+User=root
+Group=root
+[0;1;38;5;245m[0m
+WorkingDirectory=/root/compute-substrate
+ExecStart=/root/compute-substrate/target/release/csd node \
+  --datadir /var/lib/csd/boot1 \
+  --rpc 0.0.0.0:8789 \
+  --genesis /root/compute-substrate/genesis.bin \
+  --p2p-listen /ip4/0.0.0.0/tcp/17999 \
+  --bootnodes ""
+Restart=always
+RestartSec=2
+[0;1;38;5;245m[0m
+[0;1;38;5;245m# Hardening (safe defaults)[0m
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+[0;1;38;5;245m#ProtectHome=true[0m
+ReadWritePaths=/var/lib/csd
+[0;1;38;5;245m# If genesis/bin needs read access and you run as csd user:[0m
+ReadOnlyPaths=/root/compute-substrate
+[0;1;38;5;245m[0m
+[0;1;38;5;245m# Logging[0m
+StandardOutput=journal
+StandardError=journal
+[0;1;38;5;245m[0m
+[0;1;36m[Install][0m
+WantedBy=multi-user.target

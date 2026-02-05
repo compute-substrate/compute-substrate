@@ -576,12 +576,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "crunchy"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,15 +599,20 @@ dependencies = [
  "futures",
  "hex",
  "libp2p",
+ "num-bigint",
+ "num-traits",
+ "parking_lot 0.12.5",
  "rand 0.8.5",
  "ripemd",
  "secp256k1",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2",
  "sled",
  "thiserror 1.0.69",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -1537,7 +1536,6 @@ dependencies = [
  "libp2p-dns",
  "libp2p-gossipsub",
  "libp2p-identity",
- "libp2p-kad",
  "libp2p-mdns",
  "libp2p-metrics",
  "libp2p-noise",
@@ -1671,35 +1669,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libp2p-kad"
-version = "0.46.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ced237d0bd84bbebb7c2cad4c073160dacb4fe40534963c32ed6d4c6bb7702a3"
-dependencies = [
- "arrayvec",
- "asynchronous-codec",
- "bytes",
- "either",
- "fnv",
- "futures",
- "futures-bounded",
- "futures-timer",
- "libp2p-core",
- "libp2p-identity",
- "libp2p-swarm",
- "quick-protobuf",
- "quick-protobuf-codec",
- "rand 0.8.5",
- "sha2",
- "smallvec",
- "thiserror 1.0.69",
- "tracing",
- "uint",
- "void",
- "web-time",
-]
-
-[[package]]
 name = "libp2p-mdns"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1730,7 +1699,6 @@ dependencies = [
  "libp2p-core",
  "libp2p-gossipsub",
  "libp2p-identity",
- "libp2p-kad",
  "libp2p-swarm",
  "pin-project",
  "prometheus-client",
@@ -2861,6 +2829,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3313,18 +3291,6 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
-
-[[package]]
-name = "uint"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76f64bba2c53b04fcab63c01a7d7427eadc821e3bc48c34dc9ba29c501164b52"
-dependencies = [
- "byteorder",
- "crunchy",
- "hex",
- "static_assertions",
-]
 
 [[package]]
 name = "unicode-ident"

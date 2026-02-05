@@ -1,9 +1,13 @@
-use anyhow::Result;
-use serde::{Serialize, Deserialize};
+// src/chain/index.rs
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 
-use crate::types::{Hash32, BlockHeader};
+use crate::chain::pow::{bits_within_pow_limit, expected_bits, pow_ok, work_from_bits};
+use crate::chain::time::median_time_past;
 use crate::crypto::sha256d;
-use crate::state::db::{Stores, k_hdr};
+use crate::params::{GENESIS_HASH, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
+use crate::state::db::{k_hdr, Stores};
+use crate::types::{BlockHeader, Hash32};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HeaderIndex {
@@ -15,43 +19,141 @@ pub struct HeaderIndex {
     pub time: u64,
 }
 
+/// Canonical, consensus-stable header hash.
+/// Avoid bincode/serde to prevent accidental consensus splits.
+///
+/// Layout (all fixed):
+/// - version: u32 LE
+/// - prev: 32 bytes
+/// - merkle: 32 bytes
+/// - time: u64 LE
+/// - bits: u32 LE
+/// - nonce: u64 LE
 pub fn header_hash(h: &BlockHeader) -> Hash32 {
-    let bytes = bincode::serialize(h).expect("serialize header");
-    sha256d(&bytes)
-}
+    // 4 + 32 + 32 + 8 + 4 + 8 = 88 bytes
+    let mut buf = Vec::with_capacity(4 + 32 + 32 + 8 + 4 + 8);
 
-/// Very simple "work" function for v0:
-/// higher difficulty (lower target) should mean more work.
-/// This is NOT Bitcoin-accurate; it is deterministic and monotonic for our bits format.
-fn work_from_bits(bits: u32) -> u128 {
-    // bits format here is arbitrary; we just make work increase as bits decreases.
-    // Avoid division by zero:
-    let x = (bits as u128).max(1);
-    (1u128 << 64) / x
+    buf.extend_from_slice(&h.version.to_le_bytes());
+    buf.extend_from_slice(&h.prev);
+    buf.extend_from_slice(&h.merkle);
+    buf.extend_from_slice(&h.time.to_le_bytes());
+    buf.extend_from_slice(&h.bits.to_le_bytes());
+    buf.extend_from_slice(&h.nonce.to_le_bytes());
+
+    sha256d(&buf)
 }
 
 pub fn get_hidx(db: &Stores, hash: &Hash32) -> Result<Option<HeaderIndex>> {
     if let Some(v) = db.hdr.get(k_hdr(hash))? {
-        Ok(Some(bincode::deserialize(&v)?))
+        Ok(Some(
+            crate::codec::consensus_bincode().deserialize::<HeaderIndex>(&v)?,
+        ))
     } else {
         Ok(None)
     }
 }
 
 pub fn put_hidx(db: &Stores, hi: &HeaderIndex) -> Result<()> {
-    db.hdr.insert(k_hdr(&hi.hash), bincode::serialize(hi)?)?;
+    db.hdr.insert(
+        k_hdr(&hi.hash),
+        crate::codec::consensus_bincode().serialize(hi)?,
+    )?;
     Ok(())
 }
 
-/// Insert a header index entry (requires parent known unless height==0 genesis).
-pub fn index_header(db: &Stores, hdr: &BlockHeader, expected_parent: Option<&HeaderIndex>) -> Result<HeaderIndex> {
+/// Insert a header index entry (CONSENSUS CRITICAL)
+pub fn index_header(
+    db: &Stores,
+    hdr: &BlockHeader,
+    expected_parent: Option<&HeaderIndex>,
+) -> Result<HeaderIndex> {
     let hash = header_hash(hdr);
 
-    let (height, chainwork) = if hdr.prev == [0u8; 32] {
-        (0u64, work_from_bits(hdr.bits))
+    // If already indexed, return it (idempotent; helps sync races).
+    if let Some(existing) = get_hidx(db, &hash)? {
+        return Ok(existing);
+    }
+
+    // ---- Genesis identity ----
+    if hdr.prev == [0u8; 32] {
+        if hash != GENESIS_HASH {
+            bail!("foreign genesis header");
+        }
+        if expected_parent.is_some() {
+            bail!("genesis must not have parent");
+        }
+    }
+
+    // ---- Parent / height ----
+    let (height, parent_hi) = if hdr.prev == [0u8; 32] {
+        (0u64, None)
     } else {
-        let p = expected_parent.expect("parent must be provided");
-        (p.height + 1, p.chainwork + work_from_bits(hdr.bits))
+        let p = expected_parent.ok_or_else(|| anyhow::anyhow!("parent missing"))?;
+        if p.hash != hdr.prev {
+            bail!("parent mismatch");
+        }
+        (p.height + 1, Some(p))
+    };
+
+    // ----------------- time guardrails (CONSENSUS, OBJECTIVE) -----------------
+    //
+    // We intentionally DO NOT use SystemTime::now() here, because that makes
+    // consensus depend on wall-clock skew across nodes.
+    //
+    // Rules (non-genesis):
+    // 1) MIN_BLOCK_SPACING relative to parent.time
+    // 2) MTP: time must be > median_time_past(parent_window)
+    // 3) "future drift" bounded relative to chain history (mtp + MAX_FUTURE_DRIFT_SECS)
+    //
+    // This keeps validity purely a function of chain data.
+    if let Some(p) = parent_hi {
+        let min_allowed = p.time.saturating_add(MIN_BLOCK_SPACING_SECS);
+        if hdr.time < min_allowed {
+            bail!(
+                "time too early: {} < parent+min_spacing({})",
+                hdr.time,
+                min_allowed
+            );
+        }
+
+        let mtp = median_time_past(db, &p.hash)?;
+        if hdr.time <= mtp {
+            bail!("time <= MTP: {} <= {}", hdr.time, mtp);
+        }
+
+        // Objective future bound relative to MTP (not wallclock)
+        let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+        if hdr.time > max_allowed {
+            bail!(
+                "time too far ahead of chain history: {} > mtp+drift({})",
+                hdr.time,
+                max_allowed
+            );
+        }
+    }
+    // ------------------------------------------------------------------------
+
+    // ---- Difficulty rules ----
+    if !bits_within_pow_limit(hdr.bits) {
+        bail!("bits beyond pow limit");
+    }
+
+    let want_bits = expected_bits(db, height, parent_hi)?;
+    if hdr.bits != want_bits {
+        bail!("unexpected bits: got {} want {}", hdr.bits, want_bits);
+    }
+
+    // ---- PoW ----
+    if !pow_ok(&hash, hdr.bits) {
+        bail!("invalid PoW");
+    }
+
+    // ---- Chainwork ----
+    let self_work = work_from_bits(hdr.bits)?;
+    let chainwork = if let Some(p) = parent_hi {
+        p.chainwork.saturating_add(self_work)
+    } else {
+        self_work
     };
 
     let hi = HeaderIndex {
