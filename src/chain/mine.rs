@@ -286,7 +286,9 @@ pub fn mine_one(
             n_since_check = 0;
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
-            if cur_tip != hdr.prev {
+
+if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
+
                 parent_tip = cur_tip;
                 parent_hi_opt = if parent_tip != [0u8; 32] {
                     get_hidx(db, &parent_tip)?
