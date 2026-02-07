@@ -21,17 +21,16 @@ pub struct HeaderIndex {
 
 /// Canonical, consensus-stable header hash.
 /// Avoid bincode/serde to prevent accidental consensus splits.
-///
 /// Layout (all fixed):
 /// - version: u32 LE
 /// - prev: 32 bytes
 /// - merkle: 32 bytes
 /// - time: u64 LE
 /// - bits: u32 LE
-/// - nonce: u64 LE
+/// - nonce: u32 LE
 pub fn header_hash(h: &BlockHeader) -> Hash32 {
-    // 4 + 32 + 32 + 8 + 4 + 8 = 88 bytes
-    let mut buf = Vec::with_capacity(4 + 32 + 32 + 8 + 4 + 8);
+    // 4 + 32 + 32 + 8 + 4 + 4 = 84 bytes
+    let mut buf = Vec::with_capacity(4 + 32 + 32 + 8 + 4 + 4);
 
     buf.extend_from_slice(&h.version.to_le_bytes());
     buf.extend_from_slice(&h.prev);
