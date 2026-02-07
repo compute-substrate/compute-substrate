@@ -193,12 +193,11 @@ pub fn get_tip(db: &Stores) -> Result<Option<Hash32>> {
 /// Mainnet note:
 /// - flushing on every call is too expensive (reorg applies call set_tip many times).
 /// - call `db.flush_meta()` or `db.flush_all()` at explicit boundaries.
-pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
+pub fn set_tip(db: &Stores, tip: &Hash32) -> 
+Result<()> {
+println!("[tip] set_tip -> 0x{}", hex::encode(new_tip));
     db.meta.insert(k_meta_tip(), tip)?;
     Ok(())
-
-println!("[tip] set_tip -> 0x{}", hex::encode(new_tip));
-
 }
 
 // -----------------------------------------------------------------------------
