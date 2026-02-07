@@ -196,6 +196,9 @@ pub fn get_tip(db: &Stores) -> Result<Option<Hash32>> {
 pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
     db.meta.insert(k_meta_tip(), tip)?;
     Ok(())
+
+println!("[tip] set_tip -> 0x{}", hex::encode(new_tip));
+
 }
 
 // -----------------------------------------------------------------------------
