@@ -312,6 +312,16 @@ pub fn mine_one(
             }
         }
 
+if hdr.nonce % 1_000_000 == 0 {
+    use crate::chain::pow::bits_to_target_bytes;
+    println!(
+        "[mine] progress: nonce={} hash=0x{} target=0x{}",
+        hdr.nonce,
+        hex::encode(h),
+        hex::encode(bits_to_target_bytes(hdr.bits))
+    );
+}
+
         let h = header_hash(&hdr);
         if pow_ok(&h, hdr.bits) {
             let _g = chain_lock.lock();
