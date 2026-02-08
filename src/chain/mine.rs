@@ -16,6 +16,8 @@ use crate::types::{
     AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut,
 };
 
+use std::time::{Duration, Instant};
+
 /// Mainnet-hardening: refuse to mine timestamps far in the future.
 /// (Peers should also reject these blocks in consensus validation.)
 const MAX_FUTURE_DRIFT_SECS: u64 = 2 * 60 * 60; // 2 hours
@@ -33,11 +35,7 @@ fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
         let mut i = 0usize;
         while i < layer.len() {
             let left = layer[i];
-            let right = if i + 1 < layer.len() {
-                layer[i + 1]
-            } else {
-                layer[i]
-            };
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
             let mut buf = [0u8; 64];
             buf[..32].copy_from_slice(&left);
             buf[32..].copy_from_slice(&right);
@@ -67,16 +65,10 @@ pub fn coinbase(miner_h160: Hash20, value: u64, height: u64) -> Transaction {
     Transaction {
         version: 1,
         inputs: vec![TxIn {
-            prevout: OutPoint {
-                txid: [0u8; 32],
-                vout: u32::MAX,
-            },
+            prevout: OutPoint { txid: [0u8; 32], vout: u32::MAX },
             script_sig,
         }],
-        outputs: vec![TxOut {
-            value,
-            script_pubkey: miner_h160, // Hash20 (not Vec)
-        }],
+        outputs: vec![TxOut { value, script_pubkey: miner_h160 }],
         locktime,
         app: AppPayload::None,
     }
@@ -95,9 +87,7 @@ fn sum_inputs_if_present(db: &Stores, tx: &Transaction) -> Result<(bool, u64)> {
             None => return Ok((false, 0)),
         };
 
-        in_sum = in_sum
-            .checked_add(prev.value)
-            .ok_or_else(|| anyhow!("overflow in_sum"))?;
+        in_sum = in_sum.checked_add(prev.value).ok_or_else(|| anyhow!("overflow in_sum"))?;
     }
 
     Ok((true, in_sum))
@@ -106,9 +96,7 @@ fn sum_inputs_if_present(db: &Stores, tx: &Transaction) -> Result<(bool, u64)> {
 fn sum_outputs(tx: &Transaction) -> Result<u64> {
     let mut out_sum: u64 = 0;
     for out in &tx.outputs {
-        out_sum = out_sum
-            .checked_add(out.value)
-            .ok_or_else(|| anyhow!("overflow out_sum"))?;
+        out_sum = out_sum.checked_add(out.value).ok_or_else(|| anyhow!("overflow out_sum"))?;
     }
     Ok(out_sum)
 }
@@ -129,11 +117,6 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
 }
 
 /// Build a fresh block template from the current tip + current UTXO set.
-///
-/// Key behavior:
-/// - Only includes txs that are valid AND connectable *right now*
-/// - Skips anything that fails validate_tx_for_mempool or has missing inputs
-/// - Sorts by fee (desc) so miners converge under load
 fn build_template(
     db: &Stores,
     mempool: &Mempool,
@@ -144,9 +127,7 @@ fn build_template(
     let reward = block_reward(height);
 
     const CANDIDATE_MULT: usize = 8;
-    let want_candidates = max_mempool_txs
-        .saturating_mul(CANDIDATE_MULT)
-        .max(max_mempool_txs);
+    let want_candidates = max_mempool_txs.saturating_mul(CANDIDATE_MULT).max(max_mempool_txs);
 
     let sampled = mempool.sample(want_candidates);
 
@@ -178,10 +159,7 @@ fn build_template(
     let mut included_ids: Vec<Hash32> = Vec::with_capacity(max_mempool_txs);
 
     for (fee, id, tx) in candidates.into_iter().take(max_mempool_txs) {
-        total_fees = total_fees
-            .checked_add(fee)
-            .ok_or_else(|| anyhow!("fee overflow"))?;
-
+        total_fees = total_fees.checked_add(fee).ok_or_else(|| anyhow!("fee overflow"))?;
         included_ids.push(id);
         included.push(tx);
     }
@@ -195,9 +173,7 @@ fn build_template(
         total_fees
     );
 
-    let cb_value = reward
-        .checked_add(total_fees)
-        .ok_or_else(|| anyhow!("coinbase overflow"))?;
+    let cb_value = reward.checked_add(total_fees).ok_or_else(|| anyhow!("coinbase overflow"))?;
     let cb = coinbase(miner_h160, cb_value, height);
 
     let mut final_txs: Vec<Transaction> = Vec::with_capacity(1 + included.len());
@@ -209,39 +185,24 @@ fn build_template(
 
 fn now_unix() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// Choose a block time respecting:
-/// - MIN_BLOCK_SPACING_SECS
-/// - median-time-past (strictly greater)
-/// - not too far in the future
 fn choose_block_time(db: &Stores, tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
     let now = now_unix();
 
     let parent_time = parent_hi.map(|h| h.time).unwrap_or(0);
     let min_spacing_time = parent_time.saturating_add(MIN_BLOCK_SPACING_SECS);
 
-    let mtp = if *tip != [0u8; 32] {
-        median_time_past(db, tip).unwrap_or(0)
-    } else {
-        0
-    };
-
+    let mtp = if *tip != [0u8; 32] { median_time_past(db, tip).unwrap_or(0) } else { 0 };
     let mtp_time = mtp.saturating_add(1);
-    let t = now.max(min_spacing_time).max(mtp_time);
 
+    let t = now.max(min_spacing_time).max(mtp_time);
     let max_future = now.saturating_add(MAX_FUTURE_DRIFT_SECS);
     t.min(max_future)
 }
 
 /// Mine exactly one block.
-///
-/// CRITICAL: Do NOT apply blocks here.
-/// Only persist + index, then call maybe_reorg_to() (single source of truth for apply/undo/tip).
 pub fn mine_one(
     db: &Stores,
     mempool: &Mempool,
@@ -249,15 +210,11 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
+    println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
     const TIP_CHECK_EVERY_NONCES: u64 = 4096;
 
     let mut parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
-    let mut parent_hi_opt = if parent_tip != [0u8; 32] {
-        get_hidx(db, &parent_tip)?
-    } else {
-        None
-    };
+    let mut parent_hi_opt = if parent_tip != [0u8; 32] { get_hidx(db, &parent_tip)? } else { None };
 
     let mut height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
     let mut _epoch = current_epoch(height);
@@ -274,46 +231,66 @@ println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
         nonce: 0u32,
     };
 
-    // --- 1s hashrate / nonce heartbeat ---
-    let mut last_beat = std::time::Instant::now();
-    let mut interval_hashes: u64 = 0;
+    println!(
+        "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
+        height,
+        hex::encode(hdr.prev),
+        hdr.bits,
+        hdr.time
+    );
+
+    // Heartbeat counters
+    let mut hashes: u64 = 0;
+    let mut last_hb = Instant::now();
+    let mut last_tip_seen: Hash32 = hdr.prev;
 
     let mut n_since_check: u64 = 0;
 
     loop {
+        hashes = hashes.wrapping_add(1);
         n_since_check = n_since_check.wrapping_add(1);
-        interval_hashes = interval_hashes.wrapping_add(1);
 
-        // heartbeat every ~1s (independent of nonce modulus)
-        if last_beat.elapsed().as_secs() >= 1 {
+        // 1-second heartbeat: proves nonce is advancing + shows H/s
+        if last_hb.elapsed() >= Duration::from_secs(1) {
+            let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
             println!(
-                "[mine] h/s={} nonce={} prev=0x{} bits=0x{:08x}",
-                interval_hashes,
+                "[mine] hb: height={} nonce={} h/s={} tip=0x{} prev=0x{} bits=0x{:08x} time={}",
+                height,
                 hdr.nonce,
-                hex::encode(&hdr.prev[..4]),
-                hdr.bits
+                hashes,
+                hex::encode(cur_tip),
+                hex::encode(hdr.prev),
+                hdr.bits,
+                hdr.time
             );
-            interval_hashes = 0;
-            last_beat = std::time::Instant::now();
+            hashes = 0;
+            last_hb = Instant::now();
+
+            // If tip is bouncing, log it clearly
+            if cur_tip != last_tip_seen {
+                println!(
+                    "[mine] hb: tip changed: 0x{} -> 0x{}",
+                    hex::encode(last_tip_seen),
+                    hex::encode(cur_tip)
+                );
+                last_tip_seen = cur_tip;
+            }
         }
 
+        // periodic tip check (don’t thrash on [0;32])
         if n_since_check % TIP_CHECK_EVERY_NONCES == 0 {
             std::thread::yield_now();
-        }
-
-        if n_since_check >= TIP_CHECK_EVERY_NONCES {
-            n_since_check = 0;
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
+            if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
+                println!(
+                    "[mine] rebase: tip changed; old_prev=0x{} new_tip=0x{}",
+                    hex::encode(hdr.prev),
+                    hex::encode(cur_tip)
+                );
 
-            // IMPORTANT: rebuild ONLY when the tip hash actually differs
-            if cur_tip != hdr.prev {
                 parent_tip = cur_tip;
-                parent_hi_opt = if parent_tip != [0u8; 32] {
-                    get_hidx(db, &parent_tip)?
-                } else {
-                    None
-                };
+                parent_hi_opt = if parent_tip != [0u8; 32] { get_hidx(db, &parent_tip)? } else { None };
 
                 height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
                 _epoch = current_epoch(height);
@@ -330,6 +307,14 @@ println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
                     bits: expected_bits(db, height, parent_hi_opt.as_ref())?,
                     nonce: 0u32,
                 };
+
+                println!(
+                    "[mine] rebase: new height={} prev=0x{} bits=0x{:08x} time={}",
+                    height,
+                    hex::encode(hdr.prev),
+                    hdr.bits,
+                    hdr.time
+                );
             }
         }
 
@@ -340,13 +325,11 @@ println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if cur_tip != hdr.prev {
+                // someone beat us; continue mining on new tip
                 continue;
             }
 
-            let block = Block {
-                header: hdr.clone(),
-                txs: txs.clone(),
-            };
+            let block = Block { header: hdr.clone(), txs: txs.clone() };
 
             db.blocks.insert(
                 k_block(&h),
@@ -363,14 +346,29 @@ println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
             let tip_after = get_tip(db)?.unwrap_or([0u8; 32]);
             let accepted_as_tip = tip_after == h;
 
+            println!(
+                "[mine] FOUND: hash=0x{} accepted_as_tip={} tip_after=0x{}",
+                hex::encode(h),
+                accepted_as_tip,
+                hex::encode(tip_after)
+            );
+
             if accepted_as_tip {
                 for id in &included_ids {
                     mempool.remove(id);
                 }
             }
 
-            // Cheap safety sweep
-            let _ = mempool.prune(db);
+            // cheap safety sweep
+            let pruned = mempool.prune(db);
+            if pruned > 0 {
+                println!(
+                    "[mempool] pruned {} txs after mining (mempool_len={}, spent_outpoints={})",
+                    pruned,
+                    mempool.len(),
+                    mempool.spent_outpoints().len()
+                );
+            }
 
             return Ok(h);
         }
