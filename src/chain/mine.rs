@@ -8,19 +8,13 @@ use crate::chain::reorg::maybe_reorg_to;
 use crate::chain::time::median_time_past;
 use crate::crypto::{sha256d, txid};
 use crate::net::mempool::Mempool;
-use crate::params::{block_reward, MIN_BLOCK_SPACING_SECS};
+use crate::params::{block_reward, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
 use crate::state::app::current_epoch;
 use crate::state::db::{get_tip, get_utxo, k_block, Stores};
 use crate::state::utxo::validate_tx_for_mempool;
 use crate::types::{
     AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut,
 };
-
-use std::time::{Duration, Instant};
-
-/// Mainnet-hardening: refuse to mine timestamps far in the future.
-/// (Peers should also reject these blocks in consensus validation.)
-const MAX_FUTURE_DRIFT_SECS: u64 = 2 * 60 * 60; // 2 hours
 
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
@@ -65,10 +59,16 @@ pub fn coinbase(miner_h160: Hash20, value: u64, height: u64) -> Transaction {
     Transaction {
         version: 1,
         inputs: vec![TxIn {
-            prevout: OutPoint { txid: [0u8; 32], vout: u32::MAX },
+            prevout: OutPoint {
+                txid: [0u8; 32],
+                vout: u32::MAX,
+            },
             script_sig,
         }],
-        outputs: vec![TxOut { value, script_pubkey: miner_h160 }],
+        outputs: vec![TxOut {
+            value,
+            script_pubkey: miner_h160,
+        }],
         locktime,
         app: AppPayload::None,
     }
@@ -87,7 +87,9 @@ fn sum_inputs_if_present(db: &Stores, tx: &Transaction) -> Result<(bool, u64)> {
             None => return Ok((false, 0)),
         };
 
-        in_sum = in_sum.checked_add(prev.value).ok_or_else(|| anyhow!("overflow in_sum"))?;
+        in_sum = in_sum
+            .checked_add(prev.value)
+            .ok_or_else(|| anyhow!("overflow in_sum"))?;
     }
 
     Ok((true, in_sum))
@@ -96,7 +98,9 @@ fn sum_inputs_if_present(db: &Stores, tx: &Transaction) -> Result<(bool, u64)> {
 fn sum_outputs(tx: &Transaction) -> Result<u64> {
     let mut out_sum: u64 = 0;
     for out in &tx.outputs {
-        out_sum = out_sum.checked_add(out.value).ok_or_else(|| anyhow!("overflow out_sum"))?;
+        out_sum = out_sum
+            .checked_add(out.value)
+            .ok_or_else(|| anyhow!("overflow out_sum"))?;
     }
     Ok(out_sum)
 }
@@ -117,6 +121,11 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
 }
 
 /// Build a fresh block template from the current tip + current UTXO set.
+///
+/// Key behavior:
+/// - Only includes txs that are valid AND connectable *right now*
+/// - Skips anything that fails validate_tx_for_mempool or has missing inputs
+/// - Sorts by fee (desc) so miners converge under load
 fn build_template(
     db: &Stores,
     mempool: &Mempool,
@@ -127,7 +136,9 @@ fn build_template(
     let reward = block_reward(height);
 
     const CANDIDATE_MULT: usize = 8;
-    let want_candidates = max_mempool_txs.saturating_mul(CANDIDATE_MULT).max(max_mempool_txs);
+    let want_candidates = max_mempool_txs
+        .saturating_mul(CANDIDATE_MULT)
+        .max(max_mempool_txs);
 
     let sampled = mempool.sample(want_candidates);
 
@@ -159,7 +170,10 @@ fn build_template(
     let mut included_ids: Vec<Hash32> = Vec::with_capacity(max_mempool_txs);
 
     for (fee, id, tx) in candidates.into_iter().take(max_mempool_txs) {
-        total_fees = total_fees.checked_add(fee).ok_or_else(|| anyhow!("fee overflow"))?;
+        total_fees = total_fees
+            .checked_add(fee)
+            .ok_or_else(|| anyhow!("fee overflow"))?;
+
         included_ids.push(id);
         included.push(tx);
     }
@@ -173,7 +187,9 @@ fn build_template(
         total_fees
     );
 
-    let cb_value = reward.checked_add(total_fees).ok_or_else(|| anyhow!("coinbase overflow"))?;
+    let cb_value = reward
+        .checked_add(total_fees)
+        .ok_or_else(|| anyhow!("coinbase overflow"))?;
     let cb = coinbase(miner_h160, cb_value, height);
 
     let mut final_txs: Vec<Transaction> = Vec::with_capacity(1 + included.len());
@@ -183,26 +199,43 @@ fn build_template(
     Ok((final_txs, included_ids, total_fees))
 }
 
-fn now_unix() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
-}
+/// Choose a block time that *matches the objective consensus rules* in index_header:
+/// - time >= parent.time + MIN_BLOCK_SPACING_SECS
+/// - time > MTP(parent)
+/// - time <= MTP(parent) + MAX_FUTURE_DRIFT_SECS
+///
+/// IMPORTANT: do not use wall-clock time here, or you'll diverge from objective rules.
+fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
+    // Genesis mining case (should basically never happen here).
+    if *parent_tip == [0u8; 32] || parent_hi.is_none() {
+        return 0;
+    }
 
-fn choose_block_time(db: &Stores, tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
-    let now = now_unix();
+    let p = parent_hi.unwrap();
 
-    let parent_time = parent_hi.map(|h| h.time).unwrap_or(0);
-    let min_spacing_time = parent_time.saturating_add(MIN_BLOCK_SPACING_SECS);
+    let min_spacing = p.time.saturating_add(MIN_BLOCK_SPACING_SECS);
 
-    let mtp = if *tip != [0u8; 32] { median_time_past(db, tip).unwrap_or(0) } else { 0 };
+    let mtp = median_time_past(db, &p.hash).unwrap_or(p.time);
     let mtp_time = mtp.saturating_add(1);
 
-    let t = now.max(min_spacing_time).max(mtp_time);
-    let max_future = now.saturating_add(MAX_FUTURE_DRIFT_SECS);
-    t.min(max_future)
+    let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+
+    // pick the earliest valid time; keep deterministic
+    let t = min_spacing.max(mtp_time);
+
+    // Clamp into allowed window. If clamping would violate >MTP, just use mtp+1.
+    let t = t.min(max_allowed);
+    if t <= mtp {
+        mtp_time
+    } else {
+        t
+    }
 }
 
 /// Mine exactly one block.
+///
+/// CRITICAL: Do NOT apply blocks here.
+/// Only persist + index, then call maybe_reorg_to() (single source of truth for apply/undo/tip).
 pub fn mine_one(
     db: &Stores,
     mempool: &Mempool,
@@ -210,11 +243,14 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-    println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
     const TIP_CHECK_EVERY_NONCES: u64 = 4096;
 
     let mut parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
-    let mut parent_hi_opt = if parent_tip != [0u8; 32] { get_hidx(db, &parent_tip)? } else { None };
+    let mut parent_hi_opt = if parent_tip != [0u8; 32] {
+        get_hidx(db, &parent_tip)?
+    } else {
+        None
+    };
 
     let mut height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
     let mut _epoch = current_epoch(height);
@@ -231,6 +267,8 @@ pub fn mine_one(
         nonce: 0u32,
     };
 
+    let mut n_since_check: u64 = 0;
+
     println!(
         "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
         height,
@@ -239,58 +277,24 @@ pub fn mine_one(
         hdr.time
     );
 
-    // Heartbeat counters
-    let mut hashes: u64 = 0;
-    let mut last_hb = Instant::now();
-    let mut last_tip_seen: Hash32 = hdr.prev;
-
-    let mut n_since_check: u64 = 0;
-
     loop {
-        hashes = hashes.wrapping_add(1);
         n_since_check = n_since_check.wrapping_add(1);
 
-        // 1-second heartbeat: proves nonce is advancing + shows H/s
-        if last_hb.elapsed() >= Duration::from_secs(1) {
-            let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
-            println!(
-                "[mine] hb: height={} nonce={} h/s={} tip=0x{} prev=0x{} bits=0x{:08x} time={}",
-                height,
-                hdr.nonce,
-                hashes,
-                hex::encode(cur_tip),
-                hex::encode(hdr.prev),
-                hdr.bits,
-                hdr.time
-            );
-            hashes = 0;
-            last_hb = Instant::now();
-
-            // If tip is bouncing, log it clearly
-            if cur_tip != last_tip_seen {
-                println!(
-                    "[mine] hb: tip changed: 0x{} -> 0x{}",
-                    hex::encode(last_tip_seen),
-                    hex::encode(cur_tip)
-                );
-                last_tip_seen = cur_tip;
-            }
-        }
-
-        // periodic tip check (don’t thrash on [0;32])
         if n_since_check % TIP_CHECK_EVERY_NONCES == 0 {
             std::thread::yield_now();
+        }
+
+        if n_since_check >= TIP_CHECK_EVERY_NONCES {
+            n_since_check = 0;
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
-                println!(
-                    "[mine] rebase: tip changed; old_prev=0x{} new_tip=0x{}",
-                    hex::encode(hdr.prev),
-                    hex::encode(cur_tip)
-                );
-
                 parent_tip = cur_tip;
-                parent_hi_opt = if parent_tip != [0u8; 32] { get_hidx(db, &parent_tip)? } else { None };
+                parent_hi_opt = if parent_tip != [0u8; 32] {
+                    get_hidx(db, &parent_tip)?
+                } else {
+                    None
+                };
 
                 height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
                 _epoch = current_epoch(height);
@@ -309,7 +313,7 @@ pub fn mine_one(
                 };
 
                 println!(
-                    "[mine] rebase: new height={} prev=0x{} bits=0x{:08x} time={}",
+                    "[mine] rebase: height={} prev=0x{} bits=0x{:08x} time={}",
                     height,
                     hex::encode(hdr.prev),
                     hdr.bits,
@@ -325,11 +329,13 @@ pub fn mine_one(
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if cur_tip != hdr.prev {
-                // someone beat us; continue mining on new tip
                 continue;
             }
 
-            let block = Block { header: hdr.clone(), txs: txs.clone() };
+            let block = Block {
+                header: hdr.clone(),
+                txs: txs.clone(),
+            };
 
             db.blocks.insert(
                 k_block(&h),
@@ -346,20 +352,19 @@ pub fn mine_one(
             let tip_after = get_tip(db)?.unwrap_or([0u8; 32]);
             let accepted_as_tip = tip_after == h;
 
-            println!(
-                "[mine] FOUND: hash=0x{} accepted_as_tip={} tip_after=0x{}",
-                hex::encode(h),
-                accepted_as_tip,
-                hex::encode(tip_after)
-            );
-
             if accepted_as_tip {
                 for id in &included_ids {
                     mempool.remove(id);
                 }
+            } else {
+                println!(
+                    "[mine] block {} was not selected as tip (tip_after={}); keeping {} txs in mempool",
+                    hex::encode(h),
+                    hex::encode(tip_after),
+                    included_ids.len()
+                );
             }
 
-            // cheap safety sweep
             let pruned = mempool.prune(db);
             if pruned > 0 {
                 println!(
@@ -375,11 +380,23 @@ pub fn mine_one(
 
         hdr.nonce = hdr.nonce.wrapping_add(1);
 
-        // if nonce wrapped, bump time but keep it within future bound
+        // If nonce wrapped, bump time *within objective bounds* (no wall-clock).
         if hdr.nonce == 0 {
-            let now = now_unix();
-            let max_future = now.saturating_add(MAX_FUTURE_DRIFT_SECS);
-            hdr.time = hdr.time.max(now).min(max_future);
+            if let Some(p) = parent_hi_opt.as_ref() {
+                let mtp = median_time_past(db, &p.hash).unwrap_or(p.time);
+                let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+
+                // increment by 1, but clamp
+                hdr.time = hdr.time.saturating_add(1);
+                if hdr.time > max_allowed {
+                    hdr.time = max_allowed;
+                }
+                if hdr.time <= mtp {
+                    hdr.time = mtp.saturating_add(1);
+                }
+            } else {
+                hdr.time = hdr.time.saturating_add(1);
+            }
         }
     }
 }
