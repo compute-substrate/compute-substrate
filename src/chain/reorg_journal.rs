@@ -38,15 +38,26 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
     Ok(Some(j))
 }
 
+/// Persist the crash-recovery journal.
+/// MAINNET HARDENING:
+/// - Flush only the meta tree so a kill -9 never leaves a "stale" journal on disk.
 pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     let bytes = crate::codec::consensus_bincode()
         .serialize(j)
         .context("encode reorg journal")?;
+
     meta_put_bytes(db, k_reorg_in_progress(), &bytes)?;
+
+    // Critical durability boundary: meta is tiny, flushing is cheap.
+    db.meta.flush().context("flush meta after journal_write")?;
     Ok(())
 }
 
+/// Clear the journal after successful completion (or clean rollback).
 pub fn journal_clear(db: &Stores) -> Result<()> {
     meta_del(db, k_reorg_in_progress())?;
+
+    // Ensure journal deletion is durable too.
+    db.meta.flush().context("flush meta after journal_clear")?;
     Ok(())
 }
