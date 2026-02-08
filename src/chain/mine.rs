@@ -1,5 +1,6 @@
 // src/chain/mine.rs
 use anyhow::{anyhow, Result};
+use std::time::{Duration, Instant};
 
 use crate::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
 use crate::chain::lock::ChainLock;
@@ -33,11 +34,7 @@ fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
         let mut i = 0usize;
         while i < layer.len() {
             let left = layer[i];
-            let right = if i + 1 < layer.len() {
-                layer[i + 1]
-            } else {
-                layer[i]
-            };
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
             let mut buf = [0u8; 64];
             buf[..32].copy_from_slice(&left);
             buf[32..].copy_from_slice(&right);
@@ -273,6 +270,16 @@ pub fn mine_one(
         nonce: 0u32, // CONSENSUS: u32 nonce
     };
 
+    // --- Instrumentation ---
+    let mut hashes: u64 = 0;
+    let mut last_log = Instant::now();
+    let mut last_hashes: u64 = 0;
+    let mut last_nonce: u32 = hdr.nonce;
+    let mut last_hdr_prev: Hash32 = hdr.prev;
+    let mut last_hdr_time: u64 = hdr.time;
+    let mut last_hdr_merkle: Hash32 = hdr.merkle;
+    let mut last_hdr_bits: u32 = hdr.bits;
+
     let mut n_since_check: u64 = 0;
 
     loop {
@@ -282,19 +289,14 @@ pub fn mine_one(
             std::thread::yield_now();
         }
 
+        // Refresh template on tip change (but ignore "no tip yet" 0x00..00)
         if n_since_check >= TIP_CHECK_EVERY_NONCES {
             n_since_check = 0;
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
-
-if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
-
+            if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
                 parent_tip = cur_tip;
-                parent_hi_opt = if parent_tip != [0u8; 32] {
-                    get_hidx(db, &parent_tip)?
-                } else {
-                    None
-                };
+                parent_hi_opt = get_hidx(db, &parent_tip)?;
 
                 height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
                 _epoch = current_epoch(height);
@@ -315,21 +317,42 @@ if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
         }
 
         let h = header_hash(&hdr);
+        hashes = hashes.wrapping_add(1);
 
-if hdr.nonce % 1_000_000 == 0 {
-    use crate::chain::pow::bits_to_target_bytes;
-    println!(
-        "[mine] progress: nonce={} hash=0x{} target=0x{}",
-        hdr.nonce,
-        hex::encode(h),
-        hex::encode(bits_to_target_bytes(hdr.bits))
-    );
-}
+        // Once-per-second objective logger
+        if last_log.elapsed() >= Duration::from_secs(1) {
+            let interval_hashes = hashes.wrapping_sub(last_hashes);
+            let nonce_delta = hdr.nonce.wrapping_sub(last_nonce);
 
+            let hdr_changed = (hdr.prev != last_hdr_prev)
+                || (hdr.time != last_hdr_time)
+                || (hdr.merkle != last_hdr_merkle)
+                || (hdr.bits != last_hdr_bits);
+
+            println!(
+                "[mine] h/s={} nonce={} Δnonce={} hdr_changed={} prev=0x{} bits=0x{:08x} time={}",
+                interval_hashes,
+                hdr.nonce,
+                nonce_delta,
+                hdr_changed,
+                hex::encode(hdr.prev),
+                hdr.bits,
+                hdr.time
+            );
+
+            last_log = Instant::now();
+            last_hashes = hashes;
+            last_nonce = hdr.nonce;
+            last_hdr_prev = hdr.prev;
+            last_hdr_time = hdr.time;
+            last_hdr_merkle = hdr.merkle;
+            last_hdr_bits = hdr.bits;
+        }
 
         if pow_ok(&h, hdr.bits) {
             let _g = chain_lock.lock();
 
+            // Re-check tip under lock to avoid races
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if cur_tip != hdr.prev {
                 continue;
@@ -345,6 +368,7 @@ if hdr.nonce % 1_000_000 == 0 {
                 crate::codec::consensus_bincode().serialize(&block)?,
             )?;
 
+            // Index header (can still fail if something is inconsistent)
             let _hi = index_header(db, &hdr, parent_hi_opt.as_ref())?;
 
             if let Err(e) = maybe_reorg_to(db, &h, Some(mempool)) {
@@ -359,9 +383,10 @@ if hdr.nonce % 1_000_000 == 0 {
                 for id in &included_ids {
                     mempool.remove(id);
                 }
+                println!("[mine] ACCEPTED tip=0x{} height={}", hex::encode(h), height);
             } else {
                 println!(
-                    "[mine] block {} was not selected as tip (tip_after={}); keeping {} txs in mempool",
+                    "[mine] REJECTED block=0x{} tip_after=0x{} keeping {} txs in mempool",
                     hex::encode(h),
                     hex::encode(tip_after),
                     included_ids.len()
@@ -384,7 +409,7 @@ if hdr.nonce % 1_000_000 == 0 {
 
         hdr.nonce = hdr.nonce.wrapping_add(1);
 
-        // if nonce wrapped, bump time but keep it within future bound
+        // If nonce wrapped, bump time but keep it within future bound
         if hdr.nonce == 0 {
             let now = now_unix();
             let max_future = now.saturating_add(MAX_FUTURE_DRIFT_SECS);
