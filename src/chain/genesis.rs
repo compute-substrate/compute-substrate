@@ -11,6 +11,14 @@ use crate::state::db::{get_tip, k_block, set_tip, Stores};
 use crate::state::utxo::validate_and_apply_block;
 use crate::types::{Block, BlockHeader};
 
+fn now_unix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
 /// - internal nodes are sha256d(left || right), duplicating last if odd
@@ -24,11 +32,7 @@ fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
         let mut i = 0usize;
         while i < layer.len() {
             let left = layer[i];
-            let right = if i + 1 < layer.len() {
-                layer[i + 1]
-            } else {
-                layer[i]
-            };
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
             let mut buf = [0u8; 64];
             buf[..32].copy_from_slice(&left);
             buf[32..].copy_from_slice(&right);
@@ -55,13 +59,18 @@ pub fn make_genesis_block(burn_addr20: [u8; 20]) -> Result<Block> {
 
     let merkle = merkle_root(&txs);
 
+    // IMPORTANT:
+    // Genesis time must be near "now", otherwise your objective time guardrails
+    // (mtp + drift) will reject height=1 blocks on modern clocks.
+    let genesis_time = now_unix();
+
     let mut hdr = BlockHeader {
         version: 1,
         prev: [0u8; 32],
         merkle,
-        time: 1700000000, // fixed timestamp for determinism
+        time: genesis_time,
         bits: INITIAL_BITS,
-        nonce: 0,
+        nonce: 0u32,
     };
 
     loop {
