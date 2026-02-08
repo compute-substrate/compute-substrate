@@ -326,7 +326,7 @@ pub async fn run() -> Result<()> {
                     mut input,
                     auto_input,
                     min_input,
-                    datadir,
+                    datadir: _,
                     fee,
                     change,
                     domain,
@@ -339,11 +339,10 @@ pub async fn run() -> Result<()> {
                         if !input.is_empty() {
                             anyhow::bail!("--auto-input cannot be combined with --input");
                         }
-                        let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                        let picked = wallet_pick_input("cs.db", &privkey, min_input, false)?;
                         input.push(picked);
                     }
 
-                    // ✅ UPDATED: pass datadir + rpc_url
                     wallet_propose_submit(
                         &rpc_url,
                         &privkey,
@@ -362,7 +361,7 @@ pub async fn run() -> Result<()> {
                     mut input,
                     auto_input,
                     min_input,
-                    datadir,
+                    datadir: _,
                     fee,
                     change,
                     proposal_id,
@@ -374,11 +373,10 @@ pub async fn run() -> Result<()> {
                         if !input.is_empty() {
                             anyhow::bail!("--auto-input cannot be combined with --input");
                         }
-                        let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                        let picked = wallet_pick_input("cs.db", &privkey, min_input, false)?;
                         input.push(picked);
                     }
 
-                    // ✅ UPDATED: pass datadir + rpc_url
                     wallet_attest_submit(
                         &rpc_url,
                         &privkey,
@@ -448,7 +446,6 @@ pub async fn run() -> Result<()> {
             let (mined_hdr_tx, mined_hdr_rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::net::MinedHeaderEvent>();
 
-            // ✅ FIX: api::router expects UnboundedSender<GossipTxEvent>
             let app = crate::api::router(db.clone(), mempool.clone(), tx_gossip_tx.clone());
 
             let listener = tokio::net::TcpListener::bind(&rpc).await?;
@@ -505,7 +502,6 @@ pub async fn run() -> Result<()> {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-                        // Keep mempool as a live view of canonical UTXO set
                         prune_mempool(&db2, &mp2);
 
                         let db3 = db2.clone();
@@ -523,14 +519,28 @@ pub async fn run() -> Result<()> {
                         })
                         .await;
 
-                        let Ok(mined_res) = mined_join else {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            continue;
+                        // ✅ FIX 1: print join/panic errors
+                        let mined_res = match mined_join {
+                            Ok(res) => res,
+                            Err(e) => {
+                                eprintln!("[miner] mine_one JOIN ERR (panic/cancel?): {e}");
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                continue;
+                            }
                         };
 
-                        let Ok(bh) = mined_res else {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            continue;
+                        // ✅ FIX 2: print actual mine_one() errors
+                        let bh = match mined_res {
+                            Ok(h) => {
+                                // (optional) keep or remove; useful once to prove progress
+                                // eprintln!("[miner] mine_one OK: 0x{}", hex::encode(h));
+                                h
+                            }
+                            Err(e) => {
+                                eprintln!("[miner] mine_one ERR: {:?}", e);
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                continue;
+                            }
                         };
 
                         let tip_now = crate::state::db::get_tip(db2.as_ref())
@@ -574,19 +584,18 @@ pub async fn run() -> Result<()> {
                             }
                         }
 
-                        // After tip update, prune again (fast, avoids stale spends)
                         if accepted {
                             prune_mempool(&db2, &mp2);
                         }
 
                         println!(
-            "[mine] new block 0x{} (accepted_as_tip={}, txs_in_block={}, mempool_len={}, spent_outpoints={})",
-            hex::encode(bh),
-            accepted,
-            txs_in_block,
-            mp2.len(),
-            mp2.spent_len(),
-        );
+                            "[mine] new block 0x{} (accepted_as_tip={}, txs_in_block={}, mempool_len={}, spent_outpoints={})",
+                            hex::encode(bh),
+                            accepted,
+                            txs_in_block,
+                            mp2.len(),
+                            mp2.spent_len(),
+                        );
                     }
                 });
             }
