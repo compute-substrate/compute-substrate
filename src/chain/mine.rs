@@ -249,6 +249,7 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
+println!("[WATERMARK] mine_one() build=2026-02-08T23:59Z");
     const TIP_CHECK_EVERY_NONCES: u64 = 4096;
 
     let mut parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
