@@ -1,5 +1,5 @@
 // tests/golden_vectors.rs
-use compute_substrate as csd;
+use csd as csd;
 
 fn hex32(b: &[u8; 32]) -> String {
     format!("0x{}", hex::encode(b))
