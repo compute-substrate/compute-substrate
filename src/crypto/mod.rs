@@ -1,26 +1,18 @@
 // src/crypto/mod.rs
+//
+// Consensus hashing + signature rules (FROZEN).
+//
+// IMPORTANT:
+// - All consensus-critical serialization MUST use crate::codec::consensus_bincode().
+// - Treat Cargo.lock + exact crate versions as consensus-critical once mainnet launches.
+
 use anyhow::{bail, Result};
-use bincode::Options; // required for with_fixint_encoding/with_little_endian/serialize
 use ripemd::Ripemd160;
 use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
 use sha2::{Digest, Sha256};
 
 use crate::params::CHAIN_ID_HASH;
 use crate::types::{Hash20, Hash32, Transaction};
-
-/// Consensus serialization (FROZEN).
-/// We explicitly pin bincode settings so bytes do not drift if defaults change.
-///
-/// MAINNET NOTE:
-/// - Pin crate versions in Cargo.toml (exact =)
-/// - Treat Cargo.lock as consensus-critical
-fn consensus_serialize<T: serde::Serialize>(v: &T) -> Vec<u8> {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_little_endian()
-        .serialize(v)
-        .expect("consensus serialize")
-}
 
 pub fn sha256d(data: &[u8]) -> Hash32 {
     let h1 = Sha256::digest(data);
@@ -58,11 +50,14 @@ fn stripped_tx(tx: &Transaction) -> Transaction {
 /// Deterministic and does NOT include signatures.
 ///
 /// NOTE:
-/// - Coinbase uniqueness is ensured by committing height into locktime (mine.rs),
-///   since txid() strips script_sig.
+/// - txid() strips script_sig.
+/// - Coinbase uniqueness must therefore be ensured by some other committed field
+///   (you do locktime = height in mine.rs, and also script_sig commits height for policy).
 pub fn txid(tx: &Transaction) -> Hash32 {
     let stripped = stripped_tx(tx);
-    let bytes = consensus_serialize(&stripped);
+    let bytes = crate::codec::consensus_bincode()
+        .serialize(&stripped)
+        .expect("consensus serialize(txid)");
     sha256d(&bytes)
 }
 
@@ -88,7 +83,9 @@ fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash32 {
 /// - tagged hash prevents cross-protocol collisions
 pub fn sighash(tx: &Transaction) -> Hash32 {
     let stripped = stripped_tx(tx);
-    let mut pre = consensus_serialize(&stripped);
+    let mut pre = crate::codec::consensus_bincode()
+        .serialize(&stripped)
+        .expect("consensus serialize(sighash)");
     pre.extend_from_slice(&CHAIN_ID_HASH);
     let th = tagged_hash(b"CSD_SIG_V1", &pre);
     sha256d(&th)
@@ -114,10 +111,12 @@ pub fn verify_sig(tx: &Transaction, sig64: &[u8; 64], pub33: &[u8]) -> Result<()
     let sig = Signature::from_compact(sig64)?;
 
     // Enforce LOW-S canonicality as a consensus rule.
-    // normalize_s() mutates the signature into low-S and returns true if it changed.
-    // If it would change => the original was high-S => reject.
-    let mut sig_check = sig;
-    sig_check.normalize_s();
+    // If normalizing would change the signature, it was high-S => reject.
+    let mut norm = sig;
+    norm.normalize_s();
+    if norm.serialize_compact() != sig.serialize_compact() {
+        bail!("non-canonical signature (high-S)");
+    }
 
     Secp256k1::verification_only().verify_ecdsa(&msg, &sig, &pk)?;
     Ok(())
