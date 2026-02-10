@@ -24,16 +24,20 @@ fn biguint_to_32be(x: &BigUint) -> [u8; 32] {
 
 fn main() {
     let t = TARGET_BLOCK_SECS.max(1);
-    let window = LWMA_WINDOW;
+    let window = LWMA_WINDOW.max(2);
 
     println!("target={}s window={}", t, window);
 
-    // Start with a steady-state history at target spacing.
-    let mut times: Vec<u64> = vec![t; window];
-    let mut current_target =
-        BigUint::from_bytes_be(&bits_to_target_bytes(INITIAL_BITS));
+    // Proper timestamp history: 0,60,120,... (monotonic)
+    let mut times: Vec<u64> = (0..window as u64).map(|i| i * t).collect();
 
-    let limit = BigUint::from_bytes_be(&bits_to_target_bytes(POW_LIMIT_BITS));
+    // Keep per-block target history (ring buffer) like the real chain.
+    let init_tb = bits_to_target_bytes(INITIAL_BITS);
+    let init_target = BigUint::from_bytes_be(&init_tb);
+    let mut targets: Vec<BigUint> = vec![init_target.clone(); window];
+
+    let limit_tb = bits_to_target_bytes(POW_LIMIT_BITS);
+    let limit = BigUint::from_bytes_be(&limit_tb);
 
     for height in 0..400u64 {
         let hashpower_mult = if height < 120 {
@@ -44,33 +48,18 @@ fn main() {
             0.2
         };
 
+        // Deterministic solve time for now (stochastic version comes next)
         let expected_solve = (t as f64 / hashpower_mult) as u64;
         let solve_time = expected_solve.max(1);
 
-        // advance timestamp
-        let last_time = *times.last().unwrap_or(&t);
-        times.push(last_time + solve_time);
-        if times.len() > window {
-            times.remove(0);
-        }
+        // advance timestamp history
+        let last_time = *times.last().unwrap();
+        let new_time = last_time + solve_time;
+        times.push(new_time);
+        times.remove(0);
 
-        // Build a target window that mirrors chain behavior:
-        // targets[i] corresponds to bits of historical blocks.
-        // Here we approximate "history" as repeating the current target,
-        // which is fine for convergence testing under step-changes.
-        let mut targets: Vec<BigUint> = vec![current_target.clone(); times.len()];
-
-        // ---- LWMA (exact math, BigUint targets) ----
+        // LWMA
         let m = times.len();
-        if m < 2 {
-            let bits = target_bytes_to_bits(biguint_to_32be(&current_target));
-            println!(
-                "h={} power={:.1} solve={} avg={} bits=0x{:08x}",
-                height, hashpower_mult, solve_time, solve_time, bits
-            );
-            continue;
-        }
-
         let max_solvetime = LWMA_SOLVETIME_MAX_FACTOR.max(1) * t;
 
         let mut weighted_sum: u128 = 0;
@@ -82,9 +71,9 @@ fn main() {
             weighted_sum = weighted_sum.saturating_add((st as u128).saturating_mul(w));
             denom = denom.saturating_add(w);
         }
-
         let avg_solvetime = ((weighted_sum / denom) as u64).max(1);
 
+        // avg target from history window
         let mut sum_target = BigUint::zero();
         for tg in &targets {
             sum_target += tg;
@@ -94,7 +83,7 @@ fn main() {
         let mut next_target =
             avg_target * BigUint::from(avg_solvetime) / BigUint::from(t);
 
-        // clamp to POW limit (easiest)
+        // clamp easiest
         if next_target > limit {
             next_target = limit.clone();
         }
@@ -102,12 +91,14 @@ fn main() {
             next_target = limit.clone();
         }
 
-        // canonical bits from canonical target bytes (mirrors pow.rs)
+        // canonical bits exactly like chain
         let tb = biguint_to_32be(&next_target);
         let bits = target_bytes_to_bits(tb);
 
-        // update "current" target for next iteration
-        current_target = BigUint::from_bytes_be(&tb);
+        // update per-block target history with what the chain would commit
+        let committed_target = BigUint::from_bytes_be(&tb);
+        targets.push(committed_target);
+        targets.remove(0);
 
         println!(
             "h={} power={:.1} solve={} avg={} bits=0x{:08x}",
