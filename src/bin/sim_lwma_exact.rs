@@ -1,10 +1,10 @@
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 
-use crate::chain::pow::{
+use csd::chain::pow::{
     bits_to_target_bytes, target_bytes_to_bits,
 };
-use crate::params::{
+use csd::params::{
     INITIAL_BITS, LWMA_SOLVETIME_MAX_FACTOR, LWMA_WINDOW, POW_LIMIT_BITS, TARGET_BLOCK_SECS,
 };
 
