@@ -47,7 +47,7 @@ pub const LWMA_WINDOW: usize = 90;
 
 // Clamp solve times to reduce timestamp gaming impact and prevent instability.
 // Standard LWMA uses max_solvetime = 6*T (and min 1 second).
-pub const LWMA_SOLVETIME_MAX_FACTOR: u64 = 6;
+pub const LWMA_SOLVETIME_MAX_FACTOR: u64 = 12;
 
 // Legacy retarget params (kept so existing code/notes compile, but NOT used by LWMA):
 pub const RETARGET_INTERVAL: u64 = 360;
