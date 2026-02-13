@@ -469,14 +469,23 @@ pub async fn run() -> Result<()> {
                 is_bootnode: !mine,
             };
 
-            tokio::spawn(crate::net::node::run_p2p(
+            // ==============================
+            // Option A (recommended): Miner must follow remote tip
+            // ==============================
+            // We start P2P and keep a NetHandle so miner can refuse to mine unless:
+            //  - connected_peers >= 1
+            //  - last_tip_seen is fresh within TIP_FRESH_SECS
+            //
+            // NOTE: This assumes you have a spawn_p2p(...) that returns NetHandle immediately.
+            let net = crate::net::node::spawn_p2p(
                 db.clone(),
                 mempool.clone(),
                 net_cfg,
                 mined_hdr_rx,
                 tx_gossip_rx,
                 chain_lock.clone(),
-            ));
+            )
+            .await?;
 
             if mine {
                 if miner_addr20.trim().is_empty() {
@@ -496,11 +505,38 @@ pub async fn run() -> Result<()> {
                 let mined_tx = mined_hdr_tx.clone();
                 let chain_lock2 = chain_lock.clone();
 
+                // miner gating constants
+                const TIP_FRESH_SECS: u64 = 30;
+                const MIN_PEERS: usize = 1;
+
+                let net2 = net.clone();
+
                 tokio::spawn(async move {
                     let max_mempool_txs: usize = 500;
 
+                    // throttle gating logs
+                    let mut last_gate_log = std::time::Instant::now() - std::time::Duration::from_secs(10);
+
                     loop {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+                        // ---- Option A gating: refuse to mine unless following remote tip ----
+                        let peers = net2.connected_peers();
+                        let fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
+
+                        if peers < MIN_PEERS || !fresh {
+                            // log at most once per ~1s
+                            if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
+                                let last = net2.last_tip_seen_unix();
+                                eprintln!(
+                                    "[miner] gate: NOT mining (peers={}, tip_fresh={} last_tip_seen_unix={})",
+                                    peers, fresh, last
+                                );
+                                last_gate_log = std::time::Instant::now();
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            continue;
+                        }
 
                         prune_mempool(&db2, &mp2);
 
@@ -531,11 +567,7 @@ pub async fn run() -> Result<()> {
 
                         // ✅ FIX 2: print actual mine_one() errors
                         let bh = match mined_res {
-                            Ok(h) => {
-                                // (optional) keep or remove; useful once to prove progress
-                                // eprintln!("[miner] mine_one OK: 0x{}", hex::encode(h));
-                                h
-                            }
+                            Ok(h) => h,
                             Err(e) => {
                                 eprintln!("[miner] mine_one ERR: {:?}", e);
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
