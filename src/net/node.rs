@@ -17,13 +17,16 @@
 // 4) Tightened RR codec write_request/write_response to refuse sending oversized bodies
 //    (protects our own node from accidentally emitting > MAX_RR_MSG_BYTES).
 //
-// 5) Small correctness cleanup:
-//      - Kept all of your existing rate-limit / ban machinery and behaviour logic intact.
-//      - Made MAX_RR_MSG_BYTES derived from MAX_BLOCK_BYTES so it can’t silently drift.
+// 5) Added Option A plumbing (miner gating support):
+//      - Track connected peer count
+//      - Track "last remote tip observed" time
+//      - Expose these via NetHandle so miner can refuse to mine unless:
+//           connected_peers >= 1 AND tip_fresh <= N seconds
 //
-// IMPORTANT: This file assumes MAX_TX_BYTES and MAX_BLOCK_BYTES exist in src/params.rs.
-// IMPORTANT: This file assumes crate::codec::consensus_bincode() exists and is used for
-//            all consensus-critical types (including Block and wire messages for determinism).
+// 6) FIXED: run_p2p() previously never returned NetHandle because it entered an infinite loop.
+//    Now:
+//      - spawn_p2p() returns NetHandle immediately and spawns the P2P loop
+//      - run_p2p() is an alias for spawn_p2p() for compatibility
 
 use crate::chain::pow::{bits_within_pow_limit, pow_ok};
 use anyhow::{bail, Context, Result};
@@ -39,8 +42,11 @@ use libp2p::{
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::interval;
 
@@ -77,6 +83,15 @@ const RL_MAX_INVALID_PER_WINDOW: u32 = 50;
 
 // Temporary ban duration for obvious abuse.
 const BAN_SECS: u64 = 60;
+
+// ----------------- time helpers -----------------
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs()
+}
 
 // ----------------- node key persistence -----------------
 
@@ -273,6 +288,29 @@ pub struct NetConfig {
 #[derive(Clone)]
 pub struct NetHandle {
     pub peer_id: PeerId,
+
+    // Option A plumbing (miner gating support)
+    connected_peers: Arc<AtomicUsize>,
+    last_tip_seen_unix: Arc<AtomicU64>,
+}
+
+impl NetHandle {
+    /// Number of currently connected libp2p peers (best-effort).
+    pub fn connected_peers(&self) -> usize {
+        self.connected_peers.load(Ordering::Relaxed)
+    }
+
+    /// Unix seconds for last observed *remote* chain activity (Tip/Headers/Blocks/HDR gossip).
+    pub fn last_tip_seen_unix(&self) -> u64 {
+        self.last_tip_seen_unix.load(Ordering::Relaxed)
+    }
+
+    /// Convenience helper for miner gating.
+    pub fn is_tip_fresh(&self, max_age_secs: u64) -> bool {
+        let now = unix_now();
+        let last = self.last_tip_seen_unix();
+        now.saturating_sub(last) <= max_age_secs
+    }
 }
 
 #[derive(Debug)]
@@ -516,18 +554,79 @@ fn as_rr_event(event: OutEvent) -> Option<request_response::Event<SyncRequest, S
     }
 }
 
-// ----------------- main p2p loop -----------------
+// ----------------- PUBLIC API -----------------
 
-pub async fn run_p2p(
+/// Start P2P in the background and immediately return a NetHandle (Option A miner gating).
+pub async fn spawn_p2p(
     db: Arc<Stores>,
     mempool: Arc<Mempool>,
     cfg: NetConfig,
-    mut mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
-    mut tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
+    mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
+    tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
     chain_lock: ChainLock,
 ) -> Result<NetHandle> {
     let local_key = load_or_create_node_key(&cfg.datadir)?;
     let peer_id = PeerId::from(local_key.public());
+
+    // Option A telemetry shared with miner
+    let connected_peers = Arc::new(AtomicUsize::new(0));
+    let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
+
+    let handle = NetHandle {
+        peer_id,
+        connected_peers: connected_peers.clone(),
+        last_tip_seen_unix: last_tip_seen_unix.clone(),
+    };
+
+    // Spawn the real loop
+    tokio::spawn(async move {
+        if let Err(e) = run_p2p_loop(
+            db,
+            mempool,
+            cfg,
+            local_key,
+            peer_id,
+            connected_peers,
+            last_tip_seen_unix,
+            mined_rx,
+            tx_gossip_rx,
+            chain_lock,
+        )
+        .await
+        {
+            eprintln!("[p2p] fatal: {e}");
+        }
+    });
+
+    Ok(handle)
+}
+
+/// Backward-compat alias: same as spawn_p2p().
+pub async fn run_p2p(
+    db: Arc<Stores>,
+    mempool: Arc<Mempool>,
+    cfg: NetConfig,
+    mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
+    tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
+    chain_lock: ChainLock,
+) -> Result<NetHandle> {
+    spawn_p2p(db, mempool, cfg, mined_rx, tx_gossip_rx, chain_lock).await
+}
+
+// ----------------- main p2p loop (PRIVATE) -----------------
+
+async fn run_p2p_loop(
+    db: Arc<Stores>,
+    mempool: Arc<Mempool>,
+    cfg: NetConfig,
+    local_key: identity::Keypair,
+    peer_id: PeerId,
+    connected_peers: Arc<AtomicUsize>,
+    last_tip_seen_unix: Arc<AtomicU64>,
+    mut mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
+    mut tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
+    chain_lock: ChainLock,
+) -> Result<()> {
     println!("[p2p] peer_id: {peer_id}");
 
     let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
@@ -713,6 +812,11 @@ pub async fn run_p2p(
         best.map(|(p, _)| p)
     };
 
+    // convenience: mark "remote chain activity seen"
+    let mark_tip_seen = |last_tip_seen_unix: &Arc<AtomicU64>| {
+        last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
+    };
+
     loop {
         tokio::select! {
             _ = poll.tick() => {
@@ -770,6 +874,8 @@ pub async fn run_p2p(
                         } else {
                             println!("[p2p] connected: {peer_id}");
                             connected.insert(peer_id);
+                            connected_peers.store(connected.len(), Ordering::Relaxed);
+
                             if sync_peer.is_none() {
                                 sync_peer = Some(peer_id);
                             }
@@ -779,7 +885,10 @@ pub async fn run_p2p(
                     }
 
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                        connected.remove(&peer_id);
+                        if connected.remove(&peer_id) {
+                            connected_peers.store(connected.len(), Ordering::Relaxed);
+                        }
+
                         peer_heights.remove(&peer_id);
                         peer_work.remove(&peer_id);
 
@@ -838,6 +947,9 @@ pub async fn run_p2p(
                                     continue;
                                 }
 
+                                // Option A: remote header gossip counts as "tip seen"
+                                mark_tip_seen(&last_tip_seen_unix);
+
                                 if let Some(p) = src {
                                     providers.entry(h).or_insert(p);
                                 }
@@ -879,7 +991,6 @@ pub async fn run_p2p(
                                     }
                                 }
 
-                                // insert_checked() already runs validate_tx_for_mempool(db, &tx)
                                 match mempool.insert_checked(db.as_ref(), gt.tx) {
                                     Ok(_added) => {}
                                     Err(_) => {
@@ -917,7 +1028,6 @@ pub async fn run_p2p(
 
                                             let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() });
 
-                                            // defense: don't serve blocks outside universe/pow or beyond size cap
                                             if let SyncResponse::Block { block } = &resp {
                                                 let bh = header_hash(&block.header);
                                                 if !accept_header_universe_pow(&cfg, &block.header, &bh) {
@@ -934,7 +1044,9 @@ pub async fn run_p2p(
 
                                         Message::Response { request_id: rid, response } => {
                                             match response {
-                                                SyncResponse::Tip { hash, height, chainwork } => {
+                                                SyncResponse::Tip { hash: _hash, height, chainwork } => {
+                                                    mark_tip_seen(&last_tip_seen_unix);
+
                                                     peer_heights.insert(peer, height);
                                                     peer_work.insert(peer, chainwork);
 
@@ -952,23 +1064,17 @@ pub async fn run_p2p(
                                                     let locator_tip = if best_hdr_tip != [0u8; 32] { best_hdr_tip } else { applied_tip };
 
                                                     if chainwork > local_w && sync_peer == Some(peer) {
-                                                        println!(
-                                                            "[sync] peer tip {} height {} work {} (local height {} work {})",
-                                                            hex32(&hash), height, chainwork, local_h, local_w
-                                                        );
-
                                                         let locator = build_locator(&db, &locator_tip);
-                                                        let rid2 = swarm.behaviour_mut().rr.send_request(
+                                                        let _rid2 = swarm.behaviour_mut().rr.send_request(
                                                             &peer,
                                                             SyncRequest::GetHeadersByLocator { locator, max: MAX_HEADERS_PER_SYNC }
                                                         );
-                                                        println!("[sync] requested headers by locator ({rid2:?})");
                                                     }
                                                 }
 
                                                 SyncResponse::Headers { headers } => {
                                                     if !headers.is_empty() {
-                                                        println!("[sync] received {} headers", headers.len());
+                                                        mark_tip_seen(&last_tip_seen_unix);
                                                     }
 
                                                     if sync_peer.is_some() && sync_peer != Some(peer) {
@@ -994,15 +1100,12 @@ pub async fn run_p2p(
                                                                     index_header(&db, &hdr, None)
                                                                 } else {
                                                                     let parent = get_hidx(&db, &hdr.prev)?;
-                                                                    let Some(p) = parent else {
-                                                                        continue;
-                                                                    };
+                                                                    let Some(p) = parent else { continue; };
                                                                     index_header(&db, &hdr, Some(&p))
                                                                 }
                                                             };
 
-                                                            if let Err(e) = idx_res {
-                                                                println!("[sync] reject header {}: {}", hex32(&h), e);
+                                                            if idx_res.is_err() {
                                                                 note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
                                                                 continue;
                                                             }
@@ -1031,7 +1134,8 @@ pub async fn run_p2p(
                                                 }
 
                                                 SyncResponse::Block { block } => {
-                                                    // defense: refuse blocks bigger than consensus cap
+                                                    mark_tip_seen(&last_tip_seen_unix);
+
                                                     if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
                                                         if bytes.len() > MAX_BLOCK_BYTES {
                                                             note_invalid(&mut buckets, &mut bans, peer, "block: oversized");
@@ -1068,15 +1172,10 @@ pub async fn run_p2p(
                                                             index_header(&db, &block.header, Some(&p))
                                                         } else {
                                                             pending_apply.insert(bh, block);
-                                                            let _ = pump_blocks(
-                                                                &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                                                                &db, &mut want_blocks, &mut inflight
-                                                            );
                                                             continue;
                                                         };
 
-                                                        if let Err(e) = idx_res {
-                                                            println!("[sync] reject block header {}: {}", hex32(&bh), e);
+                                                        if idx_res.is_err() {
                                                             note_invalid(&mut buckets, &mut bans, peer, "block: index_header failed");
                                                             continue;
                                                         }
@@ -1091,7 +1190,6 @@ pub async fn run_p2p(
                                                     }
 
                                                     pending_apply.insert(bh, block);
-
                                                     try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
 
                                                     let _ = pump_blocks(
@@ -1108,30 +1206,18 @@ pub async fn run_p2p(
                                                     if msg.contains("unknown block") {
                                                         if let Some(h) = rid_to_hash.remove(&rid) {
                                                             inflight.remove(&h);
-
                                                             bad_providers.entry(h).or_default().insert(peer);
 
                                                             if providers.get(&h) == Some(&peer) {
                                                                 providers.remove(&h);
                                                             }
-
                                                             if want_blocks.len() < MAX_WANT_QUEUE {
                                                                 want_blocks.push_back(h);
                                                             }
                                                         }
                                                     }
-
-                                                    let _ = pump_blocks(
-                                                        &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                                                        &db, &mut want_blocks, &mut inflight
-                                                    );
                                                 }
                                             }
-
-                                            let _ = pump_blocks(
-                                                &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                                                &db, &mut want_blocks, &mut inflight
-                                            );
                                         }
                                     }
                                 }
@@ -1190,7 +1276,6 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
                     break;
                 };
 
-                // defense: refuse deserializing absurd blocks (shouldn't exist if DB is sane)
                 if bv.len() > MAX_BLOCK_BYTES {
                     bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
                 }
