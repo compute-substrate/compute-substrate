@@ -8,7 +8,9 @@ use crate::chain::reorg::maybe_reorg_to;
 use crate::chain::time::median_time_past;
 use crate::crypto::{sha256d, txid};
 use crate::net::mempool::Mempool;
-use crate::params::{block_reward, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
+use crate::params::{
+    block_reward, MAX_BLOCK_BYTES, MAX_FUTURE_DRIFT_SECS, MAX_TX_BYTES, MIN_BLOCK_SPACING_SECS,
+};
 use crate::state::app::current_epoch;
 use crate::state::db::{get_tip, get_utxo, k_block, Stores};
 use crate::state::utxo::validate_tx_for_mempool;
@@ -123,18 +125,23 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
 /// Build a fresh block template from the current tip + current UTXO set.
 ///
 /// Key behavior:
-/// - Only includes txs that are valid AND connectable *right now*
-/// - Skips anything that fails validate_tx_for_mempool or has missing inputs
-/// - Sorts by fee (desc) so miners converge under load
+/// - Candidates come from mempool.sample() (highest feerate first, deterministic).
+/// - Each tx must still validate against *current* UTXO set (reorg-safe).
+/// - Enforces MAX_BLOCK_BYTES by tracking serialized bytes.
+/// - Defense-in-depth: refuses any tx > MAX_TX_BYTES even if it somehow got into mempool.
+/// - Avoids intra-block input conflicts defensively.
 fn build_template(
     db: &Stores,
     mempool: &Mempool,
     miner_h160: Hash20,
     height: u64,
     max_mempool_txs: usize,
-) -> Result<(Vec<Transaction>, Vec<Hash32>, u64)> {
+) -> Result<(Vec<Transaction>, Vec<Hash32>, u64, usize)> {
+    let c = crate::codec::consensus_bincode();
+
     let reward = block_reward(height);
 
+    // Pull more than we need so we can skip invalid/non-connectable/oversize/conflicting txs.
     const CANDIDATE_MULT: usize = 8;
     let want_candidates = max_mempool_txs
         .saturating_mul(CANDIDATE_MULT)
@@ -142,61 +149,160 @@ fn build_template(
 
     let sampled = mempool.sample(want_candidates);
 
-    let mut candidates: Vec<(u64, Hash32, Transaction)> = Vec::new();
-
-    for tx in sampled {
-        let id = txid(&tx);
-
-        if validate_tx_for_mempool(db, &tx).is_err() {
-            continue;
-        }
-
-        let fee = match compute_fee_from_utxos(db, &tx) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-
-        candidates.push((fee, id, tx));
-    }
-
-    // fee desc; tie-break by txid ASC (deterministic)
-    candidates.sort_by(|a, b| match b.0.cmp(&a.0) {
-        std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-        o => o,
-    });
-
-    let mut total_fees: u64 = 0;
+    // We enforce block bytes budget. Start with coinbase (added later) as unknown size.
+    // We'll compute coinbase size once we know total fees.
     let mut included: Vec<Transaction> = Vec::with_capacity(max_mempool_txs);
     let mut included_ids: Vec<Hash32> = Vec::with_capacity(max_mempool_txs);
 
-    for (fee, id, tx) in candidates.into_iter().take(max_mempool_txs) {
+    // Defensive anti-conflict set (mempool policy should already prevent conflicts).
+    let mut spent_in_block: std::collections::HashSet<OutPoint> = std::collections::HashSet::new();
+
+    let mut total_fees: u64 = 0;
+    let mut tx_bytes_total: usize = 0;
+
+    let mut skipped_invalid: usize = 0;
+    let mut skipped_oversize: usize = 0;
+    let mut skipped_conflict: usize = 0;
+    let mut skipped_budget: usize = 0;
+
+    for tx in sampled {
+        if included.len() >= max_mempool_txs {
+            break;
+        }
+
+        // Must remain valid/connectable right now.
+        if validate_tx_for_mempool(db, &tx).is_err() {
+            skipped_invalid += 1;
+            continue;
+        }
+
+        // Defense-in-depth on tx size.
+        let tx_sz_u64 = match c.serialized_size(&tx) {
+            Ok(n) => n,
+            Err(_) => {
+                skipped_invalid += 1;
+                continue;
+            }
+        };
+        if tx_sz_u64 > (MAX_TX_BYTES as u64) {
+            skipped_oversize += 1;
+            continue;
+        }
+        let tx_sz = tx_sz_u64 as usize;
+
+        // Defensive intra-block conflict check.
+        let mut conflict = false;
+        for inp in &tx.inputs {
+            if spent_in_block.contains(&inp.prevout) {
+                conflict = true;
+                break;
+            }
+        }
+        if conflict {
+            skipped_conflict += 1;
+            continue;
+        }
+
+        // Compute fee from current UTXO set (deterministic).
+        let fee = match compute_fee_from_utxos(db, &tx) {
+            Ok(f) => f,
+            Err(_) => {
+                skipped_invalid += 1;
+                continue;
+            }
+        };
+
+        // Tentatively include; enforce block byte budget later after coinbase is known.
+        // But we can still do a conservative pre-check: if tx alone already exceeds MAX_BLOCK_BYTES, skip.
+        if tx_sz > MAX_BLOCK_BYTES {
+            skipped_oversize += 1;
+            continue;
+        }
+
+        // Track in-block spends.
+        for inp in &tx.inputs {
+            spent_in_block.insert(inp.prevout);
+        }
+
+        // Track totals (coinbase added later).
         total_fees = total_fees
             .checked_add(fee)
             .ok_or_else(|| anyhow!("fee overflow"))?;
+        tx_bytes_total = tx_bytes_total.saturating_add(tx_sz);
 
-        included_ids.push(id);
+        included_ids.push(txid(&tx));
         included.push(tx);
     }
 
-    println!(
-        "[mine] template: height={} mempool_len={} sampled={} included={} fees={}",
-        height,
-        mempool.len(),
-        want_candidates.min(mempool.len()),
-        included.len(),
-        total_fees
-    );
-
+    // Now construct coinbase with reward+fees.
     let cb_value = reward
         .checked_add(total_fees)
         .ok_or_else(|| anyhow!("coinbase overflow"))?;
     let cb = coinbase(miner_h160, cb_value, height);
 
+    let cb_sz_u64 = c.serialized_size(&cb)?;
+    let cb_sz = cb_sz_u64 as usize;
+
+    // Enforce full block budget (coinbase + included txs).
+    // If we're over budget, drop txs from the tail (lowest priority due to sampling order).
+    let mut block_bytes = cb_sz.saturating_add(tx_bytes_total);
+
+    while block_bytes > MAX_BLOCK_BYTES && !included.is_empty() {
+        // Drop last tx.
+        let dropped = included.pop().unwrap();
+        let dropped_id = included_ids.pop().unwrap_or_else(|| txid(&dropped));
+
+        // Recompute size and fee impact for the dropped tx.
+        let d_sz = c.serialized_size(&dropped).unwrap_or(0) as usize;
+        let d_fee = compute_fee_from_utxos(db, &dropped).unwrap_or(0);
+
+        // Adjust totals.
+        tx_bytes_total = tx_bytes_total.saturating_sub(d_sz);
+        total_fees = total_fees.saturating_sub(d_fee);
+
+        // Rebuild coinbase value (reward+fees) and size since fees changed.
+        let cb_value2 = reward
+            .checked_add(total_fees)
+            .ok_or_else(|| anyhow!("coinbase overflow (rebuild)"))?;
+        let cb2 = coinbase(miner_h160, cb_value2, height);
+        let cb2_sz = c.serialized_size(&cb2).unwrap_or(cb_sz_u64) as usize;
+
+        block_bytes = cb2_sz.saturating_add(tx_bytes_total);
+
+        // Track why we dropped.
+        let _ = dropped_id;
+        skipped_budget += 1;
+    }
+
+    // Final coinbase after any tail drops.
+    let cb_value_final = reward
+        .checked_add(total_fees)
+        .ok_or_else(|| anyhow!("coinbase overflow (final)"))?;
+    let cb_final = coinbase(miner_h160, cb_value_final, height);
+
+    let cb_final_sz = c.serialized_size(&cb_final)? as usize;
+    let final_block_bytes = cb_final_sz.saturating_add(tx_bytes_total);
+
+    println!(
+        "[mine] template: height={} mempool_len={} sampled={} included={} fees={} block_bytes={} (max={}) skipped_invalid={} skipped_oversize={} skipped_conflict={} dropped_for_budget={}",
+        height,
+        mempool.len(),
+        want_candidates.min(mempool.len()),
+        included.len(),
+        total_fees,
+        final_block_bytes,
+        MAX_BLOCK_BYTES,
+        skipped_invalid,
+        skipped_oversize,
+        skipped_conflict,
+        skipped_budget,
+    );
+
     let mut final_txs: Vec<Transaction> = Vec::with_capacity(1 + included.len());
-    final_txs.push(cb);
+    final_txs.push(cb_final);
     final_txs.extend(included);
 
-    Ok((final_txs, included_ids, total_fees))
+    Ok((final_txs, included_ids, total_fees, final_block_bytes))
 }
 
 /// Choose a block time that *matches the objective consensus rules* in index_header:
@@ -255,7 +361,7 @@ pub fn mine_one(
     let mut height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
     let mut _epoch = current_epoch(height);
 
-    let (mut txs, mut included_ids, _fees) =
+    let (mut txs, _included_ids, _fees, _blk_bytes) =
         build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
 
     let mut hdr = BlockHeader {
@@ -301,7 +407,6 @@ pub fn mine_one(
 
                 let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
                 txs = built.0;
-                included_ids = built.1;
 
                 hdr = BlockHeader {
                     version: 1,
@@ -337,13 +442,29 @@ pub fn mine_one(
                 txs: txs.clone(),
             };
 
-            db.blocks.insert(
-                k_block(&h),
-                crate::codec::consensus_bincode().serialize(&block)?,
-            )?;
+            // Final defense: ensure stored bytes do not exceed MAX_BLOCK_BYTES.
+            let bytes = crate::codec::consensus_bincode().serialize(&block)?;
+            if bytes.len() > MAX_BLOCK_BYTES {
+                // Should never happen because template enforces budget,
+                // but keep this guard to avoid DB poisoning.
+                println!(
+                    "[mine] refusing to store oversized mined block ({} bytes > MAX_BLOCK_BYTES={})",
+                    bytes.len(),
+                    MAX_BLOCK_BYTES
+                );
+                // Rebuild template and keep mining.
+                let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
+                txs = built.0;
+                hdr.merkle = merkle_root(&txs);
+                hdr.nonce = 0;
+                continue;
+            }
+
+            db.blocks.insert(k_block(&h), bytes)?;
 
             let _hi = index_header(db, &hdr, parent_hi_opt.as_ref())?;
 
+            // This is where apply/undo/tip happens (and mined txs are removed from mempool).
             if let Err(e) = maybe_reorg_to(db, &h, Some(mempool)) {
                 println!("[mine] maybe_reorg_to failed for {}: {}", hex::encode(h), e);
                 continue;
@@ -352,18 +473,9 @@ pub fn mine_one(
             let tip_after = get_tip(db)?.unwrap_or([0u8; 32]);
             let accepted_as_tip = tip_after == h;
 
-            if accepted_as_tip {
-                for id in &included_ids {
-                    mempool.remove(id);
-                }
-            } else {
-                println!(
-                    "[mine] block {} was not selected as tip (tip_after={}); keeping {} txs in mempool",
-                    hex::encode(h),
-                    hex::encode(tip_after),
-                    included_ids.len()
-                );
-            }
+            // No manual mempool removals here.
+            // maybe_reorg_to(..., Some(mempool)) is the canonical place for mined removal,
+            // and it also handles reorg outcomes correctly.
 
             let pruned = mempool.prune(db);
             if pruned > 0 {
@@ -371,9 +483,18 @@ pub fn mine_one(
                     "[mempool] pruned {} txs after mining (mempool_len={}, spent_outpoints={})",
                     pruned,
                     mempool.len(),
-                    mempool.spent_outpoints().len()
+                    mempool.spent_len()
                 );
             }
+
+            println!(
+                "[mine] new block 0x{} (accepted_as_tip={}, txs_in_block={}, mempool_len={}, spent_outpoints={})",
+                hex::encode(h),
+                accepted_as_tip,
+                block.txs.len(),
+                mempool.len(),
+                mempool.spent_len(),
+            );
 
             return Ok(h);
         }
