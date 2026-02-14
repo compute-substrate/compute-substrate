@@ -26,6 +26,7 @@ use crate::types::{Block, Hash32, OutPoint, Transaction};
 /// - Per-tx caps must NOT exceed consensus caps (or you'll accept txs you can't mine).
 const MAX_MEMPOOL_TXS: usize = 50_000;
 const MAX_MEMPOOL_BYTES: usize = 64 * 1024 * 1024; // 64 MiB total tx bytes (serialized)
+const MAX_MEMPOOL_SPENT: usize = 200_000; // cap spent-outpoint index growth (DoS guard)
 
 /// Minimum fee-rate to be accepted into mempool.
 ///
@@ -48,12 +49,14 @@ struct Inner {
     txs: HashMap<Hash32, Transaction>,
     // outpoint -> txid (who is spending it in mempool)
     spent: HashMap<OutPoint, Hash32>,
+
     // total serialized bytes of all txs currently in mempool (consensus codec)
     total_bytes: usize,
 
     // fee info
     // txid -> (fee, bytes, feerate_ppm)
     feeinfo: HashMap<Hash32, FeeInfo>,
+
     // eviction order: lowest feerate first, tie-break by txid (deterministic)
     // item: (feerate_ppm, txid)
     eviction: BTreeSet<(u64, Hash32)>,
@@ -133,7 +136,7 @@ impl Mempool {
     /// Returns:
     /// - Ok(true)  => added
     /// - Ok(false) => already present OR conflicts with an existing mempool spend
-    /// - Err(_)    => tx is invalid or not connectable to current UTXO set
+    /// - Err(_)    => tx is invalid or not connectable to current UTXO set OR rejected by policy
     pub fn insert_checked(&self, db: &crate::state::db::Stores, tx: Transaction) -> Result<bool> {
         let c = crate::codec::consensus_bincode();
 
@@ -141,6 +144,9 @@ impl Mempool {
         let tx_bytes_u64 = c.serialized_size(&tx)?;
         if tx_bytes_u64 > (usize::MAX as u64) {
             bail!("tx too large for this platform (serialized_size overflow usize)");
+        }
+        if tx_bytes_u64 > (u32::MAX as u64) {
+            bail!("tx too large (serialized_size overflow u32)");
         }
         let tx_bytes: usize = tx_bytes_u64 as usize;
 
@@ -164,6 +170,10 @@ impl Mempool {
                 tx.outputs.len(),
                 MAX_TX_OUTPUTS
             );
+        }
+        if tx.inputs.is_empty() {
+            // coinbase-like txs never belong in mempool
+            bail!("tx has no inputs (coinbase-like); not allowed in mempool");
         }
 
         let id = txid(&tx);
@@ -196,8 +206,19 @@ impl Mempool {
         // Reject if any input already spent in mempool (conflict).
         for inp in &tx.inputs {
             if w.spent.contains_key(&inp.prevout) {
+                // no RBF/replace: keep it simple and safe for v0.1
                 return Ok(false);
             }
+        }
+
+        // spent index growth DoS guard
+        if w.spent.len().saturating_add(tx.inputs.len()) > MAX_MEMPOOL_SPENT {
+            bail!(
+                "mempool spent index full (spent_len={} + new_inputs={} > MAX_MEMPOOL_SPENT={})",
+                w.spent.len(),
+                tx.inputs.len(),
+                MAX_MEMPOOL_SPENT
+            );
         }
 
         // If we're full (by count or bytes), require incoming tx to be competitive.
@@ -214,7 +235,6 @@ impl Mempool {
                     );
                 }
             } else {
-                // Shouldn't happen (full but empty), but be defensive:
                 bail!("mempool state inconsistent: full but eviction set empty");
             }
         }
@@ -231,14 +251,18 @@ impl Mempool {
             }
         }
 
-        // Insert.
+        // Insert spent marks first.
         for inp in &tx.inputs {
             w.spent.insert(inp.prevout, id);
         }
+
+        // Insert tx.
         w.txs.insert(id, tx);
 
+        // Update total bytes (single source of truth).
         w.total_bytes = w.total_bytes.saturating_add(tx_bytes);
 
+        // Fee info + eviction key.
         let fi = FeeInfo {
             fee,
             bytes: tx_bytes_u64 as u32,
@@ -259,24 +283,15 @@ impl Mempool {
     /// Return up to `max_txs` transactions (cloned) without removing them.
     ///
     /// Deterministic order: highest feerate first, tie-break by txid.
+    ///
+    /// PRODUCTION UPGRADE:
+    /// - Use eviction index directly (reverse iteration) so we avoid O(n log n) sorting every call.
     pub fn sample(&self, max_txs: usize) -> Vec<Transaction> {
         let r = self.inner.read().unwrap();
 
-        // Build deterministic ordering from feeinfo. (O(n log n) but OK for modest samples.)
-        let mut items: Vec<(u64, Hash32)> = r
-            .feeinfo
-            .iter()
-            .map(|(id, fi)| (fi.feerate_ppm, *id))
-            .collect();
-
-        items.sort_by(|a, b| {
-            // descending feerate, then ascending txid
-            b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
-        });
-
-        let mut out = Vec::new();
-        for (_fr, id) in items.into_iter().take(max_txs) {
-            if let Some(tx) = r.txs.get(&id) {
+        let mut out = Vec::with_capacity(max_txs.min(r.txs.len()));
+        for (_fr, id) in r.eviction.iter().rev().take(max_txs) {
+            if let Some(tx) = r.txs.get(id) {
                 out.push(tx.clone());
             }
         }
@@ -289,6 +304,7 @@ impl Mempool {
     pub fn prune(&self, db: &crate::state::db::Stores) -> usize {
         let c = crate::codec::consensus_bincode();
 
+        // snapshot outside lock
         let snapshot: Vec<(Hash32, Transaction)> = {
             let r = self.inner.read().unwrap();
             r.txs.iter().map(|(id, tx)| (*id, tx.clone())).collect()
@@ -297,7 +313,9 @@ impl Mempool {
         let mut removed = 0usize;
 
         for (id, tx) in snapshot {
-            let oversized = tx.inputs.len() > MAX_TX_INPUTS
+            // Enforce shape/size caps and strict-connectability.
+            let oversized = tx.inputs.is_empty()
+                || tx.inputs.len() > MAX_TX_INPUTS
                 || tx.outputs.len() > MAX_TX_OUTPUTS
                 || c.serialized_size(&tx)
                     .map(|n| (n as usize) > MAX_TX_BYTES)
@@ -311,6 +329,7 @@ impl Mempool {
                 _ => true,
             };
 
+            // Most important: if inputs no longer exist / not valid for current tip, drop it.
             if oversized || too_low_feerate || validate_tx_for_mempool(db, &tx).is_err() {
                 if self.remove(&id) {
                     removed += 1;
@@ -378,6 +397,9 @@ fn compute_fee_and_feerate_ppm(
     if tx_bytes == 0 {
         bail!("tx_bytes=0");
     }
+    if tx.inputs.is_empty() {
+        bail!("no inputs; cannot compute fee");
+    }
 
     // Sum input values from UTXO set.
     let mut in_sum: u64 = 0;
@@ -426,17 +448,20 @@ fn remove_locked(w: &mut Inner, id: &Hash32) -> bool {
         return false;
     };
 
-    // remove eviction + feeinfo
+    // Remove feeinfo + eviction key deterministically.
     if let Some(fi) = w.feeinfo.remove(id) {
         w.eviction.remove(&(fi.feerate_ppm, *id));
+
+        // total_bytes is accounted via fi.bytes (derived from consensus serialized_size at insert).
+        // This is our single source of truth for byte accounting on removal.
         w.total_bytes = w.total_bytes.saturating_sub(fi.bytes as usize);
     } else {
-        // best-effort fallback
+        // Defensive fallback: recompute bytes.
         let c = crate::codec::consensus_bincode();
         if let Ok(n) = c.serialized_size(&tx) {
             w.total_bytes = w.total_bytes.saturating_sub(n as usize);
         }
-        // also best-effort remove from eviction if it exists (scan)
+        // Also best-effort remove from eviction if it exists (scan).
         let mut rm: Option<(u64, Hash32)> = None;
         for item in w.eviction.iter() {
             if item.1 == *id {
@@ -449,7 +474,7 @@ fn remove_locked(w: &mut Inner, id: &Hash32) -> bool {
         }
     }
 
-    // Free spent outpoints owned by this tx (defensive).
+    // Free spent outpoints owned by this tx.
     for inp in &tx.inputs {
         if let Some(spender) = w.spent.get(&inp.prevout) {
             if spender == id {
