@@ -154,13 +154,14 @@ fn hex32(h: &Hash32) -> String {
 fn peer_id_from_multiaddr(a: &Multiaddr) -> Option<PeerId> {
     use libp2p::multiaddr::Protocol;
     a.iter().find_map(|p| {
-        if let Protocol::P2p(mh) = p {
-            PeerId::from_multihash(mh).ok()
+        if let Protocol::P2p(pid) = p {
+            Some(pid)
         } else {
             None
         }
     })
 }
+
 
 // Locator builder (Bitcoin-style): tip, parent, parent^2, parent^4, ... capped.
 fn build_locator(db: &Stores, tip: &Hash32) -> Vec<Hash32> {
