@@ -54,6 +54,31 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
 }
 
 // ----------------------
+// Durability barrier (PRODUCTION UPGRADE)
+// ----------------------
+//
+// Your journal is already durable (meta.flush), but undo/apply writes touch other trees.
+// If we crash after journal cursor advances but before utxo/undo/app are durable,
+// recovery can get confused about what actually happened.
+//
+// This makes "each step" a real durable boundary:
+// - after each undo/apply + set_tip, flush the mutated trees,
+// - then advance the journal cursor.
+//
+fn flush_state_step(db: &Stores) -> Result<()> {
+    // These are the state trees typically mutated by undo/apply + tip updates.
+    // Flushing here is cheap enough for mainnet safety (trees are append-y and small per step),
+    // and makes crash recovery deterministic.
+    db.utxo.flush().context("flush utxo")?;
+    db.undo.flush().context("flush undo")?;
+    db.app.flush().context("flush app")?;
+
+    // Tip and journal live in meta; flushing ensures tip/journal durability too.
+    db.meta.flush().context("flush meta")?;
+    Ok(())
+}
+
+// ----------------------
 // Bad-block persistence
 // ----------------------
 
@@ -135,6 +160,10 @@ fn ensure_apply_blocks_present(
 ///   then we attempt to apply toward `new_tip` only if block bytes exist.
 /// - If application fails for a non-local-missing-bytes reason, we mark bad and stop at ancestor.
 /// - On success, we clear the journal.
+///
+/// PRODUCTION UPGRADE:
+/// - After every undo/apply step, flush the mutated trees (utxo/undo/app/meta) before advancing cursor.
+///   This makes journal cursor correspond to durable state.
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
         return Ok(());
@@ -150,12 +179,9 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     );
 
     // 1) Restore state to ancestor deterministically.
-    // If we were in Undo, we had undone `cursor` blocks from undo_path already.
-    // If we were in Apply, we were at ancestor + applied cursor blocks; we must undo those applied blocks.
     match j.phase {
         Phase::Undo => {
-            // We should currently be at some tip along the old branch.
-            // Finish the remaining undo steps to reach ancestor.
+            // Finish undo steps to reach ancestor.
             let start = j.cursor as usize;
             for (i, bh) in j.undo_path.iter().enumerate().skip(start) {
                 let hi = must_hidx(db, bh)
@@ -165,14 +191,18 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
                 set_tip(db, &hi.parent)
                     .with_context(|| format!("recover set_tip(parent of {})", hex32(bh)))?;
 
+                // Durability boundary for this step
+                flush_state_step(db).context("recover flush_state_step(undo)")?;
+
                 j.cursor = (i as u64) + 1;
                 journal_write(db, &j).context("recover journal_write(undo)")?;
             }
             set_tip(db, &j.ancestor).context("recover set_tip(ancestor)")?;
+            flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
         }
 
         Phase::Apply => {
-            // We applied first `cursor` blocks from apply_path. Undo them in reverse to return to ancestor.
+            // Undo applied blocks to return to ancestor.
             let applied_n = j.cursor as usize;
             for bh in j.apply_path.iter().take(applied_n).rev() {
                 let hi = must_hidx(db, bh)
@@ -181,8 +211,11 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
                     .with_context(|| format!("recover undo_block(applied {})", hex32(bh)))?;
                 set_tip(db, &hi.parent)
                     .with_context(|| format!("recover set_tip(parent of applied {})", hex32(bh)))?;
+
+                flush_state_step(db).context("recover flush_state_step(undo applied)")?;
             }
             set_tip(db, &j.ancestor).context("recover set_tip(ancestor)")?;
+            flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
 
             // Now switch journal back to Apply with cursor=0 (since we are at ancestor again).
             j.phase = Phase::Apply;
@@ -228,20 +261,21 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
             } else {
                 println!("[reorg] recovery: missing bytes; not marking bad");
             }
-
-            // Stop at ancestor (already there if we haven't progressed far; otherwise undo to ancestor).
-            // Since we set tip after each apply step below, best is to just stop here; next boot can retry.
             return Ok(());
         }
 
         mempool_remove_mined(mempool, &blk);
         set_tip(db, bh).with_context(|| format!("recover set_tip {}", hex32(bh)))?;
 
+        flush_state_step(db).context("recover flush_state_step(apply)")?;
+
         j.cursor = (i as u64) + 1;
         journal_write(db, &j).context("recover journal_write(progress)")?;
     }
 
     set_tip(db, &j.new_tip).context("recover final set_tip(new_tip)")?;
+    flush_state_step(db).context("recover flush_state_step(final set new_tip)")?;
+
     journal_clear(db).context("recover journal_clear")?;
     mempool_prune_if_present(db, mempool);
 
@@ -255,6 +289,10 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
 /// Paranoid reorg: only reorgs if strictly higher chainwork.
 /// Guarantees that `tip` is always consistent with the applied state.
+///
+/// PRODUCTION UPGRADE:
+/// - After each undo/apply step (and tip update), flush state trees before cursor advances.
+/// - This makes journal progress a durable fact.
 pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) -> Result<()> {
     if is_bad(db, new_tip).context("is_bad(new_tip)")? {
         return Ok(());
@@ -291,6 +329,10 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             mempool_remove_mined(mempool, &blk);
 
             set_tip(db, new_tip).context("cold-start set_tip(genesis)")?;
+
+            // Make cold-start durable.
+            flush_state_step(db).context("cold-start flush_state_step")?;
+
             mempool_prune_if_present(db, mempool);
             println!("[reorg] cold-start success: tip={}", hex32(new_tip));
             return Ok(());
@@ -365,11 +407,15 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         set_tip(db, &hi.parent)
             .with_context(|| format!("[reorg] set_tip(parent of {})", hex32(bh)))?;
 
+        // Durability boundary for this step
+        flush_state_step(db).context("flush_state_step(undo)")?;
+
         j.cursor = (i as u64) + 1;
         journal_write(db, &j).context("journal_write(progress_undo)")?;
     }
 
     set_tip(db, &anc.hash).context("[reorg] set_tip(ancestor)")?;
+    flush_state_step(db).context("flush_state_step(set ancestor)")?;
 
     j.phase = Phase::Apply;
     j.cursor = 0;
@@ -399,6 +445,9 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
             set_tip(db, bh).with_context(|| format!("[reorg] set_tip {}", hex32(bh)))?;
 
+            // Durability boundary for this step
+            flush_state_step(db).context("flush_state_step(apply)")?;
+
             applied_new.push(*bh);
 
             j.cursor = (i as u64) + 1;
@@ -425,7 +474,6 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         }
 
         // Roll back: undo applied_new (reverse), then re-apply old branch (forward).
-        // We re-derive old branch forward path from undo_path reversed.
         let mut reapply_old = undo_path.clone();
         reapply_old.reverse();
 
@@ -439,8 +487,11 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             })?;
             set_tip(db, &hi.parent)
                 .with_context(|| format!("[reorg] rollback set_tip(parent of {})", hex32(bh)))?;
+
+            flush_state_step(db).context("rollback flush_state_step(undo applied_new)")?;
         }
         set_tip(db, &anc.hash).context("[reorg] rollback set_tip(ancestor)")?;
+        flush_state_step(db).context("rollback flush_state_step(set ancestor)")?;
 
         // Re-apply the old branch.
         for bh in &reapply_old {
@@ -462,9 +513,13 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
             set_tip(db, bh)
                 .with_context(|| format!("[reorg] rollback set_tip(old {})", hex32(bh)))?;
+
+            flush_state_step(db).context("rollback flush_state_step(reapply old)")?;
         }
 
         set_tip(db, &old_tip).context("[reorg] rollback final set_tip(old_tip)")?;
+        flush_state_step(db).context("rollback flush_state_step(final set old_tip)")?;
+
         mempool_prune_if_present(db, mempool);
 
         // Clear journal: we returned to old tip cleanly.
@@ -475,6 +530,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
     // Final set (should already be at new_tip)
     set_tip(db, new_tip).context("[reorg] final set_tip(new_tip)")?;
+    flush_state_step(db).context("flush_state_step(final set new_tip)")?;
 
     let final_tip = get_tip(db).context("get_tip(final)")?.unwrap_or([0u8; 32]);
     if final_tip != *new_tip {
