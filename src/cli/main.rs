@@ -203,7 +203,6 @@ pub enum WalletCmd {
 }
 
 /// Keep mempool consistent with the current canonical UTXO set.
-/// No “revalidate()” assumptions — just prune using your existing implementation.
 fn prune_mempool(db: &Arc<Stores>, mempool: &Arc<crate::net::mempool::Mempool>) {
     let n = mempool.prune(db.as_ref());
     if n > 0 {
@@ -431,7 +430,6 @@ pub async fn run() -> Result<()> {
 
             let mempool = Arc::new(crate::net::mempool::Mempool::new());
 
-            // MAINNET-CRITICAL: single chain write lock shared by miner + p2p sync
             let chain_lock = crate::chain::lock::new_chain_lock();
 
             {
@@ -469,14 +467,7 @@ pub async fn run() -> Result<()> {
                 is_bootnode: !mine,
             };
 
-            // ==============================
-            // Option A (recommended): Miner must follow remote tip
-            // ==============================
-            // We start P2P and keep a NetHandle so miner can refuse to mine unless:
-            //  - connected_peers >= 1
-            //  - last_tip_seen is fresh within TIP_FRESH_SECS
-            //
-            // NOTE: This assumes you have a spawn_p2p(...) that returns NetHandle immediately.
+            // Start P2P and keep a handle for miner gating
             let net = crate::net::node::spawn_p2p(
                 db.clone(),
                 mempool.clone(),
@@ -505,32 +496,35 @@ pub async fn run() -> Result<()> {
                 let mined_tx = mined_hdr_tx.clone();
                 let chain_lock2 = chain_lock.clone();
 
-                // miner gating constants
+                // Gating constants
                 const TIP_FRESH_SECS: u64 = 30;
                 const MIN_PEERS: usize = 1;
+
+                // NEW: stability latch prevents 1-block slip during disconnect/reconnect
+                const PEER_STABLE_SECS: u64 = 3;
 
                 let net2 = net.clone();
 
                 tokio::spawn(async move {
                     let max_mempool_txs: usize = 500;
 
-                    // throttle gating logs
-                    let mut last_gate_log = std::time::Instant::now() - std::time::Duration::from_secs(10);
+                    let mut last_gate_log =
+                        std::time::Instant::now() - std::time::Duration::from_secs(10);
 
                     loop {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-                        // ---- Option A gating: refuse to mine unless following remote tip ----
                         let peers = net2.connected_peers();
                         let fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
+                        let stable = net2.is_peer_stable(PEER_STABLE_SECS);
 
-                        if peers < MIN_PEERS || !fresh {
-                            // log at most once per ~1s
+                        if peers < MIN_PEERS || !fresh || !stable {
                             if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
-                                let last = net2.last_tip_seen_unix();
+                                let last_tip = net2.last_tip_seen_unix();
+                                let last_peer_change = net2.last_peer_change_unix();
                                 eprintln!(
-                                    "[miner] gate: NOT mining (peers={}, tip_fresh={} last_tip_seen_unix={})",
-                                    peers, fresh, last
+                                    "[miner] gate: NOT mining (peers={}, tip_fresh={}, peer_stable={} last_tip_seen_unix={} last_peer_change_unix={})",
+                                    peers, fresh, stable, last_tip, last_peer_change
                                 );
                                 last_gate_log = std::time::Instant::now();
                             }
@@ -555,7 +549,6 @@ pub async fn run() -> Result<()> {
                         })
                         .await;
 
-                        // ✅ FIX 1: print join/panic errors
                         let mined_res = match mined_join {
                             Ok(res) => res,
                             Err(e) => {
@@ -565,7 +558,6 @@ pub async fn run() -> Result<()> {
                             }
                         };
 
-                        // ✅ FIX 2: print actual mine_one() errors
                         let bh = match mined_res {
                             Ok(h) => h,
                             Err(e) => {
