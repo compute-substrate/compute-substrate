@@ -8,11 +8,8 @@
 //
 // 2) Added TX-size enforcement on inbound TX gossip *after decode* (defense-in-depth):
 //      - if consensus_bincode().serialize(&gt.tx).len() > MAX_TX_BYTES => reject + count invalid
-//    Reason: gossip envelope limit alone is not a TX limit, and a TX can be “validly” encoded
-//    but still too large for consensus / your node policy.
 //
 // 3) Added outbound TX gossip check: if tx serializes > MAX_TX_BYTES, we refuse to publish it.
-//    Reason: don’t let our own node produce/publish non-standard / non-mineable txs.
 //
 // 4) Tightened RR codec write_request/write_response to refuse sending oversized bodies
 //    (protects our own node from accidentally emitting > MAX_RR_MSG_BYTES).
@@ -20,13 +17,18 @@
 // 5) Added Option A plumbing (miner gating support):
 //      - Track connected peer count
 //      - Track "last remote tip observed" time
+//      - Track "last peer change" time (NEW: peer stability latch)
 //      - Expose these via NetHandle so miner can refuse to mine unless:
-//           connected_peers >= 1 AND tip_fresh <= N seconds
+//           connected_peers >= 1 AND tip_fresh <= N seconds AND peers stable >= M seconds
 //
 // 6) FIXED: run_p2p() previously never returned NetHandle because it entered an infinite loop.
 //    Now:
 //      - spawn_p2p() returns NetHandle immediately and spawns the P2P loop
 //      - run_p2p() is an alias for spawn_p2p() for compatibility
+//
+// 7) NEW (this message): bootnode auto-redial.
+//      - If we have 0 connected peers, periodically attempt to dial bootnodes again.
+//      - This fixes the “node restarted, miner stays gated forever” failure mode.
 
 use crate::chain::pow::{bits_within_pow_limit, pow_ok};
 use anyhow::{bail, Context, Result};
@@ -68,7 +70,6 @@ const SYNC_PROTOCOL: &str = SYNC_PROTO;
 
 // Max bytes we will read for any request/response body over request_response.
 // Must be >= MAX_BLOCK_BYTES (otherwise you can’t sync blocks).
-// Add small slack for envelopes / future-proofing while still bounded.
 const MAX_RR_SLACK_BYTES: u64 = 64 * 1024; // 64 KiB
 const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
 
@@ -289,27 +290,38 @@ pub struct NetConfig {
 pub struct NetHandle {
     pub peer_id: PeerId,
 
-    // Option A plumbing (miner gating support)
+    // Option A telemetry shared with miner
     connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
+
+    // peer-stability latch. Any connect/disconnect updates this.
+    last_peer_change_unix: Arc<AtomicU64>,
 }
 
 impl NetHandle {
-    /// Number of currently connected libp2p peers (best-effort).
     pub fn connected_peers(&self) -> usize {
         self.connected_peers.load(Ordering::Relaxed)
     }
 
-    /// Unix seconds for last observed *remote* chain activity (Tip/Headers/Blocks/HDR gossip).
     pub fn last_tip_seen_unix(&self) -> u64 {
         self.last_tip_seen_unix.load(Ordering::Relaxed)
     }
 
-    /// Convenience helper for miner gating.
     pub fn is_tip_fresh(&self, max_age_secs: u64) -> bool {
         let now = unix_now();
         let last = self.last_tip_seen_unix();
         now.saturating_sub(last) <= max_age_secs
+    }
+
+    pub fn last_peer_change_unix(&self) -> u64 {
+        self.last_peer_change_unix.load(Ordering::Relaxed)
+    }
+
+    /// Require peers to be stable (no connects/disconnects) for at least N seconds.
+    pub fn is_peer_stable(&self, min_stable_secs: u64) -> bool {
+        let now = unix_now();
+        let last = self.last_peer_change_unix();
+        now.saturating_sub(last) >= min_stable_secs
     }
 }
 
@@ -478,8 +490,7 @@ fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
     }
 }
 
-/// IMPORTANT:
-/// Sync must NOT directly mutate consensus state (UTXO/app) by calling validate_and_apply_block.
+/// Sync must NOT directly mutate consensus state by calling validate_and_apply_block.
 /// The only canonical state transition path is `maybe_reorg_to`.
 fn try_apply_pending(
     db: &Stores,
@@ -490,7 +501,6 @@ fn try_apply_pending(
     loop {
         let (tip, _h, _w) = local_tip_and_work(db);
 
-        // find any pending block that directly extends current applied tip
         let next_hash = pending_apply.iter().find_map(|(h, blk)| {
             if blk.header.prev == tip {
                 Some(*h)
@@ -502,13 +512,11 @@ fn try_apply_pending(
         let Some(h) = next_hash else { break };
         let blk = pending_apply.remove(&h).unwrap();
 
-        // Persist + ensure index under lock (but DO NOT apply state here).
         {
             let _g = chain_lock.lock();
 
             if db.blocks.get(k_block(&h)).ok().flatten().is_none() {
                 if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&blk) {
-                    // defense: don't store absurd blocks
                     if bytes.len() <= MAX_BLOCK_BYTES {
                         let _ = db.blocks.insert(k_block(&h), bytes);
                     }
@@ -568,17 +576,19 @@ pub async fn spawn_p2p(
     let local_key = load_or_create_node_key(&cfg.datadir)?;
     let peer_id = PeerId::from(local_key.public());
 
-    // Option A telemetry shared with miner
     let connected_peers = Arc::new(AtomicUsize::new(0));
     let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
+
+    // Initialize peer change as "now" so miner won’t mine until stable window passes.
+    let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 
     let handle = NetHandle {
         peer_id,
         connected_peers: connected_peers.clone(),
         last_tip_seen_unix: last_tip_seen_unix.clone(),
+        last_peer_change_unix: last_peer_change_unix.clone(),
     };
 
-    // Spawn the real loop
     tokio::spawn(async move {
         if let Err(e) = run_p2p_loop(
             db,
@@ -588,6 +598,7 @@ pub async fn spawn_p2p(
             peer_id,
             connected_peers,
             last_tip_seen_unix,
+            last_peer_change_unix,
             mined_rx,
             tx_gossip_rx,
             chain_lock,
@@ -623,6 +634,7 @@ async fn run_p2p_loop(
     peer_id: PeerId,
     connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
+    last_peer_change_unix: Arc<AtomicU64>,
     mut mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
     mut tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
     chain_lock: ChainLock,
@@ -715,6 +727,12 @@ async fn run_p2p_loop(
 
     let mut poll = interval(Duration::from_secs(5));
 
+    // ----------------- NEW: bootnode auto-redial (throttled) -----------------
+    // If the bootnode restarts, we want the client to re-dial instead of staying disconnected forever.
+    let mut last_redial = Instant::now() - Duration::from_secs(60);
+    const REDIAL_EVERY_SECS: u64 = 10;
+    // ------------------------------------------------------------------------
+
     let is_bad = |bad: &HashMap<Hash32, HashSet<PeerId>>, h: &Hash32, p: &PeerId| -> bool {
         bad.get(h).map(|s| s.contains(p)).unwrap_or(false)
     };
@@ -748,9 +766,7 @@ async fn run_p2p_loop(
             }
 
             while inflight.len() < MAX_INFLIGHT_BLOCKS {
-                let Some(h) = want_blocks.pop_front() else {
-                    break;
-                };
+                let Some(h) = want_blocks.pop_front() else { break };
                 if db.blocks.get(k_block(&h))?.is_some() {
                     continue;
                 }
@@ -812,14 +828,27 @@ async fn run_p2p_loop(
         best.map(|(p, _)| p)
     };
 
-    // convenience: mark "remote chain activity seen"
     let mark_tip_seen = |last_tip_seen_unix: &Arc<AtomicU64>| {
         last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
+    };
+
+    let mark_peer_change = |last_peer_change_unix: &Arc<AtomicU64>| {
+        last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
     };
 
     loop {
         tokio::select! {
             _ = poll.tick() => {
+                // ----------------- NEW: bootnode auto-redial -----------------
+                if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
+                    for a in &cfg.bootnodes {
+                        println!("[p2p] redial bootnode {a}");
+                        let _ = swarm.dial(a.clone());
+                    }
+                    last_redial = Instant::now();
+                }
+                // ------------------------------------------------------------
+
                 for p in connected.iter() {
                     if is_banned(&bans, p) { continue; }
                     let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
@@ -876,6 +905,9 @@ async fn run_p2p_loop(
                             connected.insert(peer_id);
                             connected_peers.store(connected.len(), Ordering::Relaxed);
 
+                            // Any connect/disconnect resets stability timer
+                            mark_peer_change(&last_peer_change_unix);
+
                             if sync_peer.is_none() {
                                 sync_peer = Some(peer_id);
                             }
@@ -888,6 +920,9 @@ async fn run_p2p_loop(
                         if connected.remove(&peer_id) {
                             connected_peers.store(connected.len(), Ordering::Relaxed);
                         }
+
+                        // Any connect/disconnect resets stability timer
+                        mark_peer_change(&last_peer_change_unix);
 
                         peer_heights.remove(&peer_id);
                         peer_work.remove(&peer_id);
@@ -947,7 +982,7 @@ async fn run_p2p_loop(
                                     continue;
                                 }
 
-                                // Option A: remote header gossip counts as "tip seen"
+                                // Remote chain activity counts as "tip seen"
                                 mark_tip_seen(&last_tip_seen_unix);
 
                                 if let Some(p) = src {
@@ -1057,15 +1092,14 @@ async fn run_p2p_loop(
                                                         sync_peer = Some(peer);
                                                     }
 
-                                                    let (applied_tip, applied_h, applied_w) = local_tip_and_work(&db);
+                                                    let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
 
                                                     let local_w = if best_hdr_work > 0 { best_hdr_work } else { applied_w };
-                                                    let local_h = if best_hdr_work > 0 { best_hdr_height } else { applied_h };
                                                     let locator_tip = if best_hdr_tip != [0u8; 32] { best_hdr_tip } else { applied_tip };
 
                                                     if chainwork > local_w && sync_peer == Some(peer) {
                                                         let locator = build_locator(&db, &locator_tip);
-                                                        let _rid2 = swarm.behaviour_mut().rr.send_request(
+                                                        let _ = swarm.behaviour_mut().rr.send_request(
                                                             &peer,
                                                             SyncRequest::GetHeadersByLocator { locator, max: MAX_HEADERS_PER_SYNC }
                                                         );
