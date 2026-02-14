@@ -17,7 +17,7 @@
 // 5) Added Option A plumbing (miner gating support):
 //      - Track connected peer count
 //      - Track "last remote tip observed" time
-//      - Track "last peer change" time (NEW: peer stability latch)
+//      - Track "last peer change" time (peer stability latch)
 //      - Expose these via NetHandle so miner can refuse to mine unless:
 //           connected_peers >= 1 AND tip_fresh <= N seconds AND peers stable >= M seconds
 //
@@ -26,9 +26,14 @@
 //      - spawn_p2p() returns NetHandle immediately and spawns the P2P loop
 //      - run_p2p() is an alias for spawn_p2p() for compatibility
 //
-// 7) NEW (this message): bootnode auto-redial.
+// 7) Bootnode auto-redial:
 //      - If we have 0 connected peers, periodically attempt to dial bootnodes again.
-//      - This fixes the “node restarted, miner stays gated forever” failure mode.
+//
+// 8) NEW (this patch): connection refcount + dial backoff (fixes “connected spam” + tip spam).
+//
+// 9) NEW (production upgrades):
+//      - peer scoring (prefer good peers; deprioritize bad)
+//      - misbehavior quarantine (soft-ban for N seconds when score too low)
 
 use crate::chain::pow::{bits_within_pow_limit, pow_ok};
 use anyhow::{bail, Context, Result};
@@ -68,22 +73,36 @@ const SYNC_PROTOCOL: &str = SYNC_PROTO;
 
 // ----------------- hardening constants -----------------
 
-// Max bytes we will read for any request/response body over request_response.
-// Must be >= MAX_BLOCK_BYTES (otherwise you can’t sync blocks).
 const MAX_RR_SLACK_BYTES: u64 = 64 * 1024; // 64 KiB
 const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
 
-// Max bytes we will accept for gossipsub messages (envelope cap).
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
-// Rate limits (very simple, per-peer counters reset per window)
 const RL_WINDOW: Duration = Duration::from_secs(10);
 const RL_MAX_RR_REQS_PER_WINDOW: u32 = 200;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 500;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 50;
 
-// Temporary ban duration for obvious abuse.
 const BAN_SECS: u64 = 60;
+
+// ----------------- production upgrades -----------------
+
+// score tuning (simple + stable)
+const SCORE_GOOD_TIP: i32 = 1;
+const SCORE_GOOD_HEADERS: i32 = 2;
+const SCORE_GOOD_BLOCK: i32 = 3;
+const SCORE_BAD_INVALID: i32 = -4;
+const SCORE_BAD_TIMEOUT: i32 = -2;
+const SCORE_BAD_UNKNOWN_BLOCK: i32 = -2;
+
+// quarantine: soft-ban for a while when score too low
+const QUAR_SECS: u64 = 60;
+const QUAR_SCORE_THRESHOLD: i32 = -20;
+
+// ----------------- dial backoff tuning -----------------
+
+const REDIAL_EVERY_SECS: u64 = 10;
+const DIAL_BACKOFF_SECS: u64 = 10;
 
 // ----------------- time helpers -----------------
 
@@ -100,8 +119,6 @@ fn nodekey_path(datadir: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(datadir).join("nodekey.ed25519")
 }
 
-/// Stable PeerId forever: load protobuf-encoded Keypair from datadir/nodekey.ed25519
-/// else generate, write atomically, and reuse.
 fn load_or_create_node_key(datadir: &str) -> anyhow::Result<identity::Keypair> {
     std::fs::create_dir_all(datadir).context("create datadir")?;
     let p = nodekey_path(datadir);
@@ -134,6 +151,17 @@ fn hex32(h: &Hash32) -> String {
     format!("0x{}", hex::encode(h))
 }
 
+fn peer_id_from_multiaddr(a: &Multiaddr) -> Option<PeerId> {
+    use libp2p::multiaddr::Protocol;
+    a.iter().find_map(|p| {
+        if let Protocol::P2p(mh) = p {
+            PeerId::from_multihash(mh).ok()
+        } else {
+            None
+        }
+    })
+}
+
 // Locator builder (Bitcoin-style): tip, parent, parent^2, parent^4, ... capped.
 fn build_locator(db: &Stores, tip: &Hash32) -> Vec<Hash32> {
     let mut loc = Vec::<Hash32>::new();
@@ -163,13 +191,11 @@ fn build_locator(db: &Stores, tip: &Hash32) -> Vec<Hash32> {
         }
 
         n += 1;
-        // after a few entries, exponential backoff
         if n > 10 {
             step = step.saturating_mul(2);
         }
     }
 
-    // sentinel
     loc.push([0u8; 32]);
     loc
 }
@@ -289,12 +315,8 @@ pub struct NetConfig {
 #[derive(Clone)]
 pub struct NetHandle {
     pub peer_id: PeerId,
-
-    // Option A telemetry shared with miner
     connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
-
-    // peer-stability latch. Any connect/disconnect updates this.
     last_peer_change_unix: Arc<AtomicU64>,
 }
 
@@ -317,7 +339,6 @@ impl NetHandle {
         self.last_peer_change_unix.load(Ordering::Relaxed)
     }
 
-    /// Require peers to be stable (no connects/disconnects) for at least N seconds.
     pub fn is_peer_stable(&self, min_stable_secs: u64) -> bool {
         let now = unix_now();
         let last = self.last_peer_change_unix();
@@ -475,7 +496,6 @@ fn accept_header_universe_pow(cfg: &NetConfig, hdr: &BlockHeader, h: &Hash32) ->
     true
 }
 
-/// Applied tip (UTXO/app). This is NOT the same thing as the best header tip during headers-first sync.
 fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
     let tip = match get_tip(db) {
         Ok(Some(t)) => t,
@@ -490,8 +510,6 @@ fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
     }
 }
 
-/// Sync must NOT directly mutate consensus state by calling validate_and_apply_block.
-/// The only canonical state transition path is `maybe_reorg_to`.
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
@@ -564,7 +582,6 @@ fn as_rr_event(event: OutEvent) -> Option<request_response::Event<SyncRequest, S
 
 // ----------------- PUBLIC API -----------------
 
-/// Start P2P in the background and immediately return a NetHandle (Option A miner gating).
 pub async fn spawn_p2p(
     db: Arc<Stores>,
     mempool: Arc<Mempool>,
@@ -578,8 +595,6 @@ pub async fn spawn_p2p(
 
     let connected_peers = Arc::new(AtomicUsize::new(0));
     let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
-
-    // Initialize peer change as "now" so miner won’t mine until stable window passes.
     let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 
     let handle = NetHandle {
@@ -612,7 +627,6 @@ pub async fn spawn_p2p(
     Ok(handle)
 }
 
-/// Backward-compat alias: same as spawn_p2p().
 pub async fn run_p2p(
     db: Arc<Stores>,
     mempool: Arc<Mempool>,
@@ -688,53 +702,104 @@ async fn run_p2p_loop(
         let _ = swarm.dial(a.clone());
     }
 
-    // ----------------- sync state -----------------
-
     const MAX_HEADERS_PER_SYNC: u64 = 1024;
     const MAX_INFLIGHT_BLOCKS: usize = 128;
     const MAX_WANT_QUEUE: usize = 20_000;
     const BLOCK_REQ_TIMEOUT_SECS: u64 = 10;
 
     let mut connected: HashSet<PeerId> = HashSet::new();
+
+    // NEW: connection refcount to avoid duplicate “connected” spam
+    let mut conn_refcnt: HashMap<PeerId, usize> = HashMap::new();
+
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
     let mut sync_peer: Option<PeerId> = None;
 
-    // Provider hint per block hash
+    // NEW: peer scoring + quarantine
+    let mut peer_score: HashMap<PeerId, i32> = HashMap::new();
+    let mut quarantine: HashMap<PeerId, Instant> = HashMap::new();
+
     let mut providers: HashMap<Hash32, PeerId> = HashMap::new();
     let mut bad_providers: HashMap<Hash32, HashSet<PeerId>> = HashMap::new();
 
-    // Seen header hashes from gossip
     let mut seen_blocks: HashSet<Hash32> = HashSet::new();
 
-    // inflight block requests
     let mut inflight: HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)> =
         HashMap::new();
     let mut rid_to_hash: HashMap<request_response::OutboundRequestId, Hash32> = HashMap::new();
 
-    // blocks waiting to be applied once parent exists
     let mut pending_apply: HashMap<Hash32, Block> = HashMap::new();
     let mut want_blocks: VecDeque<Hash32> = VecDeque::new();
 
-    // best header chain tip (headers-first)
     let mut best_hdr_tip: Hash32 = [0u8; 32];
     let mut best_hdr_height: u64 = 0;
     let mut best_hdr_work: u128 = 0;
 
-    // abuse control
     let mut buckets: HashMap<PeerId, RateBucket> = HashMap::new();
     let mut bans: HashMap<PeerId, Instant> = HashMap::new();
 
     let mut poll = interval(Duration::from_secs(5));
 
-    // ----------------- NEW: bootnode auto-redial (throttled) -----------------
-    // If the bootnode restarts, we want the client to re-dial instead of staying disconnected forever.
     let mut last_redial = Instant::now() - Duration::from_secs(60);
-    const REDIAL_EVERY_SECS: u64 = 10;
-    // ------------------------------------------------------------------------
+    let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
 
     let is_bad = |bad: &HashMap<Hash32, HashSet<PeerId>>, h: &Hash32, p: &PeerId| -> bool {
         bad.get(h).map(|s| s.contains(p)).unwrap_or(false)
+    };
+
+    let is_quarantined = |quar: &HashMap<PeerId, Instant>, p: &PeerId| -> bool {
+        quar.get(p)
+            .map(|t| t.elapsed().as_secs() < QUAR_SECS)
+            .unwrap_or(false)
+    };
+
+    let bump_score = |scores: &mut HashMap<PeerId, i32>, quar: &mut HashMap<PeerId, Instant>, p: PeerId, delta: i32| {
+        let s = scores.entry(p).or_insert(0);
+        *s = s.saturating_add(delta);
+        if *s <= QUAR_SCORE_THRESHOLD {
+            quar.insert(p, Instant::now());
+        }
+    };
+
+    let choose_best_sync_peer = |connected: &HashSet<PeerId>,
+                                 peer_work: &HashMap<PeerId, u128>,
+                                 peer_score: &HashMap<PeerId, i32>,
+                                 bans: &HashMap<PeerId, Instant>,
+                                 quarantine: &HashMap<PeerId, Instant>|
+     -> Option<PeerId> {
+        let mut best: Option<(PeerId, u128, i32)> = None;
+        for p in connected.iter() {
+            if is_banned(bans, p) { continue; }
+            if is_quarantined(quarantine, p) { continue; }
+
+            let w = *peer_work.get(p).unwrap_or(&0);
+            let s = *peer_score.get(p).unwrap_or(&0);
+
+            match best {
+                None => best = Some((*p, w, s)),
+                Some((_bp, bw, bs)) => {
+                    // Primary: chainwork
+                    if w > bw {
+                        best = Some((*p, w, s));
+                    } else if w == bw {
+                        // Tie-break: score
+                        if s > bs {
+                            best = Some((*p, w, s));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(p, _w, _s)| p)
+    };
+
+    let mark_tip_seen = |last_tip_seen_unix: &Arc<AtomicU64>| {
+        last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
+    };
+
+    let mark_peer_change = |last_peer_change_unix: &Arc<AtomicU64>| {
+        last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
     };
 
     let pump_blocks =
@@ -749,14 +814,16 @@ async fn run_p2p_loop(
          inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>|
          -> Result<()> {
             let now = Instant::now();
-            let mut timed_out: Vec<Hash32> = vec![];
-            for (h, (_rid, t0, _peer)) in inflight.iter() {
+            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
+
+            for (h, (_rid, t0, peer)) in inflight.iter() {
                 if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
-                    timed_out.push(*h);
+                    timed_out.push((*h, *peer));
                 }
             }
-            for h in timed_out {
-                if let Some((rid, _t0, _peer)) = inflight.remove(&h) {
+
+            for (h, _peer) in timed_out {
+                if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
                     rid_to_hash.remove(&rid);
                 }
                 if want_blocks.len() < MAX_WANT_QUEUE {
@@ -809,54 +876,43 @@ async fn run_p2p_loop(
             Ok(())
         };
 
-    let choose_best_sync_peer = |connected: &HashSet<PeerId>,
-                                 peer_work: &HashMap<PeerId, u128>,
-                                 bans: &HashMap<PeerId, Instant>|
-     -> Option<PeerId> {
-        let mut best: Option<(PeerId, u128)> = None;
-        for p in connected.iter() {
-            if is_banned(bans, p) {
-                continue;
-            }
-            let w = *peer_work.get(p).unwrap_or(&0);
-            match best {
-                None => best = Some((*p, w)),
-                Some((_bp, bw)) if w > bw => best = Some((*p, w)),
-                _ => {}
-            }
-        }
-        best.map(|(p, _)| p)
-    };
-
-    let mark_tip_seen = |last_tip_seen_unix: &Arc<AtomicU64>| {
-        last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
-    };
-
-    let mark_peer_change = |last_peer_change_unix: &Arc<AtomicU64>| {
-        last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
-    };
-
     loop {
         tokio::select! {
             _ = poll.tick() => {
-                // ----------------- NEW: bootnode auto-redial -----------------
+                // bootnode auto-redial (with backoff + connected-skip)
                 if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
                     for a in &cfg.bootnodes {
+                        // if multiaddr includes peer id, skip if already connected
+                        if let Some(pid) = peer_id_from_multiaddr(a) {
+                            if connected.contains(&pid) {
+                                continue;
+                            }
+                        }
+
+                        // per-address backoff
+                        if let Some(t0) = last_dial_by_addr.get(a) {
+                            if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
+                                continue;
+                            }
+                        }
+
                         println!("[p2p] redial bootnode {a}");
                         let _ = swarm.dial(a.clone());
+                        last_dial_by_addr.insert(a.clone(), Instant::now());
                     }
                     last_redial = Instant::now();
                 }
-                // ------------------------------------------------------------
 
+                // periodic tip requests (skip banned/quarantined)
                 for p in connected.iter() {
                     if is_banned(&bans, p) { continue; }
+                    if is_quarantined(&quarantine, p) { continue; }
                     let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
                 }
 
                 if sync_peer.is_none() {
-                    sync_peer = choose_best_sync_peer(&connected, &peer_work, &bans)
-                        .or_else(|| connected.iter().find(|p| !is_banned(&bans, p)).cloned());
+                    sync_peer = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine)
+                        .or_else(|| connected.iter().find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p)).cloned());
                 }
 
                 let _ = pump_blocks(
@@ -876,7 +932,6 @@ async fn run_p2p_loop(
             }
 
             Some(ev) = tx_gossip_rx.recv() => {
-                // Hardening: don't publish a tx that violates our consensus/policy size limits
                 if let Ok(tx_bytes) = crate::codec::consensus_bincode().serialize(&ev.tx) {
                     if tx_bytes.len() > MAX_TX_BYTES {
                         println!("[p2p] refusing to gossip oversized tx ({} bytes)", tx_bytes.len());
@@ -900,28 +955,46 @@ async fn run_p2p_loop(
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         if is_banned(&bans, &peer_id) {
                             println!("[p2p] ignoring connect from banned peer: {peer_id}");
-                        } else {
-                            println!("[p2p] connected: {peer_id}");
-                            connected.insert(peer_id);
-                            connected_peers.store(connected.len(), Ordering::Relaxed);
+                            continue;
+                        }
 
-                            // Any connect/disconnect resets stability timer
-                            mark_peer_change(&last_peer_change_unix);
+                        // NEW: refcount; only treat 0->1 as “connected”
+                        let e = conn_refcnt.entry(peer_id).or_insert(0);
+                        *e += 1;
+                        if *e > 1 {
+                            // duplicate connection, do not spam logs / do not re-add / do not re-request tip
+                            continue;
+                        }
 
-                            if sync_peer.is_none() {
-                                sync_peer = Some(peer_id);
-                            }
+                        println!("[p2p] connected: {peer_id}");
+                        connected.insert(peer_id);
+                        connected_peers.store(connected.len(), Ordering::Relaxed);
+                        mark_peer_change(&last_peer_change_unix);
+
+                        // only request tip on first connection
+                        if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
+                            sync_peer = Some(peer_id);
+                        }
+                        if !is_quarantined(&quarantine, &peer_id) {
                             let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
                             println!("[sync] requested tip ({rid:?})");
                         }
                     }
 
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                        // NEW: refcount; only treat 1->0 as “disconnected”
+                        if let Some(e) = conn_refcnt.get_mut(&peer_id) {
+                            if *e > 0 { *e -= 1; }
+                            if *e > 0 {
+                                continue;
+                            }
+                        }
+                        conn_refcnt.remove(&peer_id);
+
                         if connected.remove(&peer_id) {
                             connected_peers.store(connected.len(), Ordering::Relaxed);
                         }
 
-                        // Any connect/disconnect resets stability timer
                         mark_peer_change(&last_peer_change_unix);
 
                         peer_heights.remove(&peer_id);
@@ -952,12 +1025,17 @@ async fn run_p2p_loop(
                             if data.len() > MAX_GOSSIP_MSG_BYTES {
                                 if let Some(p) = src {
                                     note_invalid(&mut buckets, &mut bans, p, "oversized gossip msg");
+                                    bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
                                 }
                                 continue;
                             }
 
                             if let Some(p) = src {
                                 if !allow_gossip(&mut buckets, &mut bans, p) {
+                                    continue;
+                                }
+                                if is_quarantined(&quarantine, &p) {
+                                    // silently ignore gossip from quarantined peers
                                     continue;
                                 }
                             }
@@ -968,6 +1046,7 @@ async fn run_p2p_loop(
                                     Err(_) => {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "bad gossip header decode");
+                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
                                         }
                                         continue;
                                     }
@@ -978,15 +1057,16 @@ async fn run_p2p_loop(
                                 if !accept_header_universe_pow(&cfg, &gh.header, &h) {
                                     if let Some(p) = src {
                                         note_invalid(&mut buckets, &mut bans, p, "gossip header failed pow/limit/universe");
+                                        bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
                                     }
                                     continue;
                                 }
 
-                                // Remote chain activity counts as "tip seen"
                                 mark_tip_seen(&last_tip_seen_unix);
 
                                 if let Some(p) = src {
                                     providers.entry(h).or_insert(p);
+                                    bump_score(&mut peer_score, &mut quarantine, p, 1);
                                 }
 
                                 if seen_blocks.insert(h) {
@@ -1011,16 +1091,17 @@ async fn run_p2p_loop(
                                     Err(_) => {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "bad gossip tx decode");
+                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
                                         }
                                         continue;
                                     }
                                 };
 
-                                // Hardening: enforce tx bytes cap (defense-in-depth).
                                 if let Ok(tx_bytes) = crate::codec::consensus_bincode().serialize(&gt.tx) {
                                     if tx_bytes.len() > MAX_TX_BYTES {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "gossip tx oversized");
+                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
                                         }
                                         continue;
                                     }
@@ -1031,6 +1112,7 @@ async fn run_p2p_loop(
                                     Err(_) => {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "gossip tx failed mempool validation");
+                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
                                         }
                                     }
                                 }
@@ -1043,6 +1125,10 @@ async fn run_p2p_loop(
                             match rr_ev {
                                 Event::Message { peer, message } => {
                                     if is_banned(&bans, &peer) {
+                                        continue;
+                                    }
+                                    if is_quarantined(&quarantine, &peer) {
+                                        // ignore rr from quarantined peers
                                         continue;
                                     }
 
@@ -1081,11 +1167,12 @@ async fn run_p2p_loop(
                                             match response {
                                                 SyncResponse::Tip { hash: _hash, height, chainwork } => {
                                                     mark_tip_seen(&last_tip_seen_unix);
+                                                    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
                                                     peer_heights.insert(peer, height);
                                                     peer_work.insert(peer, chainwork);
 
-                                                    let best = choose_best_sync_peer(&connected, &peer_work, &bans);
+                                                    let best = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine);
                                                     if best.is_some() && sync_peer != best {
                                                         sync_peer = best;
                                                     } else if sync_peer.is_none() {
@@ -1093,7 +1180,6 @@ async fn run_p2p_loop(
                                                     }
 
                                                     let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
-
                                                     let local_w = if best_hdr_work > 0 { best_hdr_work } else { applied_w };
                                                     let locator_tip = if best_hdr_tip != [0u8; 32] { best_hdr_tip } else { applied_tip };
 
@@ -1109,6 +1195,7 @@ async fn run_p2p_loop(
                                                 SyncResponse::Headers { headers } => {
                                                     if !headers.is_empty() {
                                                         mark_tip_seen(&last_tip_seen_unix);
+                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
                                                     }
 
                                                     if sync_peer.is_some() && sync_peer != Some(peer) {
@@ -1123,6 +1210,7 @@ async fn run_p2p_loop(
 
                                                             if !accept_header_universe_pow(&cfg, &hdr, &h) {
                                                                 note_invalid(&mut buckets, &mut bans, peer, "headers: invalid pow/limit/universe");
+                                                                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
                                                                 continue;
                                                             }
 
@@ -1141,6 +1229,7 @@ async fn run_p2p_loop(
 
                                                             if idx_res.is_err() {
                                                                 note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
+                                                                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
                                                                 continue;
                                                             }
 
@@ -1169,22 +1258,29 @@ async fn run_p2p_loop(
 
                                                 SyncResponse::Block { block } => {
                                                     mark_tip_seen(&last_tip_seen_unix);
+                                                    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
 
                                                     if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
                                                         if bytes.len() > MAX_BLOCK_BYTES {
                                                             note_invalid(&mut buckets, &mut bans, peer, "block: oversized");
+                                                            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
                                                             continue;
                                                         }
                                                     }
 
                                                     let bh = header_hash(&block.header);
 
-                                                    if let Some((rid2, _t0, _asked_peer)) = inflight.remove(&bh) {
+                                                    if let Some((rid2, t0, asked_peer)) = inflight.remove(&bh) {
                                                         rid_to_hash.remove(&rid2);
+                                                        if asked_peer == peer {
+                                                            // good: answered inflight
+                                                            let _elapsed = t0.elapsed().as_millis();
+                                                        }
                                                     }
 
                                                     if !accept_header_universe_pow(&cfg, &block.header, &bh) {
                                                         note_invalid(&mut buckets, &mut bans, peer, "block: failed pow/limit/universe");
+                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
                                                         continue;
                                                     }
 
@@ -1195,6 +1291,7 @@ async fn run_p2p_loop(
                                                             let bytes = crate::codec::consensus_bincode().serialize(&block)?;
                                                             if bytes.len() > MAX_BLOCK_BYTES {
                                                                 note_invalid(&mut buckets, &mut bans, peer, "block: oversized (store)");
+                                                                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
                                                                 continue;
                                                             }
                                                             db.blocks.insert(k_block(&bh), bytes)?;
@@ -1211,6 +1308,7 @@ async fn run_p2p_loop(
 
                                                         if idx_res.is_err() {
                                                             note_invalid(&mut buckets, &mut bans, peer, "block: index_header failed");
+                                                            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
                                                             continue;
                                                         }
 
@@ -1238,6 +1336,8 @@ async fn run_p2p_loop(
                                                     println!("[sync] error response from {peer}: {msg}");
 
                                                     if msg.contains("unknown block") {
+                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNKNOWN_BLOCK);
+
                                                         if let Some(h) = rid_to_hash.remove(&rid) {
                                                             inflight.remove(&h);
                                                             bad_providers.entry(h).or_default().insert(peer);
@@ -1256,6 +1356,22 @@ async fn run_p2p_loop(
                                     }
                                 }
                                 _ => {}
+                            }
+                        }
+
+                        // Penalize timeouts (production upgrade)
+                        // Scan inflight and mark peers that keep timing out.
+                        // (Lightweight: done here since we are already in event loop.)
+                        {
+                            let now = Instant::now();
+                            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
+                            for (h, (_rid, t0, p)) in inflight.iter() {
+                                if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
+                                    timed_out.push((*h, *p));
+                                }
+                            }
+                            for (_h, p) in timed_out {
+                                bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_TIMEOUT);
                             }
                         }
                     }
