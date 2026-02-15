@@ -25,7 +25,7 @@ fn make_coinbase(height: u64) -> Transaction {
     // You mentioned you fixed coinbase uniqueness by committing height into script_sig.
     //
     // Adjust this one call to match your signature:
-    compute_substrate::chain::mine::coinbase(height, INITIAL_REWARD)
+    csd::chain::mine::coinbase(height, INITIAL_REWARD)
 }
 
 /// Minimal merkle for our test: if 1 tx, merkle = txid(tx).
