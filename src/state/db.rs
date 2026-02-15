@@ -41,6 +41,10 @@ pub struct Stores {
 
     // app state
     pub app: Tree, // keyspace described in app_state.rs
+
+    // NEW: explorer index (height->hash, txid->locator, block->txids)
+    // Not consensus-adjacent; safe to evolve, but keep stable once public.
+    pub idx: Tree,
 }
 
 impl Stores {
@@ -55,15 +59,12 @@ impl Stores {
             utxo_meta: db.open_tree("utxo_meta")?,
             undo: db.open_tree("undo")?,
             app: db.open_tree("app")?,
+            idx: db.open_tree("idx")?,
             db,
         })
     }
 
     /// Explicit flush boundary. Avoid calling flush on every tip write.
-    /// Call this:
-    /// - on clean shutdown
-    /// - after applying a batch of blocks
-    /// - after a successful reorg completion (optional)
     pub fn flush_all(&self) -> Result<()> {
         self.blocks.flush()?;
         self.hdr.flush()?;
@@ -73,12 +74,17 @@ impl Stores {
         self.utxo_meta.flush()?;
         self.undo.flush()?;
         self.app.flush()?;
+        self.idx.flush()?;
         Ok(())
     }
 
-    /// Flush only meta (tip/bad markers/journal). Useful if you want fast persistence.
     pub fn flush_meta(&self) -> Result<()> {
         self.meta.flush()?;
+        Ok(())
+    }
+
+    pub fn flush_idx(&self) -> Result<()> {
+        self.idx.flush()?;
         Ok(())
     }
 }
@@ -132,15 +138,13 @@ pub fn k_utxo_meta(op: &OutPoint) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------------
-// Meta keys (centralized here so other modules don’t invent ad-hoc strings)
+// Meta keys
 // -----------------------------------------------------------------------------
 
-/// Canonical tip hash (32 bytes).
 pub fn k_meta_tip() -> &'static [u8] {
     b"meta:tip"
 }
 
-/// Bad-block marker for hash (used by reorg.rs).
 pub fn k_bad(hash: &Hash32) -> Vec<u8> {
     let mut k = Vec::with_capacity(4 + 32);
     k.extend_from_slice(b"bad:");
@@ -148,13 +152,12 @@ pub fn k_bad(hash: &Hash32) -> Vec<u8> {
     k
 }
 
-/// Crash-atomic reorg journal key (used by chain/reorg_journal.rs).
 pub fn k_reorg_in_progress() -> &'static [u8] {
     b"reorg:in_progress"
 }
 
 // -----------------------------------------------------------------------------
-// Meta helpers (typed convenience wrappers)
+// Meta helpers
 // -----------------------------------------------------------------------------
 
 pub fn meta_put_bytes(db: &Stores, key: &[u8], val: &[u8]) -> Result<()> {
@@ -190,19 +193,60 @@ pub fn get_tip(db: &Stores) -> Result<Option<Hash32>> {
 
 /// Write tip WITHOUT flushing.
 ///
+/// Now also maintains explorer index in db.idx:
+/// - height -> block hash
+/// - txid -> (block_hash,height,index)
+///
 /// Mainnet note:
-/// - flushing on every call is too expensive (reorg applies call set_tip many times).
-/// - call `db.flush_meta()` or `db.flush_all()` at explicit boundaries.
+/// - still no flushing here; call flush_meta/flush_all at explicit boundaries.
 pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
-    // Debug visibility: prove set_tip is executed and what it writes.
     let old = get_tip(db)?.unwrap_or([0u8; 32]);
+
+    // Debug visibility
     println!(
         "[tip] set_tip: old=0x{} -> new=0x{}",
         hex::encode(old),
         hex::encode(tip)
     );
 
+    // Determine old/new heights (best-effort)
+    let old_hi = crate::chain::index::get_hidx(db, &old).ok().flatten();
+    let new_hi = crate::chain::index::get_hidx(db, tip).ok().flatten();
+
+    // If moving backwards: unindex blocks from old down to new height+1.
+    if let (Some(ohi), Some(nhi)) = (old_hi.clone(), new_hi.clone()) {
+        if nhi.height < ohi.height {
+            let mut cur_hash = old;
+            let mut cur_hi = ohi;
+
+            while cur_hi.height > nhi.height {
+                let _ = crate::state::tx_index::unindex_canonical_block(db, &cur_hash, cur_hi.height);
+
+                // step to parent
+                cur_hash = cur_hi.parent;
+                cur_hi = crate::chain::index::get_hidx(db, &cur_hash)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(crate::chain::index::HeaderIndex {
+                        hash: cur_hash,
+                        parent: [0u8; 32],
+                        height: 0,
+                        chainwork: 0,
+                        bits: 0,
+                        time: 0,
+                    });
+            }
+        }
+    }
+
+    // Write new tip
     db.meta.insert(k_meta_tip(), tip)?;
+
+    // If we know new height, index the canonical tip block.
+    if let Some(nhi) = new_hi {
+        let _ = crate::state::tx_index::index_canonical_block(db, tip, nhi.height);
+    }
+
     Ok(())
 }
 
