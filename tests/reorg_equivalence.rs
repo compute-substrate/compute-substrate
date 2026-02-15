@@ -31,7 +31,7 @@ fn make_coinbase(height: u64) -> Transaction {
 /// Minimal merkle for our test: if 1 tx, merkle = txid(tx).
 /// If multiple, we do a simple Bitcoin-ish merkle (pair-hash, duplicate last).
 fn merkle_root(txs: &[Transaction]) -> Hash32 {
-    use compute_substrate::crypto::txid;
+    use csd::crypto::txid;
     use sha2::{Digest, Sha256};
 
     fn h2(a: &Hash32, b: &Hash32) -> Hash32 {
