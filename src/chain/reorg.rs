@@ -57,8 +57,8 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
 // Durability barrier (PRODUCTION UPGRADE)
 // ----------------------
 //
-// Your journal is already durable (meta.flush), but undo/apply writes touch other trees.
-// If we crash after journal cursor advances but before utxo/undo/app are durable,
+// Journal writes are durable (meta.flush), but undo/apply writes touch other trees.
+// If we crash after cursor advances but before UTXO/UNDO/APP are durable,
 // recovery can get confused about what actually happened.
 //
 // This makes "each step" a real durable boundary:
@@ -67,9 +67,8 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
 //
 fn flush_state_step(db: &Stores) -> Result<()> {
     // These are the state trees typically mutated by undo/apply + tip updates.
-    // Flushing here is cheap enough for mainnet safety (trees are append-y and small per step),
-    // and makes crash recovery deterministic.
     db.utxo.flush().context("flush utxo")?;
+    db.utxo_meta.flush().context("flush utxo_meta")?; // IMPORTANT: include meta for UTXO height/coinbase tracking
     db.undo.flush().context("flush undo")?;
     db.app.flush().context("flush app")?;
 
@@ -162,7 +161,7 @@ fn ensure_apply_blocks_present(
 /// - On success, we clear the journal.
 ///
 /// PRODUCTION UPGRADE:
-/// - After every undo/apply step, flush the mutated trees (utxo/undo/app/meta) before advancing cursor.
+/// - After every undo/apply step, flush the mutated trees (utxo/utxo_meta/undo/app/meta) before advancing cursor.
 ///   This makes journal cursor correspond to durable state.
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
