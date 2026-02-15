@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tempfile::TempDir;
 
+use csd::chain::index::get_hidx;
 use csd::chain::index::{header_hash, index_header};
 use csd::chain::pow::pow_ok;
 use csd::chain::reorg::maybe_reorg_to;
@@ -106,11 +107,9 @@ fn apply_mined_block(db: &Stores, prev_hash: Hash32, height: u64, time: u64) -> 
 let parent_hi = if blk.header.prev == [0u8; 32] {
     None
 } else {
-    // parent must already be indexed
     get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
 };
 index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
-
     // Apply (UTXO + APP), then set tip.
     validate_and_apply_block(db, &blk, epoch_of(height), height).context("validate_and_apply_block")?;
     set_tip(db, &bh).context("set_tip")?;
@@ -174,10 +173,9 @@ fn replay_chain_from_blocks(dst: &Stores, src_db: &Stores, chain: &[Hash32]) -> 
 let parent_hi = if blk.header.prev == [0u8; 32] {
     None
 } else {
-    // parent must already be indexed
-    get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
+    get_hidx(dst, &blk.header.prev).context("get_hidx(parent)")?
 };
-index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
+index_header(dst, &blk.header, parent_hi.as_ref()).context("index_header(dst)")?;
         validate_and_apply_block(dst, &blk, epoch_of(height as u64), height as u64)
             .context("validate_and_apply_block(dst)")?;
         set_tip(dst, bh).context("set_tip(dst)")?;
