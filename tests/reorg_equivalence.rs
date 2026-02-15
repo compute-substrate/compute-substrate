@@ -21,11 +21,9 @@ fn open_db(tmp: &TempDir) -> Result<Stores> {
 /// You likely already have this helper. If your coinbase signature differs,
 /// adjust ONLY this function.
 fn make_coinbase(height: u64) -> Transaction {
-    // Most repos: coinbase(height) or coinbase(height, reward) or coinbase(to, reward, height).
-    // You mentioned you fixed coinbase uniqueness by committing height into script_sig.
-    //
-    // Adjust this one call to match your signature:
-    csd::chain::mine::coinbase(height, INITIAL_REWARD)
+    // deterministic test miner address (20 bytes)
+    let miner: [u8; 20] = [0x11u8; 20];
+    csd::chain::mine::coinbase(miner, INITIAL_REWARD, height)
 }
 
 /// Minimal merkle for our test: if 1 tx, merkle = txid(tx).
@@ -105,7 +103,13 @@ fn apply_mined_block(db: &Stores, prev_hash: Hash32, height: u64, time: u64) -> 
         .context("db.blocks.insert")?;
 
     // Index header (so get_hidx works and chainwork/height exists)
-    index_header(db, &blk.header).context("index_header")?;
+let parent_hi = if blk.header.prev == [0u8; 32] {
+    None
+} else {
+    // parent must already be indexed
+    get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
+};
+index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
 
     // Apply (UTXO + APP), then set tip.
     validate_and_apply_block(db, &blk, epoch_of(height), height).context("validate_and_apply_block")?;
@@ -167,7 +171,13 @@ fn replay_chain_from_blocks(dst: &Stores, src_db: &Stores, chain: &[Hash32]) -> 
             .context("deserialize Block")?;
 
         // Index header + apply + set tip (same as normal import pipeline)
-        index_header(dst, &blk.header).context("index_header(dst)")?;
+let parent_hi = if blk.header.prev == [0u8; 32] {
+    None
+} else {
+    // parent must already be indexed
+    get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
+};
+index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
         validate_and_apply_block(dst, &blk, epoch_of(height as u64), height as u64)
             .context("validate_and_apply_block(dst)")?;
         set_tip(dst, bh).context("set_tip(dst)")?;
