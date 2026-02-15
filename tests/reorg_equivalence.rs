@@ -63,20 +63,24 @@ fn merkle_root(txs: &[Transaction]) -> Hash32 {
 }
 
 /// Mines a header by scanning nonce until pow_ok(header_hash, bits).
+/// IMPORTANT: PoW mining is expensive; keep test chains short.
 fn mine_header(mut hdr: BlockHeader) -> Result<BlockHeader> {
-    for _ in 0..5_000_000u64 {
+    // Bigger budget so a single unlucky block doesn't fail.
+    // Still finite so tests don't run forever.
+    const NONCE_BUDGET: u64 = 50_000_000;
+
+    for _ in 0..NONCE_BUDGET {
         let h = header_hash(&hdr);
         if pow_ok(&h, hdr.bits) {
             return Ok(hdr);
         }
         hdr.nonce = hdr.nonce.wrapping_add(1);
     }
-    anyhow::bail!("failed to mine header within nonce budget")
+    anyhow::bail!("failed to mine header within nonce budget={NONCE_BUDGET}")
 }
 
 /// Bootstraps DB with a deterministic genesis WITHOUT calling index_header(genesis),
 /// because index_header enforces params::GENESIS_HASH for prev=0.
-/// Instead we manually insert a HeaderIndex entry for genesis into db.hdr.
 fn bootstrap_genesis(db: &Stores) -> Result<Hash32> {
     let genesis: Block = make_genesis_block(test_addr20()).context("make_genesis_block")?;
     let gh = header_hash(&genesis.header);
@@ -89,12 +93,12 @@ fn bootstrap_genesis(db: &Stores) -> Result<Hash32> {
         .insert(k_block(&gh), bytes)
         .context("db.blocks.insert(genesis)")?;
 
-    // ✅ Manual header index insert (avoid index_header(genesis) foreign-genesis check)
+    // Manual header index insert (avoid index_header(genesis) foreign-genesis check)
     let hi = HeaderIndex {
         hash: gh,
         parent: [0u8; 32],
         height: 0,
-        chainwork: 0, // baseline; chainwork comparisons still work for this test
+        chainwork: 0,
         bits: genesis.header.bits,
         time: genesis.header.time,
     };
@@ -107,8 +111,6 @@ fn bootstrap_genesis(db: &Stores) -> Result<Hash32> {
 
     // Apply state at height=0
     validate_and_apply_block(db, &genesis, epoch_of(0), 0).context("apply genesis")?;
-
-    // Set tip
     set_tip(db, &gh).context("set_tip(genesis)")?;
 
     Ok(gh)
@@ -160,7 +162,7 @@ fn apply_mined_block(db: &Stores, prev_hash: Hash32, height: u64, time: u64) -> 
     Ok(bh)
 }
 
-/// Builds a linear chain of `n_after_genesis` blocks after genesis.
+/// Builds a short linear chain after genesis.
 /// Returns hashes by height including genesis at [0].
 fn build_chain(db: &Stores, n_after_genesis: u64, start_time: u64) -> Result<Vec<Hash32>> {
     let gh = bootstrap_genesis(db).context("bootstrap_genesis")?;
@@ -179,7 +181,7 @@ fn build_chain(db: &Stores, n_after_genesis: u64, start_time: u64) -> Result<Vec
     Ok(out)
 }
 
-/// Builds a fork off an ancestor height `fork_height`.
+/// Builds a fork off `fork_height`.
 fn build_fork(
     db: &Stores,
     base_hashes: &[Hash32],
@@ -225,7 +227,7 @@ fn replay_chain_from_blocks(dst: &Stores, src_db: &Stores, chain: &[Hash32]) -> 
             .deserialize(&v)
             .context("deserialize Block")?;
 
-        // For genesis in dst, we must also avoid index_header(genesis).
+        // For genesis in dst, avoid index_header(genesis).
         if blk.header.prev == [0u8; 32] {
             let gh = header_hash(&blk.header);
 
@@ -267,19 +269,22 @@ fn replay_chain_from_blocks(dst: &Stores, src_db: &Stores, chain: &[Hash32]) -> 
 
 #[test]
 fn reorg_produces_same_state_as_direct_apply() -> Result<()> {
+    // Keep it SHORT. We're testing reorg correctness, not mining throughput.
+    const A_AFTER_GENESIS: u64 = 6; // heights 0..6
+    const FORK_HEIGHT: u64 = 3;     // fork off height 3
+    const FORK_LEN: u64 = 6;        // fork heights 3..8 (overtakes A)
+
     let tmp1 = TempDir::new().context("TempDir 1")?;
     let db1 = open_db(&tmp1).context("open db1")?;
 
     let start_time = GENESIS_TIME;
 
-    // Base chain A: genesis + 40 blocks (heights 0..40)
-    let a = build_chain(&db1, 40, start_time).context("build chain A")?;
+    // Base chain A: genesis + A_AFTER_GENESIS
+    let a = build_chain(&db1, A_AFTER_GENESIS, start_time).context("build chain A")?;
     let tip_a = *a.last().unwrap();
 
-    // Fork B off height 20, length 35 (heights 20..54)
-    let fork_height = 20u64;
-    let fork_len = 35u64;
-    let b_tail = build_fork(&db1, &a, fork_height, fork_len, start_time).context("build fork B")?;
+    // Fork B: longer branch
+    let b_tail = build_fork(&db1, &a, FORK_HEIGHT, FORK_LEN, start_time).context("build fork B")?;
     let tip_b = *b_tail.last().unwrap();
 
     // Force tip back to A, then reorg to B
@@ -294,7 +299,7 @@ fn reorg_produces_same_state_as_direct_apply() -> Result<()> {
     let db2 = open_db(&tmp2).context("open db2")?;
 
     let mut canon: Vec<Hash32> = Vec::new();
-    canon.extend_from_slice(&a[0..(fork_height as usize)]); // includes genesis
+    canon.extend_from_slice(&a[0..(FORK_HEIGHT as usize)]); // includes genesis
     canon.extend_from_slice(&b_tail);
 
     replay_chain_from_blocks(&db2, &db1, &canon).context("replay canonical chain into db2")?;
