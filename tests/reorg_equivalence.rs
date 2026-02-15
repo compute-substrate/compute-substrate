@@ -10,23 +10,21 @@ use csd::chain::reorg::maybe_reorg_to;
 use csd::codec;
 use csd::params::{INITIAL_BITS, INITIAL_REWARD};
 use csd::state::app_state::epoch_of;
-use csd::state::db::{k_block, set_tip, Stores};
+use csd::state::db::{k_block, k_hdr, set_tip, Stores};
 use csd::state::fingerprint::{fingerprint, fmt_fp};
 use csd::state::utxo::validate_and_apply_block;
-use csd::types::{Block, BlockHeader, Hash32, Hash20, Transaction};
+use csd::types::{Block, BlockHeader, Hash20, Hash32, Transaction};
 
 fn open_db(tmp: &TempDir) -> Result<Stores> {
     Stores::open(tmp.path().to_str().unwrap()).context("Stores::open")
 }
 
 /// Deterministic test address (20 bytes).
-/// NOTE: This does NOT have to match mainnet burn addr for this test.
-/// It only needs to be consistent across db1/db2, which we guarantee by replaying bytes from db1.
 fn test_addr20() -> Hash20 {
     [0x11u8; 20]
 }
 
-/// Coinbase helper (matches your mine::coinbase(miner_h160, value, height))
+/// Coinbase helper (matches mine::coinbase(miner_h160, value, height))
 fn make_coinbase(height: u64) -> Transaction {
     csd::chain::mine::coinbase(test_addr20(), INITIAL_REWARD, height)
 }
@@ -76,14 +74,14 @@ fn mine_header(mut hdr: BlockHeader) -> Result<BlockHeader> {
     anyhow::bail!("failed to mine header within nonce budget")
 }
 
-/// Bootstraps DB with a deterministic genesis.
-/// IMPORTANT: we do NOT require this hash to match params::GENESIS_HASH in this test.
-/// The reorg-equivalence property is about *state consistency*, not your production genesis constant.
+/// Bootstraps DB with a deterministic genesis WITHOUT calling index_header(genesis),
+/// because index_header enforces params::GENESIS_HASH for prev=0.
+/// Instead we manually insert a HeaderIndex entry for genesis into db.hdr.
 fn bootstrap_genesis(db: &Stores) -> Result<Hash32> {
     let genesis: Block = make_genesis_block(test_addr20()).context("make_genesis_block")?;
     let gh = header_hash(&genesis.header);
 
-    // Persist bytes
+    // Persist genesis block bytes
     let bytes = codec::consensus_bincode()
         .serialize(&genesis)
         .context("serialize genesis")?;
@@ -91,8 +89,21 @@ fn bootstrap_genesis(db: &Stores) -> Result<Hash32> {
         .insert(k_block(&gh), bytes)
         .context("db.blocks.insert(genesis)")?;
 
-    // Index header (parent=None at genesis)
-    index_header(db, &genesis.header, None).context("index_header(genesis)")?;
+    // ✅ Manual header index insert (avoid index_header(genesis) foreign-genesis check)
+    let hi = HeaderIndex {
+        hash: gh,
+        parent: [0u8; 32],
+        height: 0,
+        chainwork: 0, // baseline; chainwork comparisons still work for this test
+        bits: genesis.header.bits,
+        time: genesis.header.time,
+    };
+    let hi_bytes = codec::consensus_bincode()
+        .serialize(&hi)
+        .context("serialize HeaderIndex(genesis)")?;
+    db.hdr
+        .insert(k_hdr(&gh), hi_bytes)
+        .context("db.hdr.insert(genesis HeaderIndex)")?;
 
     // Apply state at height=0
     validate_and_apply_block(db, &genesis, epoch_of(0), 0).context("apply genesis")?;
@@ -112,7 +123,6 @@ fn parent_hi_for(db: &Stores, prev: &Hash32) -> Result<Option<HeaderIndex>> {
 }
 
 /// Build + persist + index + apply one block extending `prev_hash` at `height`.
-/// Returns block hash.
 fn apply_mined_block(db: &Stores, prev_hash: Hash32, height: u64, time: u64) -> Result<Hash32> {
     let cb = make_coinbase(height);
     let txs = vec![cb];
@@ -139,7 +149,7 @@ fn apply_mined_block(db: &Stores, prev_hash: Hash32, height: u64, time: u64) -> 
         .insert(k_block(&bh), bytes)
         .context("db.blocks.insert")?;
 
-    // Index header
+    // Index header (safe for non-genesis blocks)
     let parent_hi = parent_hi_for(db, &blk.header.prev)?;
     index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
 
@@ -151,7 +161,7 @@ fn apply_mined_block(db: &Stores, prev_hash: Hash32, height: u64, time: u64) -> 
 }
 
 /// Builds a linear chain of `n_after_genesis` blocks after genesis.
-/// Returns Vec of hashes by height (index == height), including genesis at [0].
+/// Returns hashes by height including genesis at [0].
 fn build_chain(db: &Stores, n_after_genesis: u64, start_time: u64) -> Result<Vec<Hash32>> {
     let gh = bootstrap_genesis(db).context("bootstrap_genesis")?;
 
@@ -170,7 +180,6 @@ fn build_chain(db: &Stores, n_after_genesis: u64, start_time: u64) -> Result<Vec
 }
 
 /// Builds a fork off an ancestor height `fork_height`.
-/// Parent is height fork_height-1. Returns fork block hashes (heights fork_height..fork_height+fork_len-1).
 fn build_fork(
     db: &Stores,
     base_hashes: &[Hash32],
@@ -201,7 +210,7 @@ fn build_fork(
     Ok(out)
 }
 
-/// Rebuild chain into a fresh DB, using the stored blocks in `src_db`.
+/// Replay blocks from src_db into dst deterministically.
 fn replay_chain_from_blocks(dst: &Stores, src_db: &Stores, chain: &[Hash32]) -> Result<()> {
     for (height, bh) in chain.iter().enumerate() {
         let Some(v) = src_db
@@ -215,6 +224,34 @@ fn replay_chain_from_blocks(dst: &Stores, src_db: &Stores, chain: &[Hash32]) -> 
         let blk: Block = codec::consensus_bincode()
             .deserialize(&v)
             .context("deserialize Block")?;
+
+        // For genesis in dst, we must also avoid index_header(genesis).
+        if blk.header.prev == [0u8; 32] {
+            let gh = header_hash(&blk.header);
+
+            dst.blocks
+                .insert(k_block(&gh), v)
+                .context("dst.blocks.insert(genesis bytes)")?;
+
+            let hi = HeaderIndex {
+                hash: gh,
+                parent: [0u8; 32],
+                height: 0,
+                chainwork: 0,
+                bits: blk.header.bits,
+                time: blk.header.time,
+            };
+            let hi_bytes = codec::consensus_bincode()
+                .serialize(&hi)
+                .context("serialize HeaderIndex(dst genesis)")?;
+            dst.hdr
+                .insert(k_hdr(&gh), hi_bytes)
+                .context("dst.hdr.insert(genesis HeaderIndex)")?;
+
+            validate_and_apply_block(dst, &blk, epoch_of(0), 0).context("apply genesis(dst)")?;
+            set_tip(dst, &gh).context("set_tip(genesis dst)")?;
+            continue;
+        }
 
         let parent_hi = parent_hi_for(dst, &blk.header.prev)?;
         index_header(dst, &blk.header, parent_hi.as_ref()).context("index_header(dst)")?;
@@ -235,24 +272,24 @@ fn reorg_produces_same_state_as_direct_apply() -> Result<()> {
 
     let start_time = GENESIS_TIME;
 
-    // Build base chain A: genesis + 40 blocks (heights 0..40)
+    // Base chain A: genesis + 40 blocks (heights 0..40)
     let a = build_chain(&db1, 40, start_time).context("build chain A")?;
     let tip_a = *a.last().unwrap();
 
-    // Build fork B off height 20, length 35 (heights 20..54)
+    // Fork B off height 20, length 35 (heights 20..54)
     let fork_height = 20u64;
     let fork_len = 35u64;
     let b_tail = build_fork(&db1, &a, fork_height, fork_len, start_time).context("build fork B")?;
     let tip_b = *b_tail.last().unwrap();
 
-    // Force tip back to A, then reorg to B using real engine.
+    // Force tip back to A, then reorg to B
     set_tip(&db1, &tip_a).context("force tip back to A")?;
     maybe_reorg_to(&db1, &tip_b, None).context("maybe_reorg_to(B)")?;
 
     let fp1 = fingerprint(&db1).context("fingerprint(db1)")?;
     println!("[test] db1 fp: {}", fmt_fp(&fp1));
 
-    // DB #2: replay canonical chain B from genesis using db1 bytes.
+    // DB #2: replay canonical chain from db1 bytes
     let tmp2 = TempDir::new().context("TempDir 2")?;
     let db2 = open_db(&tmp2).context("open db2")?;
 
