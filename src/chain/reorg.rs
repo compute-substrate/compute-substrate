@@ -421,6 +421,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
     // ---------------- Crash-atomic journal start ----------------
     let mut j = ReorgJournal {
+        seq: 0,
         old_tip,
         new_tip: *new_tip,
         ancestor: anc.hash,
