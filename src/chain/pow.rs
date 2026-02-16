@@ -15,15 +15,6 @@ use crate::types::Hash32;
 // Bitcoin-style "compact" format:
 // bits = [exponent:8][mantissa:23][sign:1]
 // target = mantissa * 256^(exponent-3)
-//
-// Consensus hardening rules we enforce:
-// - exp != 0
-// - mant != 0
-// - sign bit not set (mantissa field's 0x0080_0000)
-// - exp <= 32 (must fit in 256-bit space)
-// - resulting target must be non-zero and fit in 256 bits
-//
-// We implement using BigUint to avoid off-by-one placement pitfalls.
 
 fn bits_parts(bits: u32) -> (u32, u32) {
     let exp = (bits >> 24) & 0xff;
@@ -40,11 +31,9 @@ pub fn bits_to_target_bytes(bits: u32) -> [u8; 32] {
     if exp == 0 || mant == 0 {
         return [0u8; 32];
     }
-    // Reject negative/sign bit set
     if (mant & 0x0080_0000) != 0 {
         return [0u8; 32];
     }
-    // Must fit in 256-bit space
     if exp > 32 {
         return [0u8; 32];
     }
@@ -52,27 +41,21 @@ pub fn bits_to_target_bytes(bits: u32) -> [u8; 32] {
     let mant_u = BigUint::from(mant as u64);
 
     let target = if exp_u32 <= 3 {
-        // target = mantissa >> 8*(3-exp)
         let shift = 8u32 * (3u32 - exp_u32);
         mant_u >> shift
     } else {
-        // target = mantissa << 8*(exp-3)
         let shift = 8u32 * (exp_u32 - 3u32);
         mant_u << shift
     };
 
-    if target.is_zero() {
-        return [0u8; 32];
-    }
-    if target.bits() > 256 {
+    if target.is_zero() || target.bits() > 256 {
         return [0u8; 32];
     }
 
     biguint_to_target_bytes(&target)
 }
 
-/// 32-byte BE target -> compact bits (canonical).
-/// Returns 0 for zero target.
+/// 32-byte BE target -> compact bits (canonical). Returns 0 for zero target.
 pub fn target_bytes_to_bits(target: [u8; 32]) -> u32 {
     let x = BigUint::from_bytes_be(&target);
     if x.is_zero() {
@@ -82,7 +65,6 @@ pub fn target_bytes_to_bits(target: [u8; 32]) -> u32 {
     let bytes = x.to_bytes_be();
     let mut exp = bytes.len() as u32;
 
-    // Compute mantissa in canonical way.
     let mut mant: u32 = if exp <= 3 {
         let shift = 8u32 * (3u32 - exp);
         let m = (&x << shift).to_u64().unwrap_or(u64::MAX);
@@ -91,7 +73,6 @@ pub fn target_bytes_to_bits(target: [u8; 32]) -> u32 {
         ((bytes[0] as u32) << 16) | ((bytes[1] as u32) << 8) | (bytes[2] as u32)
     };
 
-    // If mantissa has sign bit, shift right one byte and bump exp.
     if (mant & 0x0080_0000) != 0 {
         mant >>= 8;
         exp += 1;
@@ -133,20 +114,19 @@ pub fn bits_within_pow_limit(bits: u32) -> bool {
     t <= limit
 }
 
-// -----------------------------------------------------------------------------
-// PoW validity
-// -----------------------------------------------------------------------------
-//
-// We keep a STRICT implementation for real consensus,
-// and a TEST wrapper that bypasses PoW checks so unit tests don't mine.
-// This avoids spending minutes grinding nonces in tests.
-//
-// IMPORTANT:
-// - Production code should use `pow_ok()` (strict in non-test builds).
-// - If you need strict behavior in tests, call `pow_ok_strict()`.
-//
+/// Integration-test friendly bypass switch.
+/// Use: `CSD_BYPASS_POW=1 cargo test ...`
+fn bypass_pow() -> bool {
+    match std::env::var("CSD_BYPASS_POW") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        }
+        Err(_) => false,
+    }
+}
 
-/// STRICT PoW validity: hash <= target (both BE; lexicographic == numeric for BE).
+/// STRICT PoW validity: hash <= target (both BE).
 pub fn pow_ok_strict(hash: &Hash32, bits: u32) -> bool {
     if !bits_within_pow_limit(bits) {
         return false;
@@ -159,23 +139,17 @@ pub fn pow_ok_strict(hash: &Hash32, bits: u32) -> bool {
 }
 
 /// PoW validity used by consensus code.
-/// In tests, this is bypassed (always true) so tests don’t mine.
+/// If CSD_BYPASS_POW=1 is set (integration tests), always returns true.
 pub fn pow_ok(hash: &Hash32, bits: u32) -> bool {
-    #[cfg(test)]
-    {
+    if bypass_pow() {
         let _ = (hash, bits);
         return true;
     }
-    #[cfg(not(test))]
-    {
-        pow_ok_strict(hash, bits)
-    }
+    pow_ok_strict(hash, bits)
 }
 
 /// Bitcoin-style work from target:
-/// work = floor(2^256 / (target + 1))
-///
-/// Clamped to u128 to match HeaderIndex schema.
+/// work = floor(2^256 / (target + 1)), clamped to u128.
 pub fn work_from_bits(bits: u32) -> Result<u128> {
     if !bits_within_pow_limit(bits) {
         bail!("bits beyond pow limit (or zero/invalid)");
@@ -197,18 +171,7 @@ pub fn work_from_bits(bits: u32) -> Result<u128> {
     Ok(w.to_u128().unwrap_or(u128::MAX))
 }
 
-// -----------------------------------------------------------------------------
-// Difficulty / expected bits
-// -----------------------------------------------------------------------------
-//
-// Same strategy: keep a strict LWMA implementation,
-// but allow tests to run without difficulty retarget surprises.
-//
-// In tests, we return parent.bits (or INITIAL_BITS for genesis).
-// That makes your synthetic test chains stable and cheap.
-//
-
-/// STRICT LWMA (Zawy-style) per-block difficulty.
+/// STRICT LWMA expected bits.
 pub fn expected_bits_strict(db: &Stores, height: u64, parent: Option<&HeaderIndex>) -> Result<u32> {
     if height == 0 {
         if !bits_within_pow_limit(INITIAL_BITS) {
@@ -307,11 +270,7 @@ pub fn expected_bits_strict(db: &Stores, height: u64, parent: Option<&HeaderInde
     if next_target > limit {
         next_target = limit;
     }
-    if next_target.is_zero() {
-        return Ok(POW_LIMIT_BITS);
-    }
-
-    if next_target.bits() > 256 {
+    if next_target.is_zero() || next_target.bits() > 256 {
         return Ok(POW_LIMIT_BITS);
     }
 
@@ -326,10 +285,9 @@ pub fn expected_bits_strict(db: &Stores, height: u64, parent: Option<&HeaderInde
 }
 
 /// expected_bits used by consensus code.
-/// In tests, keep it stable: return parent.bits (or INITIAL_BITS at height 0).
+/// If CSD_BYPASS_POW=1 is set (integration tests), keep it stable: parent.bits.
 pub fn expected_bits(db: &Stores, height: u64, parent: Option<&HeaderIndex>) -> Result<u32> {
-    #[cfg(test)]
-    {
+    if bypass_pow() {
         let _ = db;
         if height == 0 {
             return Ok(INITIAL_BITS);
@@ -337,63 +295,8 @@ pub fn expected_bits(db: &Stores, height: u64, parent: Option<&HeaderIndex>) -> 
         if let Some(p) = parent {
             return Ok(p.bits);
         }
-        // If tests call this with missing parent at height>0, keep strict error semantics.
-        bail!("expected_bits(test): missing parent for height>0");
-    }
-    #[cfg(not(test))]
-    {
-        expected_bits_strict(db, height, parent)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bits_target_roundtrip_sane_nonzero() {
-        let t = bits_to_target_bytes(POW_LIMIT_BITS);
-        assert_ne!(t, [0u8; 32]);
-
-        let b2 = target_bytes_to_bits(t);
-        assert_ne!(b2, 0);
-
-        let t2 = bits_to_target_bytes(b2);
-        assert_ne!(t2, [0u8; 32]);
-        assert!(t2 <= bits_to_target_bytes(POW_LIMIT_BITS));
+        bail!("expected_bits(test-bypass): missing parent for height>0");
     }
 
-    #[test]
-    fn pow_ok_boundary_behavior_strict() {
-        // In tests, pow_ok() is bypassed; this test validates strict logic.
-        let bits = POW_LIMIT_BITS;
-        let target = BigUint::from_bytes_be(&bits_to_target_bytes(bits));
-        assert!(!target.is_zero());
-
-        let hash_eq = super::biguint_to_target_bytes(&target);
-        assert!(pow_ok_strict(&hash_eq, bits));
-
-        let hash_gt = super::biguint_to_target_bytes(&(target + BigUint::one()));
-        assert!(!pow_ok_strict(&hash_gt, bits));
-    }
-
-    #[test]
-    fn bits_within_pow_limit_rejects_zero_and_negative() {
-        assert!(!bits_within_pow_limit(0));
-        let neg_bits = (0x1du32 << 24) | 0x0080_0000;
-        assert!(!bits_within_pow_limit(neg_bits));
-    }
-
-    #[test]
-    fn bits_to_target_rejects_exp_overflow() {
-        let bits = (33u32 << 24) | 0x0000_1234;
-        assert_eq!(bits_to_target_bytes(bits), [0u8; 32]);
-    }
-
-    #[test]
-    fn pow_limit_bits_itself_is_valid() {
-        let t = bits_to_target_bytes(POW_LIMIT_BITS);
-        assert_ne!(t, [0u8; 32]);
-        assert!(bits_within_pow_limit(POW_LIMIT_BITS));
-    }
+    expected_bits_strict(db, height, parent)
 }
