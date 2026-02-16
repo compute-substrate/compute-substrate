@@ -3,69 +3,48 @@ use anyhow::{Context, Result};
 use std::env;
 
 use csd::chain::reorg::{maybe_reorg_to, recover_if_needed};
-use csd::state::db::set_tip;
-use csd::state::fingerprint::fingerprint;
-
-mod testutil {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/testutil_chain.rs"));
-}
+use csd::state::db::{get_tip, set_tip, Stores};
+use csd::testutil; // <-- IMPORTANT: bring the module into scope
 
 fn main() -> Result<()> {
-    // Args:
-    // 1) datadir
-    // 2) base_len
-    // 3) fork_height
-    // 4) fork_len
-    // 5) mode: "reorg" or "recover"
-    // Output: prints fingerprint tip/roots in json-ish lines.
-
-    let datadir = env::args().nth(1).context("datadir")?;
-    let base_len: u64 = env::args().nth(2).context("base_len")?.parse()?;
-    let fork_height: u64 = env::args().nth(3).context("fork_height")?.parse()?;
-    let fork_len: u64 = env::args().nth(4).context("fork_len")?.parse()?;
-    let mode = env::args().nth(5).context("mode")?;
-
     testutil::set_test_env();
 
-    let db = csd::state::db::Stores::open(&datadir).context("Stores::open")?;
+    let db_path = env::var("CSD_DRIVER_DB").unwrap_or_else(|_| "/tmp/csd_reorg_driver_db".into());
+    let base_len: u64 = env::var("CSD_DRIVER_BASE_LEN")
+        .unwrap_or_else(|_| "60".into())
+        .parse()
+        .context("parse CSD_DRIVER_BASE_LEN")?;
+    let fork_height: u64 = env::var("CSD_DRIVER_FORK_HEIGHT")
+        .unwrap_or_else(|_| "20".into())
+        .parse()
+        .context("parse CSD_DRIVER_FORK_HEIGHT")?;
+    let fork_len: u64 = env::var("CSD_DRIVER_FORK_LEN")
+        .unwrap_or_else(|_| "50".into())
+        .parse()
+        .context("parse CSD_DRIVER_FORK_LEN")?;
+    let bits: u32 = env::var("CSD_DRIVER_BITS")
+        .unwrap_or_else(|_| format!("{}", csd::params::INITIAL_BITS))
+        .parse()
+        .context("parse CSD_DRIVER_BITS")?;
 
-    // If DB empty, build the scenario.
-    if csd::state::db::get_tip(&db)?.is_none() {
-        let bits = csd::params::INITIAL_BITS;
-        let a = testutil::build_chain(&db, base_len, 1_700_000_000, bits).context("build base")?;
-        let tip_a = *a.last().unwrap();
-        let b_tail = testutil::build_fork(&db, &a, fork_height, fork_len, 1_700_000_000, bits)
-            .context("build fork")?;
-        let tip_b = *b_tail.last().unwrap();
+    let db = Stores::open(&db_path).context("Stores::open")?;
 
-        // Store these in env for later, but simplest: just set tip to A, then reorg to B (reorg mode)
-        set_tip(&db, &tip_a).context("set tip A")?;
-        env::set_var("CSD_DRIVER_TIP_B", hex::encode(tip_b));
-    }
+    // Complete interrupted reorg if present
+    recover_if_needed(&db, None).context("recover_if_needed")?;
 
-    match mode.as_str() {
-        "reorg" => {
-            let tip_b_hex = env::var("CSD_DRIVER_TIP_B").context("missing CSD_DRIVER_TIP_B")?;
-            let mut tip_b = [0u8; 32];
-            let b = hex::decode(tip_b_hex)?;
-            tip_b.copy_from_slice(&b);
+    // Build base + fork
+    let a = testutil::build_chain(&db, base_len, 1_700_000_000, bits).context("build base")?;
+    let tip_a = *a.last().unwrap();
 
-            maybe_reorg_to(&db, &tip_b, None).context("maybe_reorg_to")?;
-        }
-        "recover" => {
-            recover_if_needed(&db, None).context("recover_if_needed")?;
-        }
-        _ => anyhow::bail!("mode must be reorg|recover"),
-    }
+    let b_tail =
+        testutil::build_fork(&db, &a, fork_height, fork_len, 1_700_000_000, bits).context("fork")?;
+    let tip_b = *b_tail.last().unwrap();
 
-    let fp = fingerprint(&db).context("fingerprint")?;
-    println!(
-        "{{\"tip\":\"0x{}\",\"utxo\":\"0x{}\",\"utxo_meta\":\"0x{}\",\"app\":\"0x{}\"}}",
-        hex::encode(fp.tip),
-        hex::encode(fp.utxo_root),
-        hex::encode(fp.utxo_meta_root),
-        hex::encode(fp.app_root)
-    );
+    // Force tip back to A then reorg to B
+    set_tip(&db, &tip_a).context("set_tip(A)")?;
+    maybe_reorg_to(&db, &tip_b, None).context("maybe_reorg_to(B)")?;
 
+    let tip = get_tip(&db)?.unwrap_or([0u8; 32]);
+    println!("[driver] done. tip=0x{}", hex::encode(tip));
     Ok(())
 }
