@@ -14,8 +14,8 @@ use csd::chain::pow::expected_bits;
 use csd::chain::reorg::{maybe_reorg_to, recover_if_needed};
 use csd::types::{Block, BlockHeader, Hash32, Transaction};
 
-fn open_db(tmp: &TempDir) -> Result<Stores> {
-    Stores::open(tmp.path().to_str().unwrap()).context("Stores::open")
+fn open_db_path(path: &str) -> Result<Stores> {
+    Stores::open(path).context("Stores::open")
 }
 
 // Optional crashpoint helper: NEVER errors if env var missing.
@@ -99,7 +99,7 @@ fn persist_index_apply(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> 
         get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
     };
 
-    // index header (enforces bits/time/pow rules depending on your current code)
+    // index header (enforces bits/time/pow rules)
     index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
 
     // apply state
@@ -116,7 +116,6 @@ fn build_chain(db: &Stores, n: u64, start_time: u64) -> Result<Vec<Hash32>> {
     for h in 0..n {
         let t = start_time + h * 60;
 
-        // compute consensus-correct bits for this height
         let parent_hi = if h == 0 {
             None
         } else {
@@ -171,56 +170,131 @@ fn replay_chain(dst: &Stores, src: &Stores, canon: &[Hash32]) -> Result<()> {
 
 #[test]
 fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
+    // One TempDir for the “crashy” DB
     let tmp = TempDir::new().context("TempDir")?;
-    let db = open_db(&tmp).context("open db")?;
+    let db_path = tmp.path().to_str().unwrap().to_string();
 
-    // base chain
-    let a = build_chain(&db, 40, 1_700_000_000).context("build base")?;
-    let tip_a = *a.last().unwrap();
+    // We also need to keep these hashes across opens
+    let (a, tip_a, b_tail, tip_b, fork_height) = {
+        // IMPORTANT: only one Stores open at a time
+        let db = open_db_path(&db_path).context("open db")?;
 
-    // fork that overtakes
-    let fork_height = 20u64;
-    let fork_len = 35u64;
-    let b_tail = build_fork(&db, &a, fork_height, fork_len, 1_700_000_000).context("build fork")?;
-    let tip_b = *b_tail.last().unwrap();
+        // base chain
+        let a = build_chain(&db, 40, 1_700_000_000).context("build base")?;
+        let tip_a = *a.last().unwrap();
 
-    set_tip(&db, &tip_a).context("force tip A")?;
+        // fork that overtakes
+        let fork_height = 20u64;
+        let fork_len = 35u64;
+        let b_tail =
+            build_fork(&db, &a, fork_height, fork_len, 1_700_000_000).context("build fork")?;
+        let tip_b = *b_tail.last().unwrap();
 
-    if crashpoint("pre_reorg") {
-        return Ok(());
+        // ensure canonical tip is A before invoking reorg
+        set_tip(&db, &tip_a).context("force tip A")?;
+
+        // optional crashpoint
+        if crashpoint("pre_reorg") {
+            return Ok((a, tip_a, b_tail, tip_b, fork_height));
+        }
+
+        // run reorg
+        maybe_reorg_to(&db, &tip_b, None).context("baseline reorg failed")?;
+
+        // drop happens at end of scope
+        (a, tip_a, b_tail, tip_b, fork_height)
+    };
+
+    // ---- Recovery pass (reopen only after previous Stores is dropped) ----
+    {
+        let db = open_db_path(&db_path).context("reopen db for recovery")?;
+        recover_if_needed(&db, None).context("recover_if_needed")?;
+        let fp = fingerprint(&db).context("fingerprint(recovered)")?;
+        println!("[test] recovered fp: {}", fmt_fp(&fp));
+        // drop db before opening again anywhere
     }
 
-    let r = maybe_reorg_to(&db, &tip_b, None).context("baseline reorg failed");
-
-    if crashpoint("after_reorg_call") {
-        drop(db);
-        let db2 = open_db(&tmp).context("reopen db after crash")?;
-        recover_if_needed(&db2, None).context("recover_if_needed")?;
-        let fp_rec = fingerprint(&db2)?;
-        println!("[test] recovered fp: {}", fmt_fp(&fp_rec));
-    } else {
-        r?;
-    }
-
-    // idempotent recovery pass
-    let db_rec = open_db(&tmp).context("reopen db")?;
-    recover_if_needed(&db_rec, None).context("recover_if_needed(idempotent)")?;
-    let fp1 = fingerprint(&db_rec).context("fingerprint(recovered)")?;
-    println!("[test] recovered fp: {}", fmt_fp(&fp1));
-
-    // clean replay
+    // ---- Clean replay into a separate DB ----
     let tmp_clean = TempDir::new().context("TempDir clean")?;
-    let db_clean = open_db(&tmp_clean).context("open clean db")?;
+    let clean_path = tmp_clean.path().to_str().unwrap().to_string();
 
-    let mut canon: Vec<Hash32> = Vec::new();
-    canon.extend_from_slice(&a[0..(fork_height as usize)]);
-    canon.extend_from_slice(&b_tail);
+    // reopen the recovered db ONE more time to read block bytes for replay
+    let fp_recovered = {
+        let db = open_db_path(&db_path).context("reopen db to read blocks")?;
+        let fp = fingerprint(&db).context("fingerprint(recovered again)")?;
+        println!("[test] recovered fp (again): {}", fmt_fp(&fp));
+        fp
+    };
 
-    replay_chain(&db_clean, &db_rec, &canon).context("replay canonical")?;
-    let fp2 = fingerprint(&db_clean).context("fingerprint(clean)")?;
-    println!("[test] clean fp: {}", fmt_fp(&fp2));
+    // Now open both DBs sequentially (never at the same time)
+    // 1) open recovered for reading bytes, but we can't keep it open while opening clean.
+    // So: read bytes indirectly by replaying from a fresh open in the replay loop.
+    {
+        let db_clean = open_db_path(&clean_path).context("open clean db")?;
 
-    anyhow::ensure!(fp1 == fp2, "fingerprint mismatch recovered vs clean");
+        // canonical chain is: A[0..fork_height-1] + fork blocks
+        let mut canon: Vec<Hash32> = Vec::new();
+        canon.extend_from_slice(&a[0..(fork_height as usize)]);
+        canon.extend_from_slice(&b_tail);
+
+        // For replay, open recovered DB inside this block-by-block loop in a minimal way:
+        // simplest: reopen recovered once, replay, drop, and keep clean open.
+        // But sled won't allow two opens simultaneously. Therefore we do the replay
+        // as: close clean? No. So we do the replay in two phases:
+        // - extract block bytes from recovered into memory
+        // - then apply to clean
+        drop(db_clean);
+    }
+
+    // Phase 1: extract canonical block bytes from recovered (one open)
+    let canon_bytes: Vec<Vec<u8>> = {
+        let db = open_db_path(&db_path).context("reopen db to extract canon bytes")?;
+
+        let mut canon: Vec<Hash32> = Vec::new();
+        canon.extend_from_slice(&a[0..(fork_height as usize)]);
+        canon.extend_from_slice(&b_tail);
+
+        let mut out = Vec::with_capacity(canon.len());
+        for bh in &canon {
+            let Some(v) = db.blocks.get(k_block(bh)).context("blocks.get")? else {
+                anyhow::bail!("missing block bytes for {}", hex::encode(bh));
+            };
+            out.push(v.to_vec());
+        }
+        out
+    };
+
+    // Phase 2: apply bytes to clean (one open)
+    let fp_clean = {
+        let db_clean = open_db_path(&clean_path).context("open clean db (apply)")?;
+
+        // reconstruct hashes list again
+        let mut canon: Vec<Hash32> = Vec::new();
+        canon.extend_from_slice(&a[0..(fork_height as usize)]);
+        canon.extend_from_slice(&b_tail);
+
+        for (height, (bh, bytes)) in canon.iter().zip(canon_bytes.iter()).enumerate() {
+            let blk: Block = codec::consensus_bincode()
+                .deserialize(bytes)
+                .context("deserialize Block (canon_bytes)")?;
+
+            // sanity: hash matches expected
+            let got = header_hash(&blk.header);
+            anyhow::ensure!(got == *bh, "canon_bytes hash mismatch at height={}", height);
+
+            persist_index_apply(&db_clean, &blk, height as u64)
+                .with_context(|| format!("clean apply height={height}"))?;
+        }
+
+        let fp = fingerprint(&db_clean).context("fingerprint(clean)")?;
+        println!("[test] clean fp: {}", fmt_fp(&fp));
+        fp
+    };
+
+    anyhow::ensure!(
+        fp_recovered == fp_clean,
+        "fingerprint mismatch recovered vs clean"
+    );
 
     Ok(())
 }
