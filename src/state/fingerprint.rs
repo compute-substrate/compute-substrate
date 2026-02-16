@@ -9,33 +9,34 @@ pub struct StateFingerprint {
     pub app_root: [u8; 32],
 }
 
-/// Hash a tree deterministically by folding kv hashes in key order.
-/// NOTE: This is a *test/diagnostic* fingerprint; not consensus-critical.
 fn hash_tree_kv(tree: &sled::Tree) -> Result<[u8; 32]> {
     use sha2::{Digest, Sha256};
 
-    let mut h = Sha256::new();
+    let mut hasher = Sha256::new();
     for kv in tree.iter() {
         let (k, v) = kv?;
-        h.update(&k);
-        h.update(&v);
+        hasher.update(&k);
+        hasher.update(&v);
     }
-    let out = h.finalize();
-    let mut r = [0u8; 32];
-    r.copy_from_slice(&out);
-    Ok(r)
+    let out = hasher.finalize();
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&out);
+    Ok(h)
 }
 
 pub fn fingerprint(db: &crate::state::db::Stores) -> Result<StateFingerprint> {
-    use crate::state::db::get_tip;
+    // NOTE: These trees must match what you consider “consensus state”.
+    let tip = crate::state::db::get_tip(db)?.unwrap_or([0u8; 32]);
 
-    let tip = get_tip(db)?.unwrap_or([0u8; 32]);
+    let utxo_root = hash_tree_kv(&db.utxo)?;
+    let utxo_meta_root = hash_tree_kv(&db.utxo_meta)?;
+    let app_root = hash_tree_kv(&db.app)?;
 
     Ok(StateFingerprint {
         tip,
-        utxo_root: hash_tree_kv(&db.utxo)?,
-        utxo_meta_root: hash_tree_kv(&db.utxo_meta)?,
-        app_root: hash_tree_kv(&db.app)?,
+        utxo_root,
+        utxo_meta_root,
+        app_root,
     })
 }
 
