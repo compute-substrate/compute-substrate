@@ -8,3 +8,5 @@ pub mod cli;
 pub mod codec;
 pub mod net;
 pub mod state;
+
+pub mod testutil;
