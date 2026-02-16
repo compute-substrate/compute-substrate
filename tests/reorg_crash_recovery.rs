@@ -147,6 +147,7 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
 
             // Start journal (like maybe_reorg_to would).
             let mut j = ReorgJournal {
+                seq: 0,
                 old_tip: tip_a2,
                 new_tip: tip_b2,
                 ancestor: anc.hash,
