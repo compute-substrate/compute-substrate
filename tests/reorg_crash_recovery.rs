@@ -195,8 +195,8 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
 
         // optional crashpoint
         if crashpoint("pre_reorg") {
-            return Ok((a, tip_a, b_tail, tip_b, fork_height));
-        }
+    return Ok(());
+}
 
         // run reorg
         maybe_reorg_to(&db, &tip_b, None).context("baseline reorg failed")?;
