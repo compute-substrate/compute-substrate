@@ -1,9 +1,11 @@
 // src/state/fingerprint.rs
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::state::db::{get_tip, Stores};
-
-#[derive(Clone, Debug)]
+/// A cheap “state root” summary used by integration tests.
+/// This must be deterministic and stable across runs.
+///
+/// NOTE: We derive PartialEq/Eq so tests can compare fingerprints directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateFingerprint {
     pub tip: [u8; 32],
     pub utxo_root: [u8; 32],
@@ -12,27 +14,39 @@ pub struct StateFingerprint {
 }
 
 fn hash_tree_kv(tree: &sled::Tree) -> Result<[u8; 32]> {
-    // Deterministic over key-order iteration.
-    let mut h = blake3::Hasher::new();
+    use sha2::{Digest, Sha256};
 
-    for item in tree.iter() {
-        let (k, v) = item.context("sled iter item")?;
-        h.update(&(k.len() as u64).to_le_bytes());
+    // Deterministic fold over sorted keyspace
+    let mut h = Sha256::new();
+    for kv in tree.iter() {
+        let (k, v) = kv?;
+        // domain separate to avoid ambiguity
+        h.update((k.len() as u64).to_le_bytes());
         h.update(&k);
-        h.update(&(v.len() as u64).to_le_bytes());
+        h.update((v.len() as u64).to_le_bytes());
         h.update(&v);
     }
-
-    Ok(*h.finalize().as_bytes())
+    let out = h.finalize();
+    let mut r = [0u8; 32];
+    r.copy_from_slice(&out);
+    Ok(r)
 }
 
-pub fn fingerprint(db: &Stores) -> Result<StateFingerprint> {
+pub fn fingerprint(db: &crate::state::db::Stores) -> Result<StateFingerprint> {
+    use crate::state::db::get_tip;
+
     let tip = get_tip(db)?.unwrap_or([0u8; 32]);
+
+    // These trees exist in Stores; we hash full KV set deterministically.
+    let utxo_root = hash_tree_kv(&db.utxo)?;
+    let utxo_meta_root = hash_tree_kv(&db.utxo_meta)?;
+    let app_root = hash_tree_kv(&db.app)?;
+
     Ok(StateFingerprint {
         tip,
-        utxo_root: hash_tree_kv(&db.utxo).context("hash utxo tree")?,
-        utxo_meta_root: hash_tree_kv(&db.utxo_meta).context("hash utxo_meta tree")?,
-        app_root: hash_tree_kv(&db.app).context("hash app tree")?,
+        utxo_root,
+        utxo_meta_root,
+        app_root,
     })
 }
 
