@@ -74,6 +74,21 @@ fn tip_is(db: &Stores, h: &Hash32) -> Result<bool> {
 }
 
 // ----------------------
+// Journal helper (seq monotonicity for double-buffer journal)
+// ----------------------
+//
+// Your double-buffer journal uses `seq` to choose the newest valid record when both slots decode.
+// But `journal_write(db, &j)` does not mutate `j.seq` in the caller (it works on a clone).
+//
+// So we must advance `j.seq` in-memory after every successful write, so the next write carries
+// a strictly increasing seq from the caller’s perspective.
+fn jw(db: &Stores, j: &mut ReorgJournal, ctx: &str) -> Result<()> {
+    journal_write(db, j).with_context(|| ctx)?;
+    j.seq = j.seq.saturating_add(1);
+    Ok(())
+}
+
+// ----------------------
 // Bad-block persistence
 // ----------------------
 
@@ -126,7 +141,11 @@ fn mempool_prune_if_present(db: &Stores, mempool: Option<&Mempool>) {
     }
 }
 
-fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &Hash32) -> Result<bool> {
+fn ensure_apply_blocks_present(
+    db: &Stores,
+    apply_hashes: &[Hash32],
+    new_tip: &Hash32,
+) -> Result<bool> {
     for bh in apply_hashes {
         if db.blocks.get(k_block(bh))?.is_none() {
             println!(
@@ -158,12 +177,13 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     };
 
     println!(
-        "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={}",
+        "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={}",
         hex32(&j.old_tip),
         hex32(&j.new_tip),
         hex32(&j.ancestor),
         j.phase,
-        j.cursor
+        j.cursor,
+        j.seq
     );
 
     // ---------------------------------------------
@@ -175,15 +195,15 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     j.phase = Phase::Undo;
 
     for (i, bh) in j.undo_path.iter().enumerate() {
-        let hi = must_hidx(db, bh)
-            .with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
+        let hi =
+            must_hidx(db, bh).with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
         let expected_tip_after_undo = hi.parent;
 
         // If we're already at the post-undo tip, this step is already durable.
         if tip_is(db, &expected_tip_after_undo)? {
             j.cursor = (i as u64) + 1;
             // Keep journal progressing so recovery converges.
-            journal_write(db, &j).context("recover journal_write(skip_undo)")?;
+            jw(db, &mut j, "recover journal_write(skip_undo)")?;
             continue;
         }
 
@@ -193,8 +213,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         // only undo when current tip == bh; otherwise we fall back to "undo current tip toward ancestor"
         // by directly undoing the current tip in a loop after this block.
         if tip_is(db, bh)? {
-            undo_block(db, bh)
-                .with_context(|| format!("recover undo_block {}", hex32(bh)))?;
+            undo_block(db, bh).with_context(|| format!("recover undo_block {}", hex32(bh)))?;
             set_tip(db, &expected_tip_after_undo)
                 .with_context(|| format!("recover set_tip(parent of {})", hex32(bh)))?;
             flush_state_step(db).context("recover flush_state_step(undo)")?;
@@ -206,7 +225,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         j.cursor = (i as u64) + 1;
 
         failpoints::hit(&format!("recover:undo:{}:pre_journal", i));
-        journal_write(db, &j).context("recover journal_write(progress_undo)")?;
+        jw(db, &mut j, "recover journal_write(progress_undo)")?;
         failpoints::hit(&format!("recover:undo:{}:post_journal", i));
     }
 
@@ -270,13 +289,13 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
     j.phase = Phase::Apply;
     j.cursor = 0;
-    journal_write(db, &j).context("recover journal_write(start_apply)")?;
+    jw(db, &mut j, "recover journal_write(start_apply)")?;
 
     for (i, bh) in j.apply_path.iter().enumerate() {
         // If already at this block, it's durable; just advance cursor + journal.
         if tip_is(db, bh)? {
             j.cursor = (i as u64) + 1;
-            journal_write(db, &j).context("recover journal_write(skip_apply)")?;
+            jw(db, &mut j, "recover journal_write(skip_apply)")?;
             continue;
         }
 
@@ -308,7 +327,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         j.cursor = (i as u64) + 1;
 
         failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
-        journal_write(db, &j).context("recover journal_write(progress_apply)")?;
+        jw(db, &mut j, "recover journal_write(progress_apply)")?;
         failpoints::hit(&format!("recover:apply:{}:post_journal", i));
     }
 
@@ -430,7 +449,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         undo_path: undo_path.clone(),
         apply_path: apply_path.clone(),
     };
-    journal_write(db, &j).context("journal_write(start)")?;
+    jw(db, &mut j, "journal_write(start)")?;
     failpoints::hit("reorg:after_journal_start");
     // -----------------------------------------------------------
 
@@ -451,7 +470,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         failpoints::hit(&format!("undo:{}:post_flush_pre_journal", i));
 
         j.cursor = (i as u64) + 1;
-        journal_write(db, &j).context("journal_write(progress_undo)")?;
+        jw(db, &mut j, "journal_write(progress_undo)")?;
 
         failpoints::hit(&format!("undo:{}:post_journal", i));
     }
@@ -462,12 +481,12 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
     j.phase = Phase::Apply;
     j.cursor = 0;
-    journal_write(db, &j).context("journal_write(at_ancestor)")?;
+    jw(db, &mut j, "journal_write(at_ancestor)")?;
 
     // Phase B: apply new branch
     j.phase = Phase::Apply;
     j.cursor = 0;
-    journal_write(db, &j).context("journal_write(start_apply)")?;
+    jw(db, &mut j, "journal_write(start_apply)")?;
     failpoints::hit("reorg:after_apply_start");
 
     let mut applied_new: Vec<Hash32> = Vec::with_capacity(apply_path.len());
@@ -500,7 +519,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             applied_new.push(*bh);
 
             j.cursor = (i as u64) + 1;
-            journal_write(db, &j).context("journal_write(progress_apply)")?;
+            jw(db, &mut j, "journal_write(progress_apply)")?;
             failpoints::hit(&format!("apply:{}:post_journal", i));
         }
         Ok(())
