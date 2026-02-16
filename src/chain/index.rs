@@ -19,15 +19,17 @@ pub struct HeaderIndex {
     pub time: u64,
 }
 
-/// Canonical, consensus-stable header hash.
-/// Avoid bincode/serde to prevent accidental consensus splits.
-/// Layout (all fixed):
-/// - version: u32 LE
-/// - prev: 32 bytes
-/// - merkle: 32 bytes
-/// - time: u64 LE
-/// - bits: u32 LE
-/// - nonce: u32 LE
+fn bypass_pow() -> bool {
+    match std::env::var("CSD_BYPASS_POW") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        }
+        Err(_) => false,
+    }
+}
+
+/// Canonical, consensus-stable header hash (fixed layout).
 pub fn header_hash(h: &BlockHeader) -> Hash32 {
     let mut buf = Vec::with_capacity(4 + 32 + 32 + 8 + 4 + 4);
 
@@ -67,21 +69,17 @@ pub fn index_header(
 ) -> Result<HeaderIndex> {
     let hash = header_hash(hdr);
 
-    // If already indexed, return it (idempotent; helps sync races).
     if let Some(existing) = get_hidx(db, &hash)? {
         return Ok(existing);
     }
 
     // ---- Genesis identity ----
     if hdr.prev == [0u8; 32] {
-        // In production, genesis must match params::GENESIS_HASH.
-        // In tests, PoW/difficulty is bypassed (and genesis may not be mined to the same hash),
-        // so we skip this check to avoid "foreign genesis header" failures.
-        #[cfg(not(test))]
-        {
-            if hash != GENESIS_HASH {
-                bail!("foreign genesis header");
-            }
+        // When running integration tests with CSD_BYPASS_POW=1,
+        // genesis will be synthetic and won't match params::GENESIS_HASH.
+        // So we skip the check ONLY in that mode.
+        if !bypass_pow() && hash != GENESIS_HASH {
+            bail!("foreign genesis header");
         }
         if expected_parent.is_some() {
             bail!("genesis must not have parent");
@@ -99,17 +97,7 @@ pub fn index_header(
         (p.height + 1, Some(p))
     };
 
-    // ----------------- time guardrails (CONSENSUS, OBJECTIVE) -----------------
-    //
-    // We intentionally DO NOT use SystemTime::now() here, because that makes
-    // consensus depend on wall-clock skew across nodes.
-    //
-    // Rules (non-genesis):
-    // 1) MIN_BLOCK_SPACING relative to parent.time
-    // 2) MTP: time must be > median_time_past(parent_window)
-    // 3) "future drift" bounded relative to chain history (mtp + MAX_FUTURE_DRIFT_SECS)
-    //
-    // This keeps validity purely a function of chain data.
+    // ----------------- time guardrails (objective) -----------------
     if let Some(p) = parent_hi {
         let min_allowed = p.time.saturating_add(MIN_BLOCK_SPACING_SECS);
         if hdr.time < min_allowed {
@@ -125,7 +113,6 @@ pub fn index_header(
             bail!("time <= MTP: {} <= {}", hdr.time, mtp);
         }
 
-        // Objective future bound relative to MTP (not wallclock)
         let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
         if hdr.time > max_allowed {
             bail!(
@@ -135,21 +122,19 @@ pub fn index_header(
             );
         }
     }
-    // ------------------------------------------------------------------------
+    // ---------------------------------------------------------------
 
     // ---- Difficulty rules ----
     if !bits_within_pow_limit(hdr.bits) {
         bail!("bits beyond pow limit");
     }
 
-    // expected_bits() is STRICT in production, but returns parent.bits in tests.
     let want_bits = expected_bits(db, height, parent_hi)?;
     if hdr.bits != want_bits {
         bail!("unexpected bits: got {} want {}", hdr.bits, want_bits);
     }
 
     // ---- PoW ----
-    // pow_ok() is STRICT in production, but bypassed in tests.
     if !pow_ok(&hash, hdr.bits) {
         bail!("invalid PoW");
     }
