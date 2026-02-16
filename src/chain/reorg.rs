@@ -1,10 +1,9 @@
 // src/chain/reorg.rs
 use anyhow::{bail, Context, Result};
 
+use crate::chain::failpoints;
 use crate::chain::index::{get_hidx, HeaderIndex};
-use crate::chain::reorg_journal::{
-    journal_clear, journal_read, journal_write, Phase, ReorgJournal,
-};
+use crate::chain::reorg_journal::{journal_clear, journal_read, journal_write, Phase, ReorgJournal};
 use crate::crypto::txid;
 use crate::net::mempool::Mempool;
 use crate::state::app_state::epoch_of;
@@ -68,12 +67,16 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
 fn flush_state_step(db: &Stores) -> Result<()> {
     // These are the state trees typically mutated by undo/apply + tip updates.
     db.utxo.flush().context("flush utxo")?;
-    db.utxo_meta.flush().context("flush utxo_meta")?; // IMPORTANT: include meta for UTXO height/coinbase tracking
+    db.utxo_meta
+        .flush()
+        .context("flush utxo_meta")?; // IMPORTANT: include meta for UTXO height/coinbase tracking
     db.undo.flush().context("flush undo")?;
     db.app.flush().context("flush app")?;
 
     // Tip and journal live in meta; flushing ensures tip/journal durability too.
     db.meta.flush().context("flush meta")?;
+
+    failpoints::hit("flush_state_step:post");
     Ok(())
 }
 
@@ -130,11 +133,7 @@ fn mempool_prune_if_present(db: &Stores, mempool: Option<&Mempool>) {
     }
 }
 
-fn ensure_apply_blocks_present(
-    db: &Stores,
-    apply_hashes: &[Hash32],
-    new_tip: &Hash32,
-) -> Result<bool> {
+fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &Hash32) -> Result<bool> {
     for bh in apply_hashes {
         if db.blocks.get(k_block(bh))?.is_none() {
             println!(
@@ -183,6 +182,8 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
             // Finish undo steps to reach ancestor.
             let start = j.cursor as usize;
             for (i, bh) in j.undo_path.iter().enumerate().skip(start) {
+                failpoints::hit(&format!("recover:undo:{}:pre", i));
+
                 let hi = must_hidx(db, bh)
                     .with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
                 undo_block(db, bh)
@@ -194,8 +195,12 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
                 flush_state_step(db).context("recover flush_state_step(undo)")?;
 
                 j.cursor = (i as u64) + 1;
+
+                failpoints::hit(&format!("recover:undo:{}:pre_journal", i));
                 journal_write(db, &j).context("recover journal_write(undo)")?;
+                failpoints::hit(&format!("recover:undo:{}:post_journal", i));
             }
+
             set_tip(db, &j.ancestor).context("recover set_tip(ancestor)")?;
             flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
         }
@@ -203,7 +208,9 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         Phase::Apply => {
             // Undo applied blocks to return to ancestor.
             let applied_n = j.cursor as usize;
-            for bh in j.apply_path.iter().take(applied_n).rev() {
+            for (ri, bh) in j.apply_path.iter().take(applied_n).rev().enumerate() {
+                failpoints::hit(&format!("recover:undo_applied:{}:pre", ri));
+
                 let hi = must_hidx(db, bh)
                     .with_context(|| format!("recover must_hidx(applied {})", hex32(bh)))?;
                 undo_block(db, bh)
@@ -213,6 +220,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
                 flush_state_step(db).context("recover flush_state_step(undo applied)")?;
             }
+
             set_tip(db, &j.ancestor).context("recover set_tip(ancestor)")?;
             flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
 
@@ -244,8 +252,9 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     journal_write(db, &j).context("recover journal_write(start_apply)")?;
 
     for (i, bh) in j.apply_path.iter().enumerate() {
-        let blk =
-            load_block(db, bh).with_context(|| format!("recover load_block {}", hex32(bh)))?;
+        failpoints::hit(&format!("recover:apply:{}:pre", i));
+
+        let blk = load_block(db, bh).with_context(|| format!("recover load_block {}", hex32(bh)))?;
         let hi = must_hidx(db, bh).with_context(|| format!("recover must_hidx {}", hex32(bh)))?;
 
         let r = validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height)
@@ -269,12 +278,16 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         flush_state_step(db).context("recover flush_state_step(apply)")?;
 
         j.cursor = (i as u64) + 1;
+
+        failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
         journal_write(db, &j).context("recover journal_write(progress)")?;
+        failpoints::hit(&format!("recover:apply:{}:post_journal", i));
     }
 
     set_tip(db, &j.new_tip).context("recover final set_tip(new_tip)")?;
     flush_state_step(db).context("recover flush_state_step(final set new_tip)")?;
 
+    failpoints::hit("recover:pre_journal_clear");
     journal_clear(db).context("recover journal_clear")?;
     mempool_prune_if_present(db, mempool);
 
@@ -397,24 +410,31 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         apply_path: apply_path.clone(),
     };
     journal_write(db, &j).context("journal_write(start)")?;
+    failpoints::hit("reorg:after_journal_start");
     // -----------------------------------------------------------
 
     // Phase A: undo old branch
     for (i, bh) in undo_path.iter().enumerate() {
+        failpoints::hit(&format!("undo:{}:pre", i));
+
         let hi = must_hidx(db, bh).with_context(|| format!("must_hidx(undo {})", hex32(bh)))?;
         undo_block(db, bh).with_context(|| format!("[reorg] undo_block {}", hex32(bh)))?;
         set_tip(db, &hi.parent)
             .with_context(|| format!("[reorg] set_tip(parent of {})", hex32(bh)))?;
 
-        // Durability boundary for this step
+        failpoints::hit(&format!("undo:{}:post_tip_pre_flush", i));
         flush_state_step(db).context("flush_state_step(undo)")?;
+        failpoints::hit(&format!("undo:{}:post_flush_pre_journal", i));
 
         j.cursor = (i as u64) + 1;
         journal_write(db, &j).context("journal_write(progress_undo)")?;
+
+        failpoints::hit(&format!("undo:{}:post_journal", i));
     }
 
     set_tip(db, &anc.hash).context("[reorg] set_tip(ancestor)")?;
     flush_state_step(db).context("flush_state_step(set ancestor)")?;
+    failpoints::hit("reorg:at_ancestor_post_flush");
 
     j.phase = Phase::Apply;
     j.cursor = 0;
@@ -424,12 +444,14 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     j.phase = Phase::Apply;
     j.cursor = 0;
     journal_write(db, &j).context("journal_write(start_apply)")?;
+    failpoints::hit("reorg:after_apply_start");
 
     let mut applied_new: Vec<Hash32> = Vec::with_capacity(apply_path.len());
     let mut last_applying: Option<Hash32> = None;
 
     let apply_result: Result<()> = (|| {
         for (i, bh) in apply_path.iter().enumerate() {
+            failpoints::hit(&format!("apply:{}:pre", i));
             last_applying = Some(*bh);
 
             let blk =
@@ -443,14 +465,17 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             mempool_remove_mined(mempool, &blk);
 
             set_tip(db, bh).with_context(|| format!("[reorg] set_tip {}", hex32(bh)))?;
+            failpoints::hit(&format!("apply:{}:post_tip_pre_flush", i));
 
             // Durability boundary for this step
             flush_state_step(db).context("flush_state_step(apply)")?;
+            failpoints::hit(&format!("apply:{}:post_flush_pre_journal", i));
 
             applied_new.push(*bh);
 
             j.cursor = (i as u64) + 1;
             journal_write(db, &j).context("journal_write(progress_apply)")?;
+            failpoints::hit(&format!("apply:{}:post_journal", i));
         }
         Ok(())
     })();
@@ -467,9 +492,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
                 let _ = mark_bad(db, new_tip, "apply path contains invalid block");
             }
         } else {
-            println!(
-                "[reorg] apply failed due to missing local block bytes; not marking branch bad."
-            );
+            println!("[reorg] apply failed due to missing local block bytes; not marking branch bad.");
         }
 
         // Roll back: undo applied_new (reverse), then re-apply old branch (forward).
@@ -499,14 +522,12 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             let hi = must_hidx(db, bh)
                 .with_context(|| format!("[reorg] rollback must_hidx(old {})", hex32(bh)))?;
 
-            validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height).with_context(
-                || {
-                    format!(
-                        "[reorg] rollback validate_and_apply_block(old {})",
-                        hex32(bh)
-                    )
-                },
-            )?;
+            validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height).with_context(|| {
+                format!(
+                    "[reorg] rollback validate_and_apply_block(old {})",
+                    hex32(bh)
+                )
+            })?;
 
             mempool_remove_mined(mempool, &blk);
 
@@ -541,6 +562,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     }
 
     // Success: clear journal
+    failpoints::hit("reorg:pre_journal_clear");
     journal_clear(db).context("journal_clear(success)")?;
 
     println!(
