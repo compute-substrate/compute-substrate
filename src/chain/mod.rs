@@ -6,3 +6,4 @@ pub mod pow;
 pub mod reorg;
 pub mod reorg_journal;
 pub mod time;
+pub mod failpoints;
