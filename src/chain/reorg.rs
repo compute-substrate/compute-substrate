@@ -67,6 +67,13 @@ fn flush_state_step(db: &Stores) -> Result<()> {
 }
 
 // ----------------------
+// Tip helper (recovery idempotence)
+// ----------------------
+fn tip_is(db: &Stores, h: &Hash32) -> Result<bool> {
+    Ok(get_tip(db)?.map(|t| t == *h).unwrap_or(false))
+}
+
+// ----------------------
 // Bad-block persistence
 // ----------------------
 
@@ -119,11 +126,7 @@ fn mempool_prune_if_present(db: &Stores, mempool: Option<&Mempool>) {
     }
 }
 
-fn ensure_apply_blocks_present(
-    db: &Stores,
-    apply_hashes: &[Hash32],
-    new_tip: &Hash32,
-) -> Result<bool> {
+fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &Hash32) -> Result<bool> {
     for bh in apply_hashes {
         if db.blocks.get(k_block(bh))?.is_none() {
             println!(
@@ -142,12 +145,13 @@ fn ensure_apply_blocks_present(
 // ----------------------
 
 /// Recovery rule:
-/// - Trust the JOURNAL PATHS (undo_path/apply_path/ancestor/new_tip),
-/// - But do NOT trust phase/cursor ordering to match what actually got flushed.
+/// - Trust journal PATHS (undo_path/apply_path/ancestor/new_tip),
+/// - But do NOT trust cursor/phase to match what actually got flushed.
 ///
-/// Deterministic recovery strategy:
-/// 1) Always undo whatever the current durable tip is until we reach ancestor.
-/// 2) Then apply apply_path toward new_tip if bytes exist.
+/// Idempotent recovery strategy:
+/// 1) Ensure state is at ancestor (finish undo of old branch as needed).
+/// 2) Apply apply_path toward new_tip as needed.
+/// Each step checks the *current durable tip* to avoid double-undo/double-apply.
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
         return Ok(());
@@ -162,7 +166,51 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         j.cursor
     );
 
-    // --- Step 1: Undo current durable tip back to ancestor ---
+    // ---------------------------------------------
+    // Step 1: drive state back to ancestor (Undo)
+    // ---------------------------------------------
+    // We follow the journal's undo_path, but we do not trust that cursor reflects durable progress.
+    // For each undo target bh, the *post-undo tip* must be parent(bh).
+    // If tip is already parent(bh), that undo step is already durable and we skip it.
+    j.phase = Phase::Undo;
+
+    for (i, bh) in j.undo_path.iter().enumerate() {
+        let hi = must_hidx(db, bh)
+            .with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
+        let expected_tip_after_undo = hi.parent;
+
+        // If we're already at the post-undo tip, this step is already durable.
+        if tip_is(db, &expected_tip_after_undo)? {
+            j.cursor = (i as u64) + 1;
+            // Keep journal progressing so recovery converges.
+            journal_write(db, &j).context("recover journal_write(skip_undo)")?;
+            continue;
+        }
+
+        failpoints::hit(&format!("recover:undo:{}:pre", i));
+
+        // If tip isn't bh anymore (e.g. we already undid past it), we still avoid doing something wrong:
+        // only undo when current tip == bh; otherwise we fall back to "undo current tip toward ancestor"
+        // by directly undoing the current tip in a loop after this block.
+        if tip_is(db, bh)? {
+            undo_block(db, bh)
+                .with_context(|| format!("recover undo_block {}", hex32(bh)))?;
+            set_tip(db, &expected_tip_after_undo)
+                .with_context(|| format!("recover set_tip(parent of {})", hex32(bh)))?;
+            flush_state_step(db).context("recover flush_state_step(undo)")?;
+        } else {
+            // Not at bh; don't risk undoing the wrong block. Break and use the generic loop below.
+            break;
+        }
+
+        j.cursor = (i as u64) + 1;
+
+        failpoints::hit(&format!("recover:undo:{}:pre_journal", i));
+        journal_write(db, &j).context("recover journal_write(progress_undo)")?;
+        failpoints::hit(&format!("recover:undo:{}:post_journal", i));
+    }
+
+    // Generic safety net: if we still aren't at ancestor, undo the current tip until we are.
     loop {
         let tip = match get_tip(db).context("recover get_tip")? {
             Some(t) => t,
@@ -180,18 +228,33 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         let hi = must_hidx(db, &tip)
             .with_context(|| format!("recover must_hidx(cur_tip {})", hex32(&tip)))?;
 
+        let expected_tip_after_undo = hi.parent;
+
+        // If we're already at parent, skip; otherwise undo current tip.
+        if tip_is(db, &expected_tip_after_undo)? {
+            continue;
+        }
+
         failpoints::hit("recover:undo_step:pre");
         undo_block(db, &tip).with_context(|| format!("recover undo_block {}", hex32(&tip)))?;
-        set_tip(db, &hi.parent).with_context(|| format!("recover set_tip(parent of {})", hex32(&tip)))?;
+        set_tip(db, &expected_tip_after_undo)
+            .with_context(|| format!("recover set_tip(parent of {})", hex32(&tip)))?;
 
-        // CRITICAL: make the undo durable before any crashpoint continues
         flush_state_step(db).context("recover flush_state_step(undo_step)")?;
         failpoints::hit("recover:undo_step:post");
     }
 
+    // Ensure tip=ancestor (durable)
+    if !tip_is(db, &j.ancestor)? {
+        set_tip(db, &j.ancestor).context("recover set_tip(ancestor final)")?;
+        flush_state_step(db).context("recover flush_state_step(set ancestor final)")?;
+    }
+
     mempool_prune_if_present(db, mempool);
 
-    // --- Step 2: Apply new branch if possible ---
+    // ---------------------------------------------
+    // Step 2: apply new branch (Apply)
+    // ---------------------------------------------
     if !ensure_apply_blocks_present(db, &j.apply_path, &j.new_tip)? {
         println!(
             "[reorg] recovery: missing block bytes for apply path; leaving tip at ancestor {}",
@@ -210,6 +273,13 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     journal_write(db, &j).context("recover journal_write(start_apply)")?;
 
     for (i, bh) in j.apply_path.iter().enumerate() {
+        // If already at this block, it's durable; just advance cursor + journal.
+        if tip_is(db, bh)? {
+            j.cursor = (i as u64) + 1;
+            journal_write(db, &j).context("recover journal_write(skip_apply)")?;
+            continue;
+        }
+
         failpoints::hit(&format!("recover:apply:{}:pre", i));
 
         let blk = load_block(db, bh).with_context(|| format!("recover load_block {}", hex32(bh)))?;
@@ -233,13 +303,12 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         mempool_remove_mined(mempool, &blk);
         set_tip(db, bh).with_context(|| format!("recover set_tip {}", hex32(bh)))?;
 
-        // Make apply durable before any crashpoint continues
         flush_state_step(db).context("recover flush_state_step(apply)")?;
 
         j.cursor = (i as u64) + 1;
 
         failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
-        journal_write(db, &j).context("recover journal_write(progress)")?;
+        journal_write(db, &j).context("recover journal_write(progress_apply)")?;
         failpoints::hit(&format!("recover:apply:{}:post_journal", i));
     }
 
@@ -315,6 +384,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
     let anc = find_ancestor(db, old_hi.clone(), new_hi.clone()).context("find_ancestor")?;
 
+    // Build undo path: old_tip -> ancestor (exclusive)
     let mut undo_path: Vec<Hash32> = vec![];
     let mut cur = old_hi.clone();
     while cur.hash != anc.hash {
@@ -322,6 +392,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         cur = must_hidx(db, &cur.parent)?;
     }
 
+    // Build apply path: ancestor -> new_tip (exclusive)
     let mut apply_path: Vec<Hash32> = vec![];
     let mut cur2 = new_hi.clone();
     while cur2.hash != anc.hash {
@@ -348,18 +419,19 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         undo_path.len(), apply_path.len(),
     );
 
+    // ---------------- Crash-atomic journal start ----------------
     let mut j = ReorgJournal {
-    seq: 0,
-    old_tip,
-    new_tip: *new_tip,
-    ancestor: anc.hash,
-    phase: Phase::Undo,
-    cursor: 0,
-    undo_path: undo_path.clone(),
-    apply_path: apply_path.clone(),
-};
+        old_tip,
+        new_tip: *new_tip,
+        ancestor: anc.hash,
+        phase: Phase::Undo,
+        cursor: 0,
+        undo_path: undo_path.clone(),
+        apply_path: apply_path.clone(),
+    };
     journal_write(db, &j).context("journal_write(start)")?;
     failpoints::hit("reorg:after_journal_start");
+    // -----------------------------------------------------------
 
     // Phase A: undo old branch
     for (i, bh) in undo_path.iter().enumerate() {
@@ -373,7 +445,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         // Make durable first
         flush_state_step(db).context("flush_state_step(undo)")?;
 
-        // Keep the failpoint label, but ensure it only runs after durability
+        // Keep the labels post-durability
         failpoints::hit(&format!("undo:{}:post_tip_pre_flush", i));
         failpoints::hit(&format!("undo:{}:post_flush_pre_journal", i));
 
@@ -420,7 +492,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             // Make durable first
             flush_state_step(db).context("flush_state_step(apply)")?;
 
-            // Keep labels, but now they are post-durability
+            // Keep labels post-durability
             failpoints::hit(&format!("apply:{}:post_tip_pre_flush", i));
             failpoints::hit(&format!("apply:{}:post_flush_pre_journal", i));
 
@@ -448,9 +520,11 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             println!("[reorg] apply failed due to missing local block bytes; not marking branch bad.");
         }
 
+        // Roll back: undo applied_new (reverse), then re-apply old branch (forward).
         let mut reapply_old = undo_path.clone();
         reapply_old.reverse();
 
+        // Undo applied_new back to ancestor.
         for bh in applied_new.iter().rev() {
             let hi = must_hidx(db, bh).with_context(|| {
                 format!("[reorg] rollback must_hidx(applied_new {})", hex32(bh))
@@ -466,6 +540,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         set_tip(db, &anc.hash).context("[reorg] rollback set_tip(ancestor)")?;
         flush_state_step(db).context("rollback flush_state_step(set ancestor)")?;
 
+        // Re-apply the old branch.
         for bh in &reapply_old {
             let blk = load_block(db, bh)
                 .with_context(|| format!("[reorg] rollback load_block(old {})", hex32(bh)))?;
@@ -492,11 +567,13 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
         mempool_prune_if_present(db, mempool);
 
+        // Clear journal: we returned to old tip cleanly.
         let _ = journal_clear(db);
 
         return Err(e);
     }
 
+    // Final set (should already be at new_tip)
     set_tip(db, new_tip).context("[reorg] final set_tip(new_tip)")?;
     flush_state_step(db).context("flush_state_step(final set new_tip)")?;
 
@@ -509,6 +586,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         );
     }
 
+    // Success: clear journal
     failpoints::hit("reorg:pre_journal_clear");
     journal_clear(db).context("journal_clear(success)")?;
 
