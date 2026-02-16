@@ -2,6 +2,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::chain::failpoints;
 use crate::state::db::{k_reorg_in_progress, meta_del, meta_get_bytes, meta_put_bytes, Stores};
 use crate::types::Hash32;
 
@@ -41,23 +42,34 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
 /// Persist the crash-recovery journal.
 /// MAINNET HARDENING:
 /// - Flush only the meta tree so a kill -9 never leaves a "stale" journal on disk.
+///
+/// TEST HARDENING:
+/// - failpoints around journal boundaries.
 pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
+    failpoints::hit("journal_write:pre");
+
     let bytes = crate::codec::consensus_bincode()
         .serialize(j)
         .context("encode reorg journal")?;
 
     meta_put_bytes(db, k_reorg_in_progress(), &bytes)?;
 
-    // Critical durability boundary: meta is tiny, flushing is cheap.
+    failpoints::hit("journal_write:pre_flush");
     db.meta.flush().context("flush meta after journal_write")?;
+    failpoints::hit("journal_write:post_flush");
+
     Ok(())
 }
 
 /// Clear the journal after successful completion (or clean rollback).
 pub fn journal_clear(db: &Stores) -> Result<()> {
+    failpoints::hit("journal_clear:pre");
+
     meta_del(db, k_reorg_in_progress())?;
 
-    // Ensure journal deletion is durable too.
+    failpoints::hit("journal_clear:pre_flush");
     db.meta.flush().context("flush meta after journal_clear")?;
+    failpoints::hit("journal_clear:post_flush");
+
     Ok(())
 }
