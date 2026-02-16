@@ -21,14 +21,14 @@ use crate::types::Hash32;
 // - ACTIVE: b"reorg:in_progress:active" -> 0 or 1
 //
 // We also keep a monotonic seq so we can pick the newest valid record if needed.
-fn k_reorg_slot_a() -> Vec<u8> {
-    b"reorg:in_progress:a".to_vec()
+fn k_reorg_slot_a() -> &'static [u8] {
+    b"reorg:in_progress:a"
 }
-fn k_reorg_slot_b() -> Vec<u8> {
-    b"reorg:in_progress:b".to_vec()
+fn k_reorg_slot_b() -> &'static [u8] {
+    b"reorg:in_progress:b"
 }
-fn k_reorg_active() -> Vec<u8> {
-    b"reorg:in_progress:active".to_vec()
+fn k_reorg_active() -> &'static [u8] {
+    b"reorg:in_progress:active"
 }
 
 fn read_active(db: &Stores) -> Result<u8> {
@@ -44,7 +44,7 @@ fn write_active(db: &Stores, which: u8) -> Result<()> {
     Ok(())
 }
 
-fn slot_key(which: u8) -> Vec<u8> {
+fn slot_key(which: u8) -> &'static [u8] {
     if (which & 1) == 0 {
         k_reorg_slot_a()
     } else {
