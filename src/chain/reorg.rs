@@ -349,14 +349,15 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     );
 
     let mut j = ReorgJournal {
-        old_tip,
-        new_tip: *new_tip,
-        ancestor: anc.hash,
-        phase: Phase::Undo,
-        cursor: 0,
-        undo_path: undo_path.clone(),
-        apply_path: apply_path.clone(),
-    };
+    seq: 0,
+    old_tip,
+    new_tip: *new_tip,
+    ancestor: anc.hash,
+    phase: Phase::Undo,
+    cursor: 0,
+    undo_path: undo_path.clone(),
+    apply_path: apply_path.clone(),
+};
     journal_write(db, &j).context("journal_write(start)")?;
     failpoints::hit("reorg:after_journal_start");
 
