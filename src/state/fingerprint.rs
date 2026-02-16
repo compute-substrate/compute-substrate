@@ -1,10 +1,6 @@
 // src/state/fingerprint.rs
 use anyhow::Result;
 
-/// A cheap “state root” summary used by integration tests.
-/// This must be deterministic and stable across runs.
-///
-/// NOTE: We derive PartialEq/Eq so tests can compare fingerprints directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateFingerprint {
     pub tip: [u8; 32],
@@ -13,17 +9,15 @@ pub struct StateFingerprint {
     pub app_root: [u8; 32],
 }
 
+/// Hash a tree deterministically by folding kv hashes in key order.
+/// NOTE: This is a *test/diagnostic* fingerprint; not consensus-critical.
 fn hash_tree_kv(tree: &sled::Tree) -> Result<[u8; 32]> {
     use sha2::{Digest, Sha256};
 
-    // Deterministic fold over sorted keyspace
     let mut h = Sha256::new();
     for kv in tree.iter() {
         let (k, v) = kv?;
-        // domain separate to avoid ambiguity
-        h.update((k.len() as u64).to_le_bytes());
         h.update(&k);
-        h.update((v.len() as u64).to_le_bytes());
         h.update(&v);
     }
     let out = h.finalize();
@@ -37,16 +31,11 @@ pub fn fingerprint(db: &crate::state::db::Stores) -> Result<StateFingerprint> {
 
     let tip = get_tip(db)?.unwrap_or([0u8; 32]);
 
-    // These trees exist in Stores; we hash full KV set deterministically.
-    let utxo_root = hash_tree_kv(&db.utxo)?;
-    let utxo_meta_root = hash_tree_kv(&db.utxo_meta)?;
-    let app_root = hash_tree_kv(&db.app)?;
-
     Ok(StateFingerprint {
         tip,
-        utxo_root,
-        utxo_meta_root,
-        app_root,
+        utxo_root: hash_tree_kv(&db.utxo)?,
+        utxo_meta_root: hash_tree_kv(&db.utxo_meta)?,
+        app_root: hash_tree_kv(&db.app)?,
     })
 }
 
