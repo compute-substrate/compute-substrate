@@ -6,7 +6,7 @@ use crate::chain::failpoints;
 use crate::state::db::{k_reorg_in_progress, meta_del, meta_get_bytes, meta_put_bytes, Stores};
 use crate::types::Hash32;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Phase {
     Undo,  // undoing old branch toward ancestor
     Apply, // applying new branch from ancestor toward new_tip
