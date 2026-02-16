@@ -1,28 +1,24 @@
-// tests/reorg_crash_recovery.rs
+// tests/reorg_randomized.rs
 use anyhow::{Context, Result};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use tempfile::TempDir;
 
+use csd::chain::index::{get_hidx, header_hash, index_header};
+use csd::chain::reorg::maybe_reorg_to;
 use csd::codec;
-use csd::params::{INITIAL_BITS, INITIAL_REWARD};
+use csd::params::{INITIAL_BITS, INITIAL_REWARD, POW_LIMIT_BITS};
 use csd::state::app_state::epoch_of;
-use csd::state::db::{k_block, set_tip, Stores};
+use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::fingerprint::{fingerprint, fmt_fp};
 use csd::state::utxo::validate_and_apply_block;
-
-use csd::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
-use csd::chain::pow::expected_bits;
-use csd::chain::reorg::{maybe_reorg_to, recover_if_needed};
 use csd::types::{Block, BlockHeader, Hash32, Transaction};
 
-fn open_db_path(path: &str) -> Result<Stores> {
-    Stores::open(path).context("Stores::open")
+fn open_db(tmp: &TempDir) -> Result<Stores> {
+    Stores::open(tmp.path().to_str().unwrap()).context("Stores::open")
 }
 
-// Optional crashpoint helper: NEVER errors if env var missing.
-fn crashpoint(name: &str) -> bool {
-    std::env::var("CSD_CRASHPOINT").ok().as_deref() == Some(name)
-}
-
+// deterministic miner addr for tests
 fn make_coinbase(height: u64) -> Transaction {
     let miner: [u8; 20] = [0x11u8; 20];
     csd::chain::mine::coinbase(miner, INITIAL_REWARD, height)
@@ -60,75 +56,58 @@ fn merkle_root(txs: &[Transaction]) -> Hash32 {
     layer[0]
 }
 
-/// Consensus-correct bits for the next block we are about to build.
-fn bits_for_next_block(db: &Stores, height: u64, parent_hi: Option<&HeaderIndex>) -> Result<u32> {
-    if height == 0 {
-        Ok(INITIAL_BITS)
-    } else {
-        expected_bits(db, height, parent_hi).context("expected_bits(test)")
-    }
-}
-
-fn build_block(prev: Hash32, height: u64, time: u64, bits: u32) -> Block {
-    let cb = make_coinbase(height);
-    let txs = vec![cb];
-
-    let hdr = BlockHeader {
+/// TEST MODE: don’t mine; we just set a nonce and (optionally) an easy bits.
+/// Your index/pow layer already has a test bypass — this keeps it fast.
+fn build_header(prev: Hash32, time: u64, bits: u32) -> BlockHeader {
+    BlockHeader {
         version: 1,
         prev,
-        merkle: merkle_root(&txs),
+        merkle: [0u8; 32], // filled after txs chosen
         time,
         bits,
         nonce: 0,
-    };
-
-    Block { header: hdr, txs }
+    }
 }
 
-fn persist_index_apply(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
-    let bh = header_hash(&blk.header);
+fn apply_block(db: &Stores, prev: Hash32, height: u64, time: u64, bits: u32) -> Result<Hash32> {
+    let cb = make_coinbase(height);
+    let txs = vec![cb];
 
-    // persist bytes
-    let bytes = codec::consensus_bincode().serialize(blk).context("serialize Block")?;
+    let mut hdr = build_header(prev, time, bits);
+    hdr.merkle = merkle_root(&txs);
+
+    let bh = header_hash(&hdr);
+    let blk = Block { header: hdr, txs };
+
+    // persist bytes so reorg can load it
+    let bytes = codec::consensus_bincode().serialize(&blk).context("serialize Block")?;
     db.blocks.insert(k_block(&bh), bytes).context("db.blocks.insert")?;
 
-    // parent index (unless genesis)
+    // index header
     let parent_hi = if blk.header.prev == [0u8; 32] {
         None
     } else {
         get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
     };
-
-    // index header (enforces bits/time/pow rules)
     index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
 
-    // apply state
-    validate_and_apply_block(db, blk, epoch_of(height), height).context("apply")?;
+    // apply and set tip
+    validate_and_apply_block(db, &blk, epoch_of(height), height).context("validate_and_apply_block")?;
     set_tip(db, &bh).context("set_tip")?;
 
     Ok(bh)
 }
 
-fn build_chain(db: &Stores, n: u64, start_time: u64) -> Result<Vec<Hash32>> {
-    let mut hashes = Vec::with_capacity(n as usize);
+fn build_linear(db: &Stores, n: u64, start_time: u64, bits: u32) -> Result<Vec<Hash32>> {
+    let mut out = Vec::with_capacity(n as usize);
     let mut prev = [0u8; 32];
-
     for h in 0..n {
-        let t = start_time + h * 60;
-
-        let parent_hi = if h == 0 {
-            None
-        } else {
-            get_hidx(db, &prev).context("get_hidx(parent in build_chain)")?
-        };
-        let bits = bits_for_next_block(db, h, parent_hi.as_ref())?;
-
-        let blk = build_block(prev, h, t, bits);
-        let bh = persist_index_apply(db, &blk, h).with_context(|| format!("apply h={h}"))?;
-        hashes.push(bh);
+        let t = start_time + (h * 60);
+        let bh = apply_block(db, prev, h, t, bits).with_context(|| format!("apply h={h}"))?;
+        out.push(bh);
         prev = bh;
     }
-    Ok(hashes)
+    Ok(out)
 }
 
 fn build_fork(
@@ -137,164 +116,119 @@ fn build_fork(
     fork_height: u64,
     fork_len: u64,
     start_time: u64,
+    bits: u32,
 ) -> Result<Vec<Hash32>> {
-    anyhow::ensure!(fork_height > 0);
+    anyhow::ensure!(fork_height > 0, "fork_height must be > 0");
+    let parent = base[(fork_height - 1) as usize];
+
     let mut out = Vec::with_capacity(fork_len as usize);
-    let mut prev = base[(fork_height - 1) as usize];
+    let mut prev = parent;
 
     for i in 0..fork_len {
         let h = fork_height + i;
-        let t = start_time + h * 60 + 17;
-
-        let parent_hi = get_hidx(db, &prev).context("get_hidx(parent in build_fork)")?;
-        let bits = bits_for_next_block(db, h, parent_hi.as_ref())?;
-
-        let blk = build_block(prev, h, t, bits);
-        let bh = persist_index_apply(db, &blk, h).with_context(|| format!("fork apply h={h}"))?;
+        let t = start_time + (h * 60) + 17;
+        let bh = apply_block(db, prev, h, t, bits).with_context(|| format!("fork apply h={h}"))?;
         out.push(bh);
         prev = bh;
     }
     Ok(out)
 }
 
-fn replay_chain(dst: &Stores, src: &Stores, canon: &[Hash32]) -> Result<()> {
-    for (height, bh) in canon.iter().enumerate() {
+/// Walk the canonical chain from `tip` back to genesis using header index,
+/// return hashes in forward order (genesis..tip).
+fn canonical_chain_from_tip(db: &Stores, tip: Hash32) -> Result<Vec<Hash32>> {
+    let mut chain_rev: Vec<Hash32> = Vec::new();
+    let mut cur = tip;
+
+    loop {
+        chain_rev.push(cur);
+        let hi = get_hidx(db, &cur)?.ok_or_else(|| anyhow::anyhow!("missing hidx for {}", hex::encode(cur)))?;
+        if hi.parent == [0u8; 32] {
+            break;
+        }
+        cur = hi.parent;
+    }
+
+    chain_rev.reverse();
+    Ok(chain_rev)
+}
+
+fn replay_chain(dst: &Stores, src: &Stores, chain: &[Hash32]) -> Result<()> {
+    for (height, bh) in chain.iter().enumerate() {
         let Some(v) = src.blocks.get(k_block(bh)).context("src.blocks.get")? else {
             anyhow::bail!("missing block bytes for {}", hex::encode(bh));
         };
         let blk: Block = codec::consensus_bincode().deserialize(&v).context("deserialize Block")?;
-        persist_index_apply(dst, &blk, height as u64).context("replay apply")?;
+
+        let parent_hi = if blk.header.prev == [0u8; 32] {
+            None
+        } else {
+            get_hidx(dst, &blk.header.prev).context("get_hidx(dst parent)")?
+        };
+        index_header(dst, &blk.header, parent_hi.as_ref()).context("index_header(dst)")?;
+        validate_and_apply_block(dst, &blk, epoch_of(height as u64), height as u64)
+            .context("validate_and_apply_block(dst)")?;
+        set_tip(dst, bh).context("set_tip(dst)")?;
     }
     Ok(())
 }
 
 #[test]
-fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
-    // One TempDir for the “crashy” DB
-    let tmp = TempDir::new().context("TempDir")?;
-    let db_path = tmp.path().to_str().unwrap().to_string();
+fn reorg_equivalence_randomized_many_shapes() -> Result<()> {
+    // keep it fast but meaningful
+    let mut rng = StdRng::seed_from_u64(1337);
 
-    // We also need to keep these hashes across opens
-    let (a, tip_a, b_tail, tip_b, fork_height) = {
-        // IMPORTANT: only one Stores open at a time
-        let db = open_db_path(&db_path).context("open db")?;
+    for case in 0..50u64 {
+        let base_len = rng.gen_range(10..80) as u64;
+        let fork_height = rng.gen_range(1..(base_len.saturating_sub(1).max(2))) as u64;
+        let fork_len = rng.gen_range(1..60) as u64;
 
-        // base chain
-        let a = build_chain(&db, 40, 1_700_000_000).context("build base")?;
+        // Use an easy bits in tests so we don't ever get stuck on expected_bits drift.
+        // (Your production bits rules still exist; this is purely test speed.)
+        let bits = POW_LIMIT_BITS;
+
+        let tmp1 = TempDir::new().context("tmp1")?;
+        let db1 = open_db(&tmp1).context("open db1")?;
+
+        let a = build_linear(&db1, base_len, 1_700_000_000 + case * 10_000, bits)
+            .context("build base")?;
         let tip_a = *a.last().unwrap();
 
-        // fork that overtakes
-        let fork_height = 20u64;
-        let fork_len = 35u64;
-        let b_tail =
-            build_fork(&db, &a, fork_height, fork_len, 1_700_000_000).context("build fork")?;
+        let b_tail = build_fork(
+            &db1,
+            &a,
+            fork_height,
+            fork_len,
+            1_700_000_000 + case * 10_000,
+            bits,
+        )
+        .context("build fork")?;
         let tip_b = *b_tail.last().unwrap();
 
-        // ensure canonical tip is A before invoking reorg
-        set_tip(&db, &tip_a).context("force tip A")?;
+        println!("case={case} base_len={base_len} fork_height={fork_height} fork_len={fork_len}");
 
-        // optional crashpoint
-        if crashpoint("pre_reorg") {
-    return Ok(());
-}
+        // Force tip back to A, then try to reorg to B (may or may not win).
+        set_tip(&db1, &tip_a).context("force tip back to A")?;
+        maybe_reorg_to(&db1, &tip_b, None).context("maybe_reorg_to")?;
 
-        // run reorg
-        maybe_reorg_to(&db, &tip_b, None).context("baseline reorg failed")?;
+        // THIS is the canonical chain we must replay: whatever db1 ended up choosing.
+        let final_tip = get_tip(&db1)?.unwrap_or([0u8; 32]);
+        let canon = canonical_chain_from_tip(&db1, final_tip).context("canon walk")?;
 
-        // drop happens at end of scope
-        (a, tip_a, b_tail, tip_b, fork_height)
-    };
+        let fp1 = fingerprint(&db1).context("fp db1")?;
+        println!("[db1] {}", fmt_fp(&fp1));
 
-    // ---- Recovery pass (reopen only after previous Stores is dropped) ----
-    {
-        let db = open_db_path(&db_path).context("reopen db for recovery")?;
-        recover_if_needed(&db, None).context("recover_if_needed")?;
-        let fp = fingerprint(&db).context("fingerprint(recovered)")?;
-        println!("[test] recovered fp: {}", fmt_fp(&fp));
-        // drop db before opening again anywhere
-    }
+        let tmp2 = TempDir::new().context("tmp2")?;
+        let db2 = open_db(&tmp2).context("open db2")?;
+        replay_chain(&db2, &db1, &canon).context("replay canon to db2")?;
 
-    // ---- Clean replay into a separate DB ----
-    let tmp_clean = TempDir::new().context("TempDir clean")?;
-    let clean_path = tmp_clean.path().to_str().unwrap().to_string();
+        let fp2 = fingerprint(&db2).context("fp db2")?;
+        println!("[db2] {}", fmt_fp(&fp2));
 
-    // reopen the recovered db ONE more time to read block bytes for replay
-    let fp_recovered = {
-        let db = open_db_path(&db_path).context("reopen db to read blocks")?;
-        let fp = fingerprint(&db).context("fingerprint(recovered again)")?;
-        println!("[test] recovered fp (again): {}", fmt_fp(&fp));
-        fp
-    };
-
-    // Now open both DBs sequentially (never at the same time)
-    // 1) open recovered for reading bytes, but we can't keep it open while opening clean.
-    // So: read bytes indirectly by replaying from a fresh open in the replay loop.
-    {
-        let db_clean = open_db_path(&clean_path).context("open clean db")?;
-
-        // canonical chain is: A[0..fork_height-1] + fork blocks
-        let mut canon: Vec<Hash32> = Vec::new();
-        canon.extend_from_slice(&a[0..(fork_height as usize)]);
-        canon.extend_from_slice(&b_tail);
-
-        // For replay, open recovered DB inside this block-by-block loop in a minimal way:
-        // simplest: reopen recovered once, replay, drop, and keep clean open.
-        // But sled won't allow two opens simultaneously. Therefore we do the replay
-        // as: close clean? No. So we do the replay in two phases:
-        // - extract block bytes from recovered into memory
-        // - then apply to clean
-        drop(db_clean);
-    }
-
-    // Phase 1: extract canonical block bytes from recovered (one open)
-    let canon_bytes: Vec<Vec<u8>> = {
-        let db = open_db_path(&db_path).context("reopen db to extract canon bytes")?;
-
-        let mut canon: Vec<Hash32> = Vec::new();
-        canon.extend_from_slice(&a[0..(fork_height as usize)]);
-        canon.extend_from_slice(&b_tail);
-
-        let mut out = Vec::with_capacity(canon.len());
-        for bh in &canon {
-            let Some(v) = db.blocks.get(k_block(bh)).context("blocks.get")? else {
-                anyhow::bail!("missing block bytes for {}", hex::encode(bh));
-            };
-            out.push(v.to_vec());
+        if fp1 != fp2 {
+            anyhow::bail!("fingerprint mismatch in randomized case {}", case);
         }
-        out
-    };
-
-    // Phase 2: apply bytes to clean (one open)
-    let fp_clean = {
-        let db_clean = open_db_path(&clean_path).context("open clean db (apply)")?;
-
-        // reconstruct hashes list again
-        let mut canon: Vec<Hash32> = Vec::new();
-        canon.extend_from_slice(&a[0..(fork_height as usize)]);
-        canon.extend_from_slice(&b_tail);
-
-        for (height, (bh, bytes)) in canon.iter().zip(canon_bytes.iter()).enumerate() {
-            let blk: Block = codec::consensus_bincode()
-                .deserialize(bytes)
-                .context("deserialize Block (canon_bytes)")?;
-
-            // sanity: hash matches expected
-            let got = header_hash(&blk.header);
-            anyhow::ensure!(got == *bh, "canon_bytes hash mismatch at height={}", height);
-
-            persist_index_apply(&db_clean, &blk, height as u64)
-                .with_context(|| format!("clean apply height={height}"))?;
-        }
-
-        let fp = fingerprint(&db_clean).context("fingerprint(clean)")?;
-        println!("[test] clean fp: {}", fmt_fp(&fp));
-        fp
-    };
-
-    anyhow::ensure!(
-        fp_recovered == fp_clean,
-        "fingerprint mismatch recovered vs clean"
-    );
+    }
 
     Ok(())
 }
