@@ -3,13 +3,14 @@ use anyhow::{Context, Result};
 use tempfile::TempDir;
 
 use csd::codec;
-use csd::params::{INITIAL_BITS, INITIAL_REWARD, POW_LIMIT_BITS};
+use csd::params::{INITIAL_BITS, INITIAL_REWARD};
+use csd::state::app_state::epoch_of;
 use csd::state::db::{k_block, set_tip, Stores};
 use csd::state::fingerprint::{fingerprint, fmt_fp};
-use csd::state::app_state::epoch_of;
 use csd::state::utxo::validate_and_apply_block;
 
-use csd::chain::index::{get_hidx, header_hash, index_header};
+use csd::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
+use csd::chain::pow::expected_bits;
 use csd::chain::reorg::{maybe_reorg_to, recover_if_needed};
 use csd::types::{Block, BlockHeader, Hash32, Transaction};
 
@@ -59,25 +60,28 @@ fn merkle_root(txs: &[Transaction]) -> Hash32 {
     layer[0]
 }
 
-// For tests we do NOT want real mining. Use POW_LIMIT_BITS and your pow.rs test-bypass.
-// (If you keep pow bypass under cfg(test), this will still work in integration tests
-// because integration tests compile the crate as a dependency without cfg(test).
-// So: you should keep the bypass behind a crate feature, not cfg(test).)
-fn test_bits() -> u32 {
-    POW_LIMIT_BITS
+/// Consensus-correct bits for the next block we are about to build.
+fn bits_for_next_block(db: &Stores, height: u64, parent_hi: Option<&HeaderIndex>) -> Result<u32> {
+    if height == 0 {
+        Ok(INITIAL_BITS)
+    } else {
+        expected_bits(db, height, parent_hi).context("expected_bits(test)")
+    }
 }
 
-fn build_block(prev: Hash32, height: u64, time: u64) -> Block {
+fn build_block(prev: Hash32, height: u64, time: u64, bits: u32) -> Block {
     let cb = make_coinbase(height);
     let txs = vec![cb];
+
     let hdr = BlockHeader {
         version: 1,
         prev,
         merkle: merkle_root(&txs),
         time,
-        bits: test_bits(),
+        bits,
         nonce: 0,
     };
+
     Block { header: hdr, txs }
 }
 
@@ -88,17 +92,20 @@ fn persist_index_apply(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> 
     let bytes = codec::consensus_bincode().serialize(blk).context("serialize Block")?;
     db.blocks.insert(k_block(&bh), bytes).context("db.blocks.insert")?;
 
-    // index header (parent must exist unless genesis)
+    // parent index (unless genesis)
     let parent_hi = if blk.header.prev == [0u8; 32] {
         None
     } else {
         get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
     };
+
+    // index header (enforces bits/time/pow rules depending on your current code)
     index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
 
-    // apply
+    // apply state
     validate_and_apply_block(db, blk, epoch_of(height), height).context("apply")?;
     set_tip(db, &bh).context("set_tip")?;
+
     Ok(bh)
 }
 
@@ -108,7 +115,16 @@ fn build_chain(db: &Stores, n: u64, start_time: u64) -> Result<Vec<Hash32>> {
 
     for h in 0..n {
         let t = start_time + h * 60;
-        let blk = build_block(prev, h, t);
+
+        // compute consensus-correct bits for this height
+        let parent_hi = if h == 0 {
+            None
+        } else {
+            get_hidx(db, &prev).context("get_hidx(parent in build_chain)")?
+        };
+        let bits = bits_for_next_block(db, h, parent_hi.as_ref())?;
+
+        let blk = build_block(prev, h, t, bits);
         let bh = persist_index_apply(db, &blk, h).with_context(|| format!("apply h={h}"))?;
         hashes.push(bh);
         prev = bh;
@@ -130,7 +146,11 @@ fn build_fork(
     for i in 0..fork_len {
         let h = fork_height + i;
         let t = start_time + h * 60 + 17;
-        let blk = build_block(prev, h, t);
+
+        let parent_hi = get_hidx(db, &prev).context("get_hidx(parent in build_fork)")?;
+        let bits = bits_for_next_block(db, h, parent_hi.as_ref())?;
+
+        let blk = build_block(prev, h, t, bits);
         let bh = persist_index_apply(db, &blk, h).with_context(|| format!("fork apply h={h}"))?;
         out.push(bh);
         prev = bh;
@@ -151,52 +171,44 @@ fn replay_chain(dst: &Stores, src: &Stores, canon: &[Hash32]) -> Result<()> {
 
 #[test]
 fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
-    // 1) Build a DB with a fork, then force tip back and start reorg.
     let tmp = TempDir::new().context("TempDir")?;
     let db = open_db(&tmp).context("open db")?;
 
+    // base chain
     let a = build_chain(&db, 40, 1_700_000_000).context("build base")?;
     let tip_a = *a.last().unwrap();
 
+    // fork that overtakes
     let fork_height = 20u64;
     let fork_len = 35u64;
     let b_tail = build_fork(&db, &a, fork_height, fork_len, 1_700_000_000).context("build fork")?;
     let tip_b = *b_tail.last().unwrap();
 
-    // force canonical tip back to A, so reorg actually does work
     set_tip(&db, &tip_a).context("force tip A")?;
 
-    // Optional crashpoint: if set, we simulate a crash by returning early AFTER the journal exists.
-    // You can run the test multiple times with different CSD_CRASHPOINT values.
     if crashpoint("pre_reorg") {
-        // journal doesn't exist yet; just exit cleanly
         return Ok(());
     }
 
-    // Run reorg (this writes journal internally). If you want a "crash" mid-way,
-    // use the crashpoints you already added inside reorg.rs/reorg_journal.rs.
     let r = maybe_reorg_to(&db, &tip_b, None).context("baseline reorg failed");
 
     if crashpoint("after_reorg_call") {
-        // simulate process death after calling reorg: drop db without cleanup
         drop(db);
-        // reopen and recover
         let db2 = open_db(&tmp).context("reopen db after crash")?;
         recover_if_needed(&db2, None).context("recover_if_needed")?;
-        // continue below with comparisons
         let fp_rec = fingerprint(&db2)?;
         println!("[test] recovered fp: {}", fmt_fp(&fp_rec));
     } else {
         r?;
     }
 
-    // 2) Open DB again (fresh handle) and run recovery to ensure idempotent safety.
+    // idempotent recovery pass
     let db_rec = open_db(&tmp).context("reopen db")?;
     recover_if_needed(&db_rec, None).context("recover_if_needed(idempotent)")?;
     let fp1 = fingerprint(&db_rec).context("fingerprint(recovered)")?;
     println!("[test] recovered fp: {}", fmt_fp(&fp1));
 
-    // 3) Clean replay DB from genesis using canonical chain (A[0..fork_height) + b_tail).
+    // clean replay
     let tmp_clean = TempDir::new().context("TempDir clean")?;
     let db_clean = open_db(&tmp_clean).context("open clean db")?;
 
