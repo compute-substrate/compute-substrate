@@ -19,18 +19,17 @@ pub struct HeaderIndex {
     pub time: u64,
 }
 
-fn bypass_pow() -> bool {
-    match std::env::var("CSD_BYPASS_POW") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        }
-        Err(_) => false,
-    }
-}
-
-/// Canonical, consensus-stable header hash (fixed layout).
+/// Canonical, consensus-stable header hash.
+/// Avoid bincode/serde to prevent accidental consensus splits.
+/// Layout (all fixed):
+/// - version: u32 LE
+/// - prev: 32 bytes
+/// - merkle: 32 bytes
+/// - time: u64 LE
+/// - bits: u32 LE
+/// - nonce: u32 LE
 pub fn header_hash(h: &BlockHeader) -> Hash32 {
+    // 4 + 32 + 32 + 8 + 4 + 4 = 84 bytes
     let mut buf = Vec::with_capacity(4 + 32 + 32 + 8 + 4 + 4);
 
     buf.extend_from_slice(&h.version.to_le_bytes());
@@ -61,6 +60,14 @@ pub fn put_hidx(db: &Stores, hi: &HeaderIndex) -> Result<()> {
     Ok(())
 }
 
+/// In tests/integration tests we sometimes want to build toy chains with arbitrary genesis.
+/// This bypass is strictly test-only unless you explicitly enable the crate feature.
+///
+/// IMPORTANT: In release builds, this is always false.
+fn allow_foreign_genesis_for_tests() -> bool {
+    cfg!(test) || cfg!(feature = "test-bypass")
+}
+
 /// Insert a header index entry (CONSENSUS CRITICAL)
 pub fn index_header(
     db: &Stores,
@@ -69,16 +76,16 @@ pub fn index_header(
 ) -> Result<HeaderIndex> {
     let hash = header_hash(hdr);
 
+    // If already indexed, return it (idempotent; helps sync races).
     if let Some(existing) = get_hidx(db, &hash)? {
         return Ok(existing);
     }
 
     // ---- Genesis identity ----
     if hdr.prev == [0u8; 32] {
-        // When running integration tests with CSD_BYPASS_POW=1,
-        // genesis will be synthetic and won't match params::GENESIS_HASH.
-        // So we skip the check ONLY in that mode.
-        if !bypass_pow() && hash != GENESIS_HASH {
+        // Production rule: genesis must match params::GENESIS_HASH.
+        // Test rule: allow arbitrary genesis so integration tests can build toy chains.
+        if hash != GENESIS_HASH && !allow_foreign_genesis_for_tests() {
             bail!("foreign genesis header");
         }
         if expected_parent.is_some() {
@@ -97,7 +104,17 @@ pub fn index_header(
         (p.height + 1, Some(p))
     };
 
-    // ----------------- time guardrails (objective) -----------------
+    // ----------------- time guardrails (CONSENSUS, OBJECTIVE) -----------------
+    //
+    // We intentionally DO NOT use SystemTime::now() here, because that makes
+    // consensus depend on wall-clock skew across nodes.
+    //
+    // Rules (non-genesis):
+    // 1) MIN_BLOCK_SPACING relative to parent.time
+    // 2) MTP: time must be > median_time_past(parent_window)
+    // 3) "future drift" bounded relative to chain history (mtp + MAX_FUTURE_DRIFT_SECS)
+    //
+    // This keeps validity purely a function of chain data.
     if let Some(p) = parent_hi {
         let min_allowed = p.time.saturating_add(MIN_BLOCK_SPACING_SECS);
         if hdr.time < min_allowed {
@@ -113,6 +130,7 @@ pub fn index_header(
             bail!("time <= MTP: {} <= {}", hdr.time, mtp);
         }
 
+        // Objective future bound relative to MTP (not wallclock)
         let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
         if hdr.time > max_allowed {
             bail!(
@@ -122,7 +140,7 @@ pub fn index_header(
             );
         }
     }
-    // ---------------------------------------------------------------
+    // ------------------------------------------------------------------------
 
     // ---- Difficulty rules ----
     if !bits_within_pow_limit(hdr.bits) {
