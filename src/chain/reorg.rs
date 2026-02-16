@@ -133,7 +133,11 @@ fn mempool_prune_if_present(db: &Stores, mempool: Option<&Mempool>) {
     }
 }
 
-fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &Hash32) -> Result<bool> {
+fn ensure_apply_blocks_present(
+    db: &Stores,
+    apply_hashes: &[Hash32],
+    new_tip: &Hash32,
+) -> Result<bool> {
     for bh in apply_hashes {
         if db.blocks.get(k_block(bh))?.is_none() {
             println!(
@@ -148,20 +152,14 @@ fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &H
 }
 
 // ----------------------
-// Crash recovery
+// Crash recovery (FIXED)
 // ----------------------
-
-/// Call this once on startup (after opening DB) to complete or safely unwind any interrupted reorg.
-///
-/// Safe behavior:
-/// - If journal exists, we ALWAYS restore applied state to `ancestor` first (using undo logs),
-///   then we attempt to apply toward `new_tip` only if block bytes exist.
-/// - If application fails for a non-local-missing-bytes reason, we mark bad and stop at ancestor.
-/// - On success, we clear the journal.
-///
-/// PRODUCTION UPGRADE:
-/// - After every undo/apply step, flush the mutated trees (utxo/utxo_meta/undo/app/meta) before advancing cursor.
-///   This makes journal cursor correspond to durable state.
+//
+// IMPORTANT CHANGE:
+// - We do NOT trust journal.phase/journal.cursor.
+// - We read the actual persisted tip and undo blocks until we hit journal.ancestor.
+// - Then we replay apply_path from scratch.
+//
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
         return Ok(());
@@ -176,64 +174,63 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         j.cursor
     );
 
-    // 1) Restore state to ancestor deterministically.
-    match j.phase {
-        Phase::Undo => {
-            // Finish undo steps to reach ancestor.
-            let start = j.cursor as usize;
-            for (i, bh) in j.undo_path.iter().enumerate().skip(start) {
-                failpoints::hit(&format!("recover:undo:{}:pre", i));
+    // If we don't have a tip, there's nothing to unwind; leave journal intact.
+    let Some(mut tip) = get_tip(db).context("recover get_tip")? else {
+        println!("[reorg] recovery: no tip set; leaving journal in place");
+        return Ok(());
+    };
 
-                let hi = must_hidx(db, bh)
-                    .with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
-                undo_block(db, bh)
-                    .with_context(|| format!("recover undo_block(undo {})", hex32(bh)))?;
-                set_tip(db, &hi.parent)
-                    .with_context(|| format!("recover set_tip(parent of {})", hex32(bh)))?;
-
-                // Durability boundary for this step
-                flush_state_step(db).context("recover flush_state_step(undo)")?;
-
-                j.cursor = (i as u64) + 1;
-
-                failpoints::hit(&format!("recover:undo:{}:pre_journal", i));
-                journal_write(db, &j).context("recover journal_write(undo)")?;
-                failpoints::hit(&format!("recover:undo:{}:post_journal", i));
-            }
-
-            set_tip(db, &j.ancestor).context("recover set_tip(ancestor)")?;
-            flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
-        }
-
-        Phase::Apply => {
-            // Undo applied blocks to return to ancestor.
-            let applied_n = j.cursor as usize;
-            for (ri, bh) in j.apply_path.iter().take(applied_n).rev().enumerate() {
-                failpoints::hit(&format!("recover:undo_applied:{}:pre", ri));
-
-                let hi = must_hidx(db, bh)
-                    .with_context(|| format!("recover must_hidx(applied {})", hex32(bh)))?;
-                undo_block(db, bh)
-                    .with_context(|| format!("recover undo_block(applied {})", hex32(bh)))?;
-                set_tip(db, &hi.parent)
-                    .with_context(|| format!("recover set_tip(parent of applied {})", hex32(bh)))?;
-
-                flush_state_step(db).context("recover flush_state_step(undo applied)")?;
-            }
-
-            set_tip(db, &j.ancestor).context("recover set_tip(ancestor)")?;
-            flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
-
-            // Now switch journal back to Apply with cursor=0 (since we are at ancestor again).
-            j.phase = Phase::Apply;
-            j.cursor = 0;
-            journal_write(db, &j).context("recover journal_write(reset_apply)")?;
-        }
+    // 1) Unwind from *actual persisted tip* back to ancestor.
+    //    This is phase/cursor-agnostic and works even if we crashed mid-step.
+    //
+    // We assume undo logs exist for any block that was ever applied.
+    // If we crash before a block becomes durably applied, it should not be the durable tip.
+    if tip != j.ancestor {
+        println!(
+            "[reorg] recovery: unwinding durable tip {} back to ancestor {}",
+            hex32(&tip),
+            hex32(&j.ancestor)
+        );
     }
 
+    let mut steps: u64 = 0;
+    while tip != j.ancestor {
+        failpoints::hit(&format!("recover:unwind:{}:pre", steps));
+
+        let hi = must_hidx(db, &tip)
+            .with_context(|| format!("recover must_hidx(unwind tip {})", hex32(&tip)))?;
+
+        // Safety: avoid infinite loop if ancestry is broken.
+        if hi.parent == [0u8; 32] && tip != j.ancestor {
+            bail!(
+                "[reorg] recovery: hit genesis-like parent while not at ancestor (tip={}, ancestor={})",
+                hex32(&tip),
+                hex32(&j.ancestor)
+            );
+        }
+
+        undo_block(db, &tip).with_context(|| format!("recover undo_block(unwind {})", hex32(&tip)))?;
+        set_tip(db, &hi.parent)
+            .with_context(|| format!("recover set_tip(parent of unwind {})", hex32(&tip)))?;
+
+        flush_state_step(db).context("recover flush_state_step(unwind)")?;
+
+        tip = hi.parent;
+        steps += 1;
+
+        // Write journal occasionally (and deterministically) for debug visibility.
+        // We intentionally do NOT use j.cursor as truth; we update it as a *hint*.
+        j.phase = Phase::Undo;
+        j.cursor = steps;
+        failpoints::hit(&format!("recover:unwind:{}:pre_journal", steps));
+        journal_write(db, &j).context("recover journal_write(unwind)")?;
+        failpoints::hit(&format!("recover:unwind:{}:post_journal", steps));
+    }
+
+    // We are now at ancestor (durably).
     mempool_prune_if_present(db, mempool);
 
-    // 2) Attempt to apply new branch if possible (only if we have bytes).
+    // 2) Only apply if we have all bytes for apply path.
     if !ensure_apply_blocks_present(db, &j.apply_path, &j.new_tip)? {
         println!(
             "[reorg] recovery: missing block bytes for apply path; leaving tip at ancestor {}",
@@ -243,13 +240,17 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     }
 
     println!(
-        "[reorg] recovery: applying new branch toward {}",
-        hex32(&j.new_tip)
+        "[reorg] recovery: applying new branch toward {} ({} blocks)",
+        hex32(&j.new_tip),
+        j.apply_path.len()
     );
 
+    // Reset journal to Apply from scratch.
     j.phase = Phase::Apply;
     j.cursor = 0;
+    failpoints::hit("recover:apply_start:pre_journal");
     journal_write(db, &j).context("recover journal_write(start_apply)")?;
+    failpoints::hit("recover:apply_start:post_journal");
 
     for (i, bh) in j.apply_path.iter().enumerate() {
         failpoints::hit(&format!("recover:apply:{}:pre", i));
@@ -274,11 +275,9 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
         mempool_remove_mined(mempool, &blk);
         set_tip(db, bh).with_context(|| format!("recover set_tip {}", hex32(bh)))?;
-
         flush_state_step(db).context("recover flush_state_step(apply)")?;
 
         j.cursor = (i as u64) + 1;
-
         failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
         journal_write(db, &j).context("recover journal_write(progress)")?;
         failpoints::hit(&format!("recover:apply:{}:post_journal", i));
