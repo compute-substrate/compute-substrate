@@ -1,70 +1,15 @@
 // src/chain/reorg_journal.rs
 use anyhow::{Context, Result};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::chain::failpoints;
 use crate::state::db::{k_reorg_in_progress, meta_del, meta_get_bytes, meta_put_bytes, Stores};
 use crate::types::Hash32;
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Phase {
     Undo,  // undoing old branch toward ancestor
     Apply, // applying new branch from ancestor toward new_tip
-}
-
-// Backward/forward compatible Phase decoding.
-// - Accepts "Undo"/"Apply" (string form)
-// - Accepts 0/1 (u64) in case an older encoding wrote variants numerically
-impl<'de> Deserialize<'de> for Phase {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct PhaseVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for PhaseVisitor {
-            type Value = Phase;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "Phase as \"Undo\"|\"Apply\" or 0|1")
-            }
-
-            fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                match v {
-                    "Undo" => Ok(Phase::Undo),
-                    "Apply" => Ok(Phase::Apply),
-                    other => Err(E::custom(format!("unknown Phase string: {other}"))),
-                }
-            }
-
-            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                match v {
-                    0 => Ok(Phase::Undo),
-                    1 => Ok(Phase::Apply),
-                    other => Err(E::custom(format!("unknown Phase discrim: {other}"))),
-                }
-            }
-
-            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if v < 0 {
-                    return Err(E::custom("Phase discrim must be non-negative"));
-                }
-                self.visit_u64(v as u64)
-            }
-        }
-
-        // Try to deserialize as either string or integer.
-        deserializer.deserialize_any(PhaseVisitor)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
