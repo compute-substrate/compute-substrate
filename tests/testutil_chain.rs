@@ -195,12 +195,8 @@ pub fn replay_canonical_from_tip(dst: &Stores, src: &Stores, tip: Hash32) -> Res
 }
 
 /// Flush all trees that reorg touches (matches your reorg durability barrier intent).
-pub fn flush_all_state_trees(db: &Stores) -> Result<()> {
-    db.utxo.flush().context("flush utxo")?;
-    db.utxo_meta.flush().context("flush utxo_meta")?;
-    db.undo.flush().context("flush undo")?;
-    db.app.flush().context("flush app")?;
-    db.meta.flush().context("flush meta")?;
+pub fn flush_all_state_trees(db: &Stores) -> anyhow::Result<()> {
+    db.db.flush().context("db.flush (all trees)")?;
     Ok(())
 }
 
