@@ -6,10 +6,10 @@ use tempfile::TempDir;
 use csd::chain::index::{get_hidx, HeaderIndex};
 use csd::chain::reorg::{maybe_reorg_to, recover_if_needed};
 use csd::chain::reorg_journal::{journal_clear, journal_write, Phase, ReorgJournal};
-use csd::state::fingerprint::{fingerprint, fmt_fp};
-use csd::state::db::{get_tip, set_tip, Stores};
-use csd::state::utxo::{undo_block, validate_and_apply_block};
 use csd::state::app_state::epoch_of;
+use csd::state::db::{get_tip, set_tip, Stores};
+use csd::state::fingerprint::{fingerprint, fmt_fp};
+use csd::state::utxo::{undo_block, validate_and_apply_block};
 
 mod testutil_chain;
 use testutil_chain::{
@@ -35,7 +35,11 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
     Ok(a)
 }
 
-fn build_paths(db: &Stores, old_tip: [u8; 32], new_tip: [u8; 32]) -> Result<(HeaderIndex, Vec<[u8; 32]>, Vec<[u8; 32]>)> {
+fn build_paths(
+    db: &Stores,
+    old_tip: [u8; 32],
+    new_tip: [u8; 32],
+) -> Result<(HeaderIndex, Vec<[u8; 32]>, Vec<[u8; 32]>)> {
     let old_hi = must_hidx(db, &old_tip)?;
     let new_hi = must_hidx(db, &new_tip)?;
     let anc = find_ancestor(db, old_hi.clone(), new_hi.clone())?;
@@ -91,8 +95,8 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
         let a = build_base_chain(&db_clean, base_len, start_time).context("build base(clean)")?;
         let tip_a = *a.last().unwrap();
 
-        let b_tail =
-            build_fork_index_only(&db_clean, &a, fork_height, fork_len, start_time).context("build fork(clean)")?;
+        let b_tail = build_fork_index_only(&db_clean, &a, fork_height, fork_len, start_time)
+            .context("build fork(clean)")?;
         let tip_b = *b_tail.last().unwrap();
 
         // Ensure we are on base tip before reorg.
@@ -109,28 +113,22 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
         {
             let db_crash = open_db(&tmp_crash).context("open db_crash")?;
 
-            // Build same base+fork deterministically by copying bytes from clean DB:
-            // easiest is just replay the final clean canonical chain construction steps:
-            // but we need fork headers/bytes too, so we replay base from scratch and then rebuild fork the same way.
-            // (Everything deterministic due to expected_bits + fixed times)
             let a2 = build_base_chain(&db_crash, base_len, start_time).context("build base(crash)")?;
             let tip_a2 = *a2.last().unwrap();
 
-            let b2_tail =
-                build_fork_index_only(&db_crash, &a2, fork_height, fork_len, start_time).context("build fork(crash)")?;
+            let b2_tail = build_fork_index_only(&db_crash, &a2, fork_height, fork_len, start_time)
+                .context("build fork(crash)")?;
             let tip_b2 = *b2_tail.last().unwrap();
 
             set_tip(&db_crash, &tip_a2).context("set tip_a(crash)")?;
             assert_tip_eq(&db_crash, tip_a2)?;
 
             // Compute paths on crash DB.
-            let (anc, undo_path, apply_path) = build_paths(&db_crash, tip_a2, tip_b2).context("build_paths")?;
+            let (anc, undo_path, apply_path) =
+                build_paths(&db_crash, tip_a2, tip_b2).context("build_paths")?;
 
-            // Choose crash point:
-            // - randomly crash during undo or apply
-            // - and at some cursor boundary (including 0)
+            // Choose crash point.
             let crash_during_apply = rng.gen_bool(0.5);
-
             let crash_undo_steps = rng.gen_range(0..=undo_path.len());
             let crash_apply_steps = rng.gen_range(0..=apply_path.len());
 
@@ -156,25 +154,29 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                 undo_path: undo_path.clone(),
                 apply_path: apply_path.clone(),
             };
-            journal_write(&db_crash, &j).context("journal_write(pre)")?;
 
-            // Execute partial steps, ensuring the journal cursor corresponds to durable state:
-            // after each undo/apply + set_tip, flush trees, then update cursor+journal.
-            // This matches the durability model in your reorg.rs.
+            // IMPORTANT: Make the journal durable, matching reorg.rs jw() semantics.
+            journal_write(&db_crash, &j).context("journal_write(pre)")?;
+            flush_all_state_trees(&db_crash).context("flush after journal_write(pre)")?;
+
+            // Execute partial steps, ensuring the journal cursor corresponds to durable state.
             if phase == Phase::Undo {
                 // perform `cursor` undo steps
                 for i in 0..(cursor as usize) {
                     let bh = undo_path[i];
                     let hi = must_hidx(&db_crash, &bh)?;
-                    undo_block(&db_crash, &bh).with_context(|| format!("undo_block {}", hex::encode(bh)))?;
+                    undo_block(&db_crash, &bh)
+                        .with_context(|| format!("undo_block {}", hex::encode(bh)))?;
                     set_tip(&db_crash, &hi.parent)?;
                     flush_all_state_trees(&db_crash).context("flush after undo")?;
 
                     j.phase = Phase::Undo;
                     j.cursor = (i as u64) + 1;
                     journal_write(&db_crash, &j).context("journal_write(progress undo)")?;
+                    flush_all_state_trees(&db_crash)
+                        .context("flush after journal_write(progress undo)")?;
                 }
-                // leave journal in Undo phase at cursor; simulate crash now (drop db handle)
+                // simulate crash now
             } else {
                 // First fully undo to ancestor (because Apply phase assumes we're at ancestor).
                 for (i, bh) in undo_path.iter().enumerate() {
@@ -185,28 +187,36 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
 
                     j.phase = Phase::Undo;
                     j.cursor = (i as u64) + 1;
-                    journal_write(&db_crash, &j)?;
+                    journal_write(&db_crash, &j).context("journal_write(progress undo-to-ancestor)")?;
+                    flush_all_state_trees(&db_crash)
+                        .context("flush after journal_write(progress undo-to-ancestor)")?;
                 }
+
                 set_tip(&db_crash, &anc.hash)?;
-                flush_all_state_trees(&db_crash)?;
+                flush_all_state_trees(&db_crash).context("flush after set_tip(ancestor)")?;
 
                 // Switch journal to Apply at cursor 0, like reorg.rs does.
                 j.phase = Phase::Apply;
                 j.cursor = 0;
                 journal_write(&db_crash, &j).context("journal_write(at_ancestor)")?;
+                flush_all_state_trees(&db_crash)
+                    .context("flush after journal_write(at_ancestor)")?;
 
                 // Apply `cursor` blocks.
                 for i in 0..(cursor as usize) {
                     let bh = apply_path[i];
-                    apply_block_by_hash(&db_crash, &bh).with_context(|| format!("apply {}", hex::encode(bh)))?;
+                    apply_block_by_hash(&db_crash, &bh)
+                        .with_context(|| format!("apply {}", hex::encode(bh)))?;
                     flush_all_state_trees(&db_crash).context("flush after apply")?;
 
                     j.phase = Phase::Apply;
                     j.cursor = (i as u64) + 1;
                     journal_write(&db_crash, &j).context("journal_write(progress apply)")?;
+                    flush_all_state_trees(&db_crash)
+                        .context("flush after journal_write(progress apply)")?;
                 }
 
-                // leave journal in Apply phase at cursor; simulate crash now
+                // simulate crash now
             }
 
             // Don’t clear journal — we want recovery to see it.
@@ -218,11 +228,11 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
         recover_if_needed(&db_reopen, None).context("recover_if_needed")?;
         let fp_recovered = fingerprint(&db_reopen).context("fp_recovered")?;
 
-        // Compare recovered with clean reference by replaying clean canonical into a fresh DB,
-        // to make sure state is *exactly* reproducible.
+        // Compare recovered with clean reference by replaying clean canonical into a fresh DB.
         let tmp_replay = TempDir::new().context("tmp_replay")?;
         let db_replay = open_db(&tmp_replay).context("open db_replay")?;
-        replay_canonical_from_tip(&db_replay, &db_clean, final_tip_clean).context("replay canonical")?;
+        replay_canonical_from_tip(&db_replay, &db_clean, final_tip_clean)
+            .context("replay canonical")?;
         let fp_replayed = fingerprint(&db_replay).context("fp_replayed")?;
 
         if fp_recovered.tip != fp_replayed.tip
