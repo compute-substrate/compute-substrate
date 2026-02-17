@@ -75,14 +75,12 @@ fn apply_block_by_hash(db: &Stores, bh: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
-/// IMPORTANT: The journal is double-buffered and seq-driven.
-/// This helper mirrors `reorg.rs::jw()` semantics:
-/// - write journal with current seq
-/// - then bump in-memory seq
-/// - then flush the *whole DB* as a durability barrier
+/// Mirror production semantics:
+/// - journal_write writes to inactive slot and flips active (meta.flush inside)
+/// - then production fences with db.db.flush() (all trees)
+/// - production increments in-memory seq after write
 fn jw_sim(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
     journal_write(db, j).context(ctx)?;
-    // production does saturating_add; match it
     j.seq = j.seq.saturating_add(1);
     flush_all_state_trees(db).context("jw_sim flush_all_state_trees")?;
     Ok(())
@@ -91,7 +89,6 @@ fn jw_sim(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
 #[test]
 fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(9001);
-
     let cases = 20usize;
 
     for case in 0..cases {
@@ -127,17 +124,21 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
             let a2 = build_base_chain(&db_crash, base_len, start_time).context("build base(crash)")?;
             let tip_a2 = *a2.last().unwrap();
 
-            let b2_tail = build_fork_index_only(&db_crash, &a2, fork_height, fork_len, start_time)
-                .context("build fork(crash)")?;
+            let b2_tail =
+                build_fork_index_only(&db_crash, &a2, fork_height, fork_len, start_time)
+                    .context("build fork(crash)")?;
             let tip_b2 = *b2_tail.last().unwrap();
 
             set_tip(&db_crash, &tip_a2).context("set tip_a(crash)")?;
             assert_tip_eq(&db_crash, tip_a2)?;
 
+            // ✅ MATCH PRODUCTION: pre-journal global durability fence.
+            // This ensures the journal will never reference blocks/headers that evaporate on reopen.
+            flush_all_state_trees(&db_crash).context("pre-journal durability fence")?;
+
             let (anc, undo_path, apply_path) =
                 build_paths(&db_crash, tip_a2, tip_b2).context("build_paths")?;
 
-            // Choose crash point
             let crash_during_apply = rng.gen_bool(0.5);
             let crash_undo_steps = rng.gen_range(0..=undo_path.len());
             let crash_apply_steps = rng.gen_range(0..=apply_path.len());
@@ -153,7 +154,6 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                 phase
             );
 
-            // Start journal exactly like maybe_reorg_to does, but using jw_sim semantics.
             let mut j = ReorgJournal {
                 seq: 0,
                 old_tip: tip_a2,
@@ -165,11 +165,10 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                 apply_path: apply_path.clone(),
             };
 
-            // "journal_write(start)" durability + seq bump + flush
+            // journal_write(start) + fence
             jw_sim(&db_crash, &mut j, "jw_sim(start)")?;
 
             if phase == Phase::Undo {
-                // perform `cursor` undo steps
                 for i in 0..(cursor as usize) {
                     let bh = undo_path[i];
                     let hi = must_hidx(&db_crash, &bh)?;
@@ -182,9 +181,8 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                     j.cursor = (i as u64) + 1;
                     jw_sim(&db_crash, &mut j, "jw_sim(progress_undo)")?;
                 }
-                // crash now
             } else {
-                // Undo fully to ancestor (same as production pre-apply)
+                // undo fully to ancestor
                 for (i, bh) in undo_path.iter().enumerate() {
                     let hi = must_hidx(&db_crash, bh)?;
                     undo_block(&db_crash, bh)?;
@@ -199,33 +197,26 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                 set_tip(&db_crash, &anc.hash)?;
                 flush_all_state_trees(&db_crash).context("flush after set_tip(ancestor)")?;
 
-                // Production does BOTH:
-                // - jw(at_ancestor)   [phase=Apply,cursor=0]
-                // - jw(start_apply)   [phase=Apply,cursor=0]
-                // Mirror that exactly so recovery sees a consistent journal history.
+                // Mirror production’s two Apply writes at ancestor:
                 j.phase = Phase::Apply;
                 j.cursor = 0;
                 jw_sim(&db_crash, &mut j, "jw_sim(at_ancestor)")?;
                 jw_sim(&db_crash, &mut j, "jw_sim(start_apply)")?;
 
-                // Apply `cursor` blocks
                 for i in 0..(cursor as usize) {
                     let bh = apply_path[i];
-
-                    // enforce parent-tip invariant like recover() does
                     let hi = must_hidx(&db_crash, &bh)?;
                     assert_tip_eq(&db_crash, hi.parent)
                         .with_context(|| format!("pre-apply tip should be parent of {}", hex::encode(bh)))?;
 
-                    apply_block_by_hash(&db_crash, &bh).with_context(|| format!("apply {}", hex::encode(bh)))?;
+                    apply_block_by_hash(&db_crash, &bh)
+                        .with_context(|| format!("apply {}", hex::encode(bh)))?;
                     flush_all_state_trees(&db_crash).context("flush after apply")?;
 
                     j.phase = Phase::Apply;
                     j.cursor = (i as u64) + 1;
                     jw_sim(&db_crash, &mut j, "jw_sim(progress_apply)")?;
                 }
-
-                // crash now
             }
 
             drop(db_crash);
@@ -255,7 +246,6 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
             anyhow::bail!("crash-recovery fingerprint mismatch in case {case}");
         }
 
-        // Cleanup
         let _ = journal_clear(&db_reopen);
         drop(db_reopen);
         drop(db_clean);
