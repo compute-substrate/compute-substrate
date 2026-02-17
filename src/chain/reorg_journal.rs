@@ -9,18 +9,6 @@ use crate::types::Hash32;
 // ----------------------
 // Keys (double-buffered journal)
 // ----------------------
-//
-// Why:
-// - We intentionally crash inside journal_write() BEFORE meta.flush() via failpoints.
-// - A single-key journal can become "missing" or "torn" across crash boundaries.
-// - Double-buffering ensures at least one durable copy survives.
-//
-// Layout:
-// - SLOT A: b"reorg:in_progress:a"
-// - SLOT B: b"reorg:in_progress:b"
-// - ACTIVE: b"reorg:in_progress:active" -> 0 or 1
-//
-// We also keep a monotonic seq so we can pick the newest valid record if needed.
 fn k_reorg_slot_a() -> &'static [u8] {
     b"reorg:in_progress:a"
 }
@@ -62,8 +50,8 @@ fn other_slot(which: u8) -> u8 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Phase {
-    Undo,  // undoing old branch toward ancestor
-    Apply, // applying new branch from ancestor toward new_tip
+    Undo,
+    Apply,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,15 +65,10 @@ pub struct ReorgJournal {
     pub new_tip: Hash32,
     pub ancestor: Hash32,
     pub phase: Phase,
-
-    // How far we progressed:
-    // - Undo phase: number of blocks undone from old branch
-    // - Apply phase: number of blocks applied on new branch
     pub cursor: u64,
 
-    // Full paths (hashes only; bytes live in db.blocks)
-    pub undo_path: Vec<Hash32>,  // old_tip -> ancestor (exclusive)
-    pub apply_path: Vec<Hash32>, // ancestor -> new_tip (exclusive)
+    pub undo_path: Vec<Hash32>,
+    pub apply_path: Vec<Hash32>,
 }
 
 // ----------------------
@@ -131,33 +114,20 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
     Ok(Some(picked))
 }
 
-/// Persist the crash-recovery journal.
-/// MAINNET HARDENING:
-/// - Flush only the meta tree so kill -9 can't leave a stale journal in RAM only.
-///
-/// TEST HARDENING:
-/// - failpoints around journal boundaries.
-///
-/// CRASH HARDENING:
-/// - Double-buffered write: write new record to inactive slot + flush,
-///   then flip active pointer + flush.
-/// - Guarantees at least one valid copy survives even if we crash mid-write.
 pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     failpoints::hit("journal_write:pre");
 
-    // Determine where to write: inactive slot
     let active = read_active(db).context("read_active")?;
     let target = other_slot(active);
     let target_key = slot_key(target);
 
-    // ✅ FIX: monotonic seq must be derived from DB state, not caller-provided j.seq.
-    // Otherwise (e.g., crash tests) can repeatedly write seq=1 and make recovery pick
-    // the wrong slot after a crash boundary.
+    // ✅ Monotonic seq derived from DB state (max(seqA, seqB) + 1)
     let decode = |bytes: &[u8]| -> Result<ReorgJournal> {
         crate::codec::consensus_bincode()
             .deserialize::<ReorgJournal>(bytes)
             .context("decode reorg journal")
     };
+
     let a_seq = match meta_get_bytes(db, k_reorg_slot_a())? {
         Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
         None => 0,
@@ -178,13 +148,11 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     // 1) Write new bytes to inactive slot
     meta_put_bytes(db, target_key, &bytes)?;
 
-    // Failpoint: we may crash before flushing the slot write
     failpoints::hit("journal_write:pre_flush");
 
     // Make the slot write durable
     db.meta.flush().context("flush meta after journal_write(slot)")?;
 
-    // Failpoint: crash after slot write is durable but before pointer flip
     failpoints::hit("journal_write:post_flush");
 
     // 2) Flip active pointer (durable)
@@ -193,13 +161,6 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     Ok(())
 }
 
-/// Clear the journal after successful completion (or clean rollback).
-///
-/// Clears:
-/// - active pointer
-/// - both slots
-///
-/// Uses meta.flush() so deletion is durable.
 pub fn journal_clear(db: &Stores) -> Result<()> {
     failpoints::hit("journal_clear:pre");
 
