@@ -114,6 +114,7 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
         None => None,
     };
 
+    // Prefer newest seq; tie-break prefers active slot (a).
     let picked = match (a, b) {
         (None, None) => return Ok(None),
         (Some(x), None) => x,
@@ -149,9 +150,26 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     let target = other_slot(active);
     let target_key = slot_key(target);
 
-    // Bump seq for monotonicity
+    // ✅ FIX: monotonic seq must be derived from DB state, not caller-provided j.seq.
+    // Otherwise (e.g., crash tests) can repeatedly write seq=1 and make recovery pick
+    // the wrong slot after a crash boundary.
+    let decode = |bytes: &[u8]| -> Result<ReorgJournal> {
+        crate::codec::consensus_bincode()
+            .deserialize::<ReorgJournal>(bytes)
+            .context("decode reorg journal")
+    };
+    let a_seq = match meta_get_bytes(db, k_reorg_slot_a())? {
+        Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
+        None => 0,
+    };
+    let b_seq = match meta_get_bytes(db, k_reorg_slot_b())? {
+        Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
+        None => 0,
+    };
+    let next_seq = a_seq.max(b_seq).saturating_add(1);
+
     let mut jj = j.clone();
-    jj.seq = jj.seq.saturating_add(1);
+    jj.seq = next_seq;
 
     let bytes = crate::codec::consensus_bincode()
         .serialize(&jj)
