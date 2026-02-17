@@ -59,7 +59,9 @@ fn persist_block(db: &Stores, blk: &Block) -> Result<Hash32> {
     let bytes = codec::consensus_bincode()
         .serialize(blk)
         .context("serialize Block")?;
-    db.blocks.insert(k_block(&bh), bytes).context("db.blocks.insert")?;
+    db.blocks
+        .insert(k_block(&bh), bytes)
+        .context("db.blocks.insert")?;
     Ok(bh)
 }
 
@@ -194,7 +196,9 @@ pub fn replay_canonical_from_tip(dst: &Stores, src: &Stores, tip: Hash32) -> Res
     Ok(())
 }
 
-/// Flush all trees that reorg touches (matches your reorg durability barrier intent).
+/// Flush all trees that reorg touches.
+/// IMPORTANT: This must be a *single* DB-level durability fence (not per-tree flush),
+/// to match `reorg.rs` using `db.db.flush()` and to avoid cross-tree persistence skew in crash fuzz.
 pub fn flush_all_state_trees(db: &Stores) -> anyhow::Result<()> {
     db.db.flush().context("db.flush (all trees)")?;
     Ok(())
