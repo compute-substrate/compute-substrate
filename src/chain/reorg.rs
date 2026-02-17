@@ -440,6 +440,14 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         undo_path.len(), apply_path.len(),
     );
 
+    // Ensure crash-recovery inputs are durable BEFORE we publish the journal.
+// Otherwise journal can point at blocks/hdr indexes that disappear after kill -9.
+db.blocks.flush().context("pre-journal flush blocks")?;
+db.hdr.flush().context("pre-journal flush hdr")?;
+db.hdr_raw.flush().context("pre-journal flush hdr_raw")?;
+db.meta.flush().context("pre-journal flush meta")?;
+
+
     // ---------------- Crash-atomic journal start ----------------
     let mut j = ReorgJournal {
         seq: 0,
