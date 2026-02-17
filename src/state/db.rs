@@ -28,7 +28,7 @@ pub struct Stores {
     pub hdr_raw: Tree, // key: k_hdr_raw(hash) => bytes
 
     // meta keys (tip, bad-block markers, reorg journal, etc.)
-    pub meta: Tree, // keys: k_meta_tip(), k_bad(hash), k_reorg_in_progress(), ...
+    pub meta: Tree, // keys: k_meta_tip(), k_bad(hash), ...
 
     // utxo set
     pub utxo: Tree, // key: k_utxo(outpoint) => consensus_bincode(TxOut)
@@ -42,7 +42,7 @@ pub struct Stores {
     // app state
     pub app: Tree, // keyspace described in app_state.rs
 
-    // NEW: explorer index (height->hash, txid->locator, block->txids)
+    // explorer index (height->hash, txid->locator, block->txids)
     // Not consensus-adjacent; safe to evolve, but keep stable once public.
     pub idx: Tree,
 }
@@ -65,11 +65,14 @@ impl Stores {
     }
 
     /// Explicit flush boundary. Avoid calling flush on every tip write.
-    // in impl Stores
-pub fn flush_all(&self) -> Result<()> {
-    self.db.flush()?; // single durability barrier for all trees
-    Ok(())
-}
+    ///
+    /// IMPORTANT:
+    /// - Tree::flush() is not a cross-tree durability fence.
+    /// - Db::flush() is the single durability barrier for all trees.
+    pub fn flush_all(&self) -> Result<()> {
+        self.db.flush()?;
+        Ok(())
+    }
 
     pub fn flush_meta(&self) -> Result<()> {
         self.meta.flush()?;
@@ -145,6 +148,7 @@ pub fn k_bad(hash: &Hash32) -> Vec<u8> {
     k
 }
 
+// Legacy key (kept for compatibility / not used by your new double-buffer journal)
 pub fn k_reorg_in_progress() -> &'static [u8] {
     b"reorg:in_progress"
 }
@@ -168,7 +172,7 @@ pub fn meta_del(db: &Stores, key: &[u8]) -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// Tip helpers
+// Tip helpers (CONSENSUS-ADJACENT)
 // -----------------------------------------------------------------------------
 
 pub fn get_tip(db: &Stores) -> Result<Option<Hash32>> {
@@ -184,32 +188,39 @@ pub fn get_tip(db: &Stores) -> Result<Option<Hash32>> {
     }
 }
 
-/// Write tip WITHOUT flushing.
-///
-/// Now also maintains explorer index in db.idx:
-/// - height -> block hash
-/// - txid -> (block_hash,height,index)
-///
-/// Mainnet note:
-/// - still no flushing here; call flush_meta/flush_all at explicit boundaries.
+/// CONSENSUS-ONLY tip write.
+/// No explorer indexing, no extra tree mutations.
 pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
     let old = get_tip(db)?.unwrap_or([0u8; 32]);
 
-    // Debug visibility
     println!(
         "[tip] set_tip: old=0x{} -> new=0x{}",
         hex::encode(old),
         hex::encode(tip)
     );
 
+    db.meta.insert(k_meta_tip(), tip)?;
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Explorer indexing helpers (NOT CONSENSUS)
+// -----------------------------------------------------------------------------
+//
+// Keep your existing behavior, but call it ONLY from non-consensus paths
+// (explorer sync, background maintenance, RPC handlers), not from reorg/apply/undo.
+//
+// If you call this during crash-fuzz, you re-introduce the same nondeterminism.
+
+pub fn update_explorer_index_for_tip_transition(db: &Stores, old: &Hash32, new: &Hash32) {
     // Determine old/new heights (best-effort)
-    let old_hi = crate::chain::index::get_hidx(db, &old).ok().flatten();
-    let new_hi = crate::chain::index::get_hidx(db, tip).ok().flatten();
+    let old_hi = crate::chain::index::get_hidx(db, old).ok().flatten();
+    let new_hi = crate::chain::index::get_hidx(db, new).ok().flatten();
 
     // If moving backwards: unindex blocks from old down to new height+1.
     if let (Some(ohi), Some(nhi)) = (old_hi.clone(), new_hi.clone()) {
         if nhi.height < ohi.height {
-            let mut cur_hash = old;
+            let mut cur_hash = *old;
             let mut cur_hi = ohi;
 
             while cur_hi.height > nhi.height {
@@ -232,15 +243,10 @@ pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
         }
     }
 
-    // Write new tip
-    db.meta.insert(k_meta_tip(), tip)?;
-
     // If we know new height, index the canonical tip block.
     if let Some(nhi) = new_hi {
-        let _ = crate::state::tx_index::index_canonical_block(db, tip, nhi.height);
+        let _ = crate::state::tx_index::index_canonical_block(db, new, nhi.height);
     }
-
-    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -248,10 +254,7 @@ pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
 // -----------------------------------------------------------------------------
 
 pub fn put_utxo(db: &Stores, op: &OutPoint, out: &TxOut) -> Result<()> {
-    db.utxo.insert(
-        k_utxo(op),
-        crate::codec::consensus_bincode().serialize(out)?,
-    )?;
+    db.utxo.insert(k_utxo(op), crate::codec::consensus_bincode().serialize(out)?)?;
     Ok(())
 }
 
@@ -262,19 +265,14 @@ pub fn del_utxo(db: &Stores, op: &OutPoint) -> Result<()> {
 
 pub fn get_utxo(db: &Stores, op: &OutPoint) -> Result<Option<TxOut>> {
     if let Some(v) = db.utxo.get(k_utxo(op))? {
-        Ok(Some(
-            crate::codec::consensus_bincode().deserialize::<TxOut>(&v)?,
-        ))
+        Ok(Some(crate::codec::consensus_bincode().deserialize::<TxOut>(&v)?))
     } else {
         Ok(None)
     }
 }
 
 pub fn put_utxo_meta(db: &Stores, op: &OutPoint, meta: &UtxoMeta) -> Result<()> {
-    db.utxo_meta.insert(
-        k_utxo_meta(op),
-        crate::codec::consensus_bincode().serialize(meta)?,
-    )?;
+    db.utxo_meta.insert(k_utxo_meta(op), crate::codec::consensus_bincode().serialize(meta)?)?;
     Ok(())
 }
 
@@ -285,9 +283,7 @@ pub fn del_utxo_meta(db: &Stores, op: &OutPoint) -> Result<()> {
 
 pub fn get_utxo_meta(db: &Stores, op: &OutPoint) -> Result<Option<UtxoMeta>> {
     if let Some(v) = db.utxo_meta.get(k_utxo_meta(op))? {
-        Ok(Some(
-            crate::codec::consensus_bincode().deserialize::<UtxoMeta>(&v)?,
-        ))
+        Ok(Some(crate::codec::consensus_bincode().deserialize::<UtxoMeta>(&v)?))
     } else {
         Ok(None)
     }
