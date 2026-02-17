@@ -75,11 +75,23 @@ fn apply_block_by_hash(db: &Stores, bh: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
+/// IMPORTANT: The journal is double-buffered and seq-driven.
+/// This helper mirrors `reorg.rs::jw()` semantics:
+/// - write journal with current seq
+/// - then bump in-memory seq
+/// - then flush the *whole DB* as a durability barrier
+fn jw_sim(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
+    journal_write(db, j).context(ctx)?;
+    // production does saturating_add; match it
+    j.seq = j.seq.saturating_add(1);
+    flush_all_state_trees(db).context("jw_sim flush_all_state_trees")?;
+    Ok(())
+}
+
 #[test]
 fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(9001);
 
-    // Keep small but meaningful; run more locally when you want.
     let cases = 20usize;
 
     for case in 0..cases {
@@ -99,7 +111,6 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
             .context("build fork(clean)")?;
         let tip_b = *b_tail.last().unwrap();
 
-        // Ensure we are on base tip before reorg.
         set_tip(&db_clean, &tip_a).context("set tip_a(clean)")?;
         assert_tip_eq(&db_clean, tip_a)?;
 
@@ -123,11 +134,10 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
             set_tip(&db_crash, &tip_a2).context("set tip_a(crash)")?;
             assert_tip_eq(&db_crash, tip_a2)?;
 
-            // Compute paths on crash DB.
             let (anc, undo_path, apply_path) =
                 build_paths(&db_crash, tip_a2, tip_b2).context("build_paths")?;
 
-            // Choose crash point.
+            // Choose crash point
             let crash_during_apply = rng.gen_bool(0.5);
             let crash_undo_steps = rng.gen_range(0..=undo_path.len());
             let crash_apply_steps = rng.gen_range(0..=apply_path.len());
@@ -143,7 +153,7 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                 phase
             );
 
-            // Start journal (like maybe_reorg_to would).
+            // Start journal exactly like maybe_reorg_to does, but using jw_sim semantics.
             let mut j = ReorgJournal {
                 seq: 0,
                 old_tip: tip_a2,
@@ -155,11 +165,9 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
                 apply_path: apply_path.clone(),
             };
 
-            // IMPORTANT: Make the journal durable, matching reorg.rs jw() semantics.
-            journal_write(&db_crash, &j).context("journal_write(pre)")?;
-            flush_all_state_trees(&db_crash).context("flush after journal_write(pre)")?;
+            // "journal_write(start)" durability + seq bump + flush
+            jw_sim(&db_crash, &mut j, "jw_sim(start)")?;
 
-            // Execute partial steps, ensuring the journal cursor corresponds to durable state.
             if phase == Phase::Undo {
                 // perform `cursor` undo steps
                 for i in 0..(cursor as usize) {
@@ -172,13 +180,11 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
 
                     j.phase = Phase::Undo;
                     j.cursor = (i as u64) + 1;
-                    journal_write(&db_crash, &j).context("journal_write(progress undo)")?;
-                    flush_all_state_trees(&db_crash)
-                        .context("flush after journal_write(progress undo)")?;
+                    jw_sim(&db_crash, &mut j, "jw_sim(progress_undo)")?;
                 }
-                // simulate crash now
+                // crash now
             } else {
-                // First fully undo to ancestor (because Apply phase assumes we're at ancestor).
+                // Undo fully to ancestor (same as production pre-apply)
                 for (i, bh) in undo_path.iter().enumerate() {
                     let hi = must_hidx(&db_crash, bh)?;
                     undo_block(&db_crash, bh)?;
@@ -187,39 +193,41 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
 
                     j.phase = Phase::Undo;
                     j.cursor = (i as u64) + 1;
-                    journal_write(&db_crash, &j).context("journal_write(progress undo-to-ancestor)")?;
-                    flush_all_state_trees(&db_crash)
-                        .context("flush after journal_write(progress undo-to-ancestor)")?;
+                    jw_sim(&db_crash, &mut j, "jw_sim(progress_undo_to_ancestor)")?;
                 }
 
                 set_tip(&db_crash, &anc.hash)?;
                 flush_all_state_trees(&db_crash).context("flush after set_tip(ancestor)")?;
 
-                // Switch journal to Apply at cursor 0, like reorg.rs does.
+                // Production does BOTH:
+                // - jw(at_ancestor)   [phase=Apply,cursor=0]
+                // - jw(start_apply)   [phase=Apply,cursor=0]
+                // Mirror that exactly so recovery sees a consistent journal history.
                 j.phase = Phase::Apply;
                 j.cursor = 0;
-                journal_write(&db_crash, &j).context("journal_write(at_ancestor)")?;
-                flush_all_state_trees(&db_crash)
-                    .context("flush after journal_write(at_ancestor)")?;
+                jw_sim(&db_crash, &mut j, "jw_sim(at_ancestor)")?;
+                jw_sim(&db_crash, &mut j, "jw_sim(start_apply)")?;
 
-                // Apply `cursor` blocks.
+                // Apply `cursor` blocks
                 for i in 0..(cursor as usize) {
                     let bh = apply_path[i];
-                    apply_block_by_hash(&db_crash, &bh)
-                        .with_context(|| format!("apply {}", hex::encode(bh)))?;
+
+                    // enforce parent-tip invariant like recover() does
+                    let hi = must_hidx(&db_crash, &bh)?;
+                    assert_tip_eq(&db_crash, hi.parent)
+                        .with_context(|| format!("pre-apply tip should be parent of {}", hex::encode(bh)))?;
+
+                    apply_block_by_hash(&db_crash, &bh).with_context(|| format!("apply {}", hex::encode(bh)))?;
                     flush_all_state_trees(&db_crash).context("flush after apply")?;
 
                     j.phase = Phase::Apply;
                     j.cursor = (i as u64) + 1;
-                    journal_write(&db_crash, &j).context("journal_write(progress apply)")?;
-                    flush_all_state_trees(&db_crash)
-                        .context("flush after journal_write(progress apply)")?;
+                    jw_sim(&db_crash, &mut j, "jw_sim(progress_apply)")?;
                 }
 
-                // simulate crash now
+                // crash now
             }
 
-            // Don’t clear journal — we want recovery to see it.
             drop(db_crash);
         }
 
@@ -228,7 +236,7 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
         recover_if_needed(&db_reopen, None).context("recover_if_needed")?;
         let fp_recovered = fingerprint(&db_reopen).context("fp_recovered")?;
 
-        // Compare recovered with clean reference by replaying clean canonical into a fresh DB.
+        // Replay clean canonical into a fresh DB
         let tmp_replay = TempDir::new().context("tmp_replay")?;
         let db_replay = open_db(&tmp_replay).context("open db_replay")?;
         replay_canonical_from_tip(&db_replay, &db_clean, final_tip_clean)
