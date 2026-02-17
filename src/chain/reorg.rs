@@ -7,7 +7,7 @@ use crate::chain::reorg_journal::{journal_clear, journal_read, journal_write, Ph
 use crate::crypto::txid;
 use crate::net::mempool::Mempool;
 use crate::state::app_state::epoch_of;
-use crate::state::db::{get_tip, k_bad, k_block, set_tip, Stores};
+use crate::state::db::{get_tip, k_bad, k_block, k_undo, set_tip, Stores};
 use crate::state::utxo::{undo_block, validate_and_apply_block};
 use crate::types::{Block, Hash32};
 
@@ -34,6 +34,11 @@ fn is_missing_block_bytes_err(e: &anyhow::Error) -> bool {
     s.contains("missing block bytes for 0x")
 }
 
+fn is_missing_undo_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains("missing undo")
+}
+
 fn must_hidx(db: &Stores, hash: &Hash32) -> Result<HeaderIndex> {
     get_hidx(db, hash)?.ok_or_else(|| anyhow::anyhow!("missing header index for {}", hex32(hash)))
 }
@@ -57,9 +62,6 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
 // ----------------------
 //
 // IMPORTANT: Tree::flush() is NOT a cross-tree atomic durability fence in sled.
-// In crash fuzz, you can persist meta/tip/journal but not the corresponding utxo/undo/app
-// (or vice versa), causing recovery fingerprints to diverge.
-//
 // Use Db::flush() as the single "all trees" durability barrier.
 fn flush_state_step(db: &Stores) -> Result<()> {
     db.db.flush().context("db.flush (all trees)")?;
@@ -78,43 +80,13 @@ fn current_tip(db: &Stores) -> Result<Option<Hash32>> {
     get_tip(db).context("get_tip")
 }
 
-// Drive durable tip DOWN to a target by undoing the current tip until tip==target.
-// Used only in recovery to force a deterministic base.
-fn drive_tip_down_to(db: &Stores, target: &Hash32) -> Result<()> {
-    loop {
-        let tip = match current_tip(db).context("drive_tip_down_to get_tip")? {
-            Some(t) => t,
-            None => {
-                set_tip(db, target).context("drive_tip_down_to set_tip(from None)")?;
-                flush_state_step(db).context("drive_tip_down_to flush(set_tip from None)")?;
-                return Ok(());
-            }
-        };
-
-        if tip == *target {
-            return Ok(());
-        }
-
-        let hi = must_hidx(db, &tip)
-            .with_context(|| format!("drive_tip_down_to must_hidx(cur_tip {})", hex32(&tip)))?;
-
-        undo_block(db, &tip)
-            .with_context(|| format!("drive_tip_down_to undo_block {}", hex32(&tip)))?;
-        set_tip(db, &hi.parent)
-            .with_context(|| format!("drive_tip_down_to set_tip(parent of {})", hex32(&tip)))?;
-        flush_state_step(db).context("drive_tip_down_to flush(undo)")?;
-    }
-}
-
 // ----------------------
 // Journal helper (seq monotonicity for double-buffer journal)
 // ----------------------
-//
-// journal_write() doesn't mutate caller's seq, so we bump in-memory.
-// ALSO: journal is part of crash protocol, so fence it immediately.
 fn jw(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
     journal_write(db, j).context(ctx)?;
     j.seq = j.seq.saturating_add(1);
+    // Fence journal writes too (journal is part of crash protocol).
     flush_state_step(db).context("jw flush_state_step")?;
     Ok(())
 }
@@ -170,11 +142,7 @@ fn mempool_prune_if_present(db: &Stores, mempool: Option<&Mempool>) {
     }
 }
 
-fn ensure_apply_blocks_present(
-    db: &Stores,
-    apply_hashes: &[Hash32],
-    new_tip: &Hash32,
-) -> Result<bool> {
+fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &Hash32) -> Result<bool> {
     for bh in apply_hashes {
         if db.blocks.get(k_block(bh))?.is_none() {
             println!(
@@ -186,6 +154,121 @@ fn ensure_apply_blocks_present(
         }
     }
     Ok(true)
+}
+
+// ----------------------
+// Undo idempotence wrapper
+// ----------------------
+//
+// Your undo_block() currently removes the undo log key.
+// That creates a fatal crash window:
+// - undo applied
+// - undo entry removed
+// - tip/journal not advanced yet
+// After restart, recovery cannot undo again => divergence.
+//
+// Fix here without touching utxo.rs:
+// - snapshot undo bytes BEFORE undo_block()
+// - call undo_block() (it removes key)
+// - reinsert the same undo bytes so undo is retryable until we "commit"
+fn undo_block_idempotent(db: &Stores, block_hash: &Hash32) -> Result<()> {
+    let Some(undo_bytes) = db.undo.get(k_undo(block_hash))? else {
+        bail!("missing undo");
+    };
+
+    undo_block(db, block_hash).with_context(|| format!("undo_block {}", hex32(block_hash)))?;
+
+    // Reinsert so a crash before commit can retry the undo deterministically.
+    db.undo
+        .insert(k_undo(block_hash), undo_bytes)
+        .with_context(|| format!("reinsert undo {}", hex32(block_hash)))?;
+
+    Ok(())
+}
+
+// Drive durable tip DOWN to a target by undoing the current tip until tip==target.
+// Used in recovery to force a deterministic base.
+// Uses undo_block_idempotent() so it's safe across crash boundaries.
+fn drive_tip_down_to(db: &Stores, target: &Hash32) -> Result<()> {
+    loop {
+        let tip = match current_tip(db).context("drive_tip_down_to get_tip")? {
+            Some(t) => t,
+            None => {
+                set_tip(db, target).context("drive_tip_down_to set_tip(from None)")?;
+                flush_state_step(db).context("drive_tip_down_to flush(set_tip from None)")?;
+                return Ok(());
+            }
+        };
+
+        if tip == *target {
+            return Ok(());
+        }
+
+        let hi = must_hidx(db, &tip)
+            .with_context(|| format!("drive_tip_down_to must_hidx(cur_tip {})", hex32(&tip)))?;
+
+        undo_block_idempotent(db, &tip)
+            .with_context(|| format!("drive_tip_down_to undo_block_idempotent {}", hex32(&tip)))?;
+
+        set_tip(db, &hi.parent)
+            .with_context(|| format!("drive_tip_down_to set_tip(parent of {})", hex32(&tip)))?;
+
+        flush_state_step(db).context("drive_tip_down_to flush(undo)")?;
+    }
+}
+
+// ----------------------
+// Recovery fallback: full rebuild to a tip
+// ----------------------
+//
+// If we cannot safely undo (missing undo) or apply (state is inconsistent),
+// we rebuild UTXO+APP from scratch by replaying block bytes in canonical order.
+//
+// This is slower but makes crash fuzz deterministic even with non-persistent undo logs.
+fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempool>) -> Result<()> {
+    println!(
+        "[reorg] recovery fallback: rebuilding state to tip {}",
+        hex32(target_tip)
+    );
+
+    // Build canonical chain from genesis -> target_tip using header index parent pointers.
+    let mut chain: Vec<Hash32> = Vec::new();
+    let mut cur = must_hidx(db, target_tip).context("rebuild must_hidx(target_tip)")?;
+    loop {
+        chain.push(cur.hash);
+        if cur.height == 0 {
+            break;
+        }
+        cur = must_hidx(db, &cur.parent)
+            .with_context(|| format!("rebuild must_hidx(parent of {})", hex32(&cur.hash)))?;
+    }
+    chain.reverse();
+
+    // Clear consensus state trees that are derived from blocks.
+    // (We intentionally do NOT clear blocks/hdr/hdr_raw/meta(bad) etc.)
+    db.utxo.clear().context("rebuild utxo.clear")?;
+    db.utxo_meta.clear().context("rebuild utxo_meta.clear")?;
+    db.undo.clear().context("rebuild undo.clear")?;
+    db.app.clear().context("rebuild app.clear")?;
+    flush_state_step(db).context("rebuild flush after clears")?;
+
+    // Replay forward.
+    for (i, bh) in chain.iter().enumerate() {
+        let blk = load_block(db, bh).with_context(|| format!("rebuild load_block {}", hex32(bh)))?;
+        let hi = must_hidx(db, bh).with_context(|| format!("rebuild must_hidx {}", hex32(bh)))?;
+
+        validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height)
+            .with_context(|| format!("rebuild validate_and_apply_block {}", hex32(bh)))?;
+
+        mempool_remove_mined(mempool, &blk);
+
+        set_tip(db, bh).with_context(|| format!("rebuild set_tip {}", hex32(bh)))?;
+
+        // Fence each step so rebuild is itself crash-safe.
+        flush_state_step(db).with_context(|| format!("rebuild flush step {}", i))?;
+    }
+
+    Ok(())
 }
 
 // ----------------------
@@ -207,8 +290,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     );
 
     // ---- STALE JOURNAL GUARD ----
-    // If we already committed (tip==new_tip) but crashed before journal_clear became durable,
-    // do NOT replay; just clear journal.
     if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
         println!(
             "[reorg] recovery: tip already at new_tip {}; clearing stale journal",
@@ -224,10 +305,12 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let apply_path = j.apply_path.clone();
 
     // ---------------------------------------------
-    // Step 1: drive state back to ancestor (Undo)
+    // Step 1: drive state back to ancestor
     // ---------------------------------------------
     j.phase = Phase::Undo;
 
+    // Best-effort replay of recorded undo path (skips if already undone),
+    // then deterministically drive down to ancestor.
     for (i, bh) in undo_path.iter().enumerate() {
         let hi =
             must_hidx(db, bh).with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
@@ -242,7 +325,24 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         failpoints::hit(&format!("recover:undo:{}:pre", i));
 
         if tip_is(db, bh)? {
-            undo_block(db, bh).with_context(|| format!("recover undo_block {}", hex32(bh)))?;
+            let r = undo_block_idempotent(db, bh);
+            if let Err(e) = r {
+                if is_missing_undo_err(&e) {
+                    // Cannot safely continue this path; fall back.
+                    println!(
+                        "[reorg] recovery: missing undo while undoing {}; falling back to rebuild",
+                        hex32(bh)
+                    );
+                    rebuild_state_to_tip(db, &j.new_tip, mempool)
+                        .context("recover rebuild_state_to_tip(missing undo during undo)")?;
+                    journal_clear(db).ok();
+                    flush_state_step(db).ok();
+                    mempool_prune_if_present(db, mempool);
+                    return Ok(());
+                }
+                return Err(e).context("recover undo_block_idempotent")?;
+            }
+
             set_tip(db, &expected_tip_after_undo)
                 .with_context(|| format!("recover set_tip(parent of {})", hex32(bh)))?;
             flush_state_step(db).context("recover flush_state_step(undo)")?;
@@ -257,15 +357,29 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         failpoints::hit(&format!("recover:undo:{}:post_journal", i));
     }
 
-    // Generic safety net: enforce deterministic base by driving DOWN to ancestor.
+    // Deterministic base.
     if !tip_is(db, &j.ancestor)? {
-        drive_tip_down_to(db, &j.ancestor).context("recover drive_tip_down_to(ancestor)")?;
+        let r = drive_tip_down_to(db, &j.ancestor);
+        if let Err(e) = r {
+            if is_missing_undo_err(&e) {
+                println!(
+                    "[reorg] recovery: missing undo while driving down; falling back to rebuild"
+                );
+                rebuild_state_to_tip(db, &j.new_tip, mempool)
+                    .context("recover rebuild_state_to_tip(missing undo drive_down)")?;
+                journal_clear(db).ok();
+                flush_state_step(db).ok();
+                mempool_prune_if_present(db, mempool);
+                return Ok(());
+            }
+            return Err(e).context("recover drive_tip_down_to(ancestor)")?;
+        }
     }
 
     mempool_prune_if_present(db, mempool);
 
     // ---------------------------------------------
-    // Step 2: apply new branch (Apply)
+    // Step 2: apply new branch
     // ---------------------------------------------
     if !ensure_apply_blocks_present(db, &apply_path, &j.new_tip)? {
         println!(
@@ -284,9 +398,23 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     j.cursor = 0;
     jw(db, &mut j, "recover journal_write(start_apply)")?;
 
-    // Key invariant: apply from deterministic base.
+    // Ensure correct base.
     if !tip_is(db, &j.ancestor)? {
-        drive_tip_down_to(db, &j.ancestor).context("recover drive_tip_down_to(ancestor pre-apply)")?;
+        let r = drive_tip_down_to(db, &j.ancestor);
+        if let Err(e) = r {
+            if is_missing_undo_err(&e) {
+                println!(
+                    "[reorg] recovery: missing undo before apply; falling back to rebuild"
+                );
+                rebuild_state_to_tip(db, &j.new_tip, mempool)
+                    .context("recover rebuild_state_to_tip(missing undo pre-apply)")?;
+                journal_clear(db).ok();
+                flush_state_step(db).ok();
+                mempool_prune_if_present(db, mempool);
+                return Ok(());
+            }
+            return Err(e).context("recover drive_tip_down_to(ancestor pre-apply)")?;
+        }
     }
 
     for (i, bh) in apply_path.iter().enumerate() {
@@ -296,18 +424,26 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
             continue;
         }
 
-        // Enforce correct parent before applying `bh`.
+        // Enforce correct parent (drive DOWN only).
         let hi = must_hidx(db, bh).with_context(|| format!("recover must_hidx {}", hex32(bh)))?;
         let parent = hi.parent;
 
         if !tip_is(db, &parent)? {
-            drive_tip_down_to(db, &parent).with_context(|| {
-                format!(
-                    "recover drive_tip_down_to(parent {} of {})",
-                    hex32(&parent),
-                    hex32(bh)
-                )
-            })?;
+            let r = drive_tip_down_to(db, &parent);
+            if let Err(e) = r {
+                if is_missing_undo_err(&e) {
+                    println!(
+                        "[reorg] recovery: missing undo while aligning parent; falling back to rebuild"
+                    );
+                    rebuild_state_to_tip(db, &j.new_tip, mempool)
+                        .context("recover rebuild_state_to_tip(missing undo align parent)")?;
+                    journal_clear(db).ok();
+                    flush_state_step(db).ok();
+                    mempool_prune_if_present(db, mempool);
+                    return Ok(());
+                }
+                return Err(e).context("recover drive_tip_down_to(parent)")?;
+            }
         }
 
         failpoints::hit(&format!("recover:apply:{}:pre", i));
@@ -326,6 +462,13 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
             } else {
                 println!("[reorg] recovery: missing bytes; not marking bad");
             }
+
+            // Apply failure can leave state inconsistent vs replay; safest is rebuild.
+            rebuild_state_to_tip(db, &j.new_tip, mempool)
+                .context("recover rebuild_state_to_tip(apply failed)")?;
+            journal_clear(db).ok();
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
             return Ok(());
         }
 
@@ -469,7 +612,10 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         failpoints::hit(&format!("undo:{}:pre", i));
 
         let hi = must_hidx(db, bh).with_context(|| format!("must_hidx(undo {})", hex32(bh)))?;
-        undo_block(db, bh).with_context(|| format!("[reorg] undo_block {}", hex32(bh)))?;
+
+        // Use idempotent wrapper.
+        undo_block_idempotent(db, bh).with_context(|| format!("[reorg] undo_block {}", hex32(bh)))?;
+
         set_tip(db, &hi.parent)
             .with_context(|| format!("[reorg] set_tip(parent of {})", hex32(bh)))?;
 
@@ -555,12 +701,11 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             let hi = must_hidx(db, bh).with_context(|| {
                 format!("[reorg] rollback must_hidx(applied_new {})", hex32(bh))
             })?;
-            undo_block(db, bh).with_context(|| {
+            undo_block_idempotent(db, bh).with_context(|| {
                 format!("[reorg] rollback undo_block(applied_new {})", hex32(bh))
             })?;
             set_tip(db, &hi.parent)
                 .with_context(|| format!("[reorg] rollback set_tip(parent of {})", hex32(bh)))?;
-
             flush_state_step(db).context("rollback flush_state_step(undo applied_new)")?;
         }
 
