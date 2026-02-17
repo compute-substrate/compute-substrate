@@ -407,6 +407,8 @@ pub fn mine_one(
 
             let _hi = index_header(db, &hdr, parent_hi_opt.as_ref())?;
 
+            db.db.flush()?;
+            
             if let Err(e) = maybe_reorg_to(db, &h, Some(mempool)) {
                 println!("[mine] maybe_reorg_to failed for {}: {}", hex::encode(h), e);
                 continue;
