@@ -85,8 +85,7 @@ fn current_tip(db: &Stores) -> Result<Option<Hash32>> {
 // ----------------------
 fn jw(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
     journal_write(db, j).context(ctx)?;
-    j.seq = j.seq.saturating_add(1);
-    // Fence journal writes too (journal is part of crash protocol).
+    // journal_write() assigns monotonic seq itself; just fence.
     flush_state_step(db).context("jw flush_state_step")?;
     Ok(())
 }
