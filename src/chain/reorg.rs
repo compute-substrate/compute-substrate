@@ -57,9 +57,10 @@ fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<
 // ----------------------
 fn flush_state_step(db: &Stores) -> Result<()> {
     // CRITICAL for crash recovery determinism:
-    // tip/journal may refer to blocks by hash, and recovery checks/loads db.blocks.
-    // If blocks aren't flushed, a crash can leave state durable but block-bytes missing.
+    // tip/journal refer to blocks + headers by hash, recovery loads both.
     db.blocks.flush().context("flush blocks")?;
+    db.hdr.flush().context("flush hdr")?;
+    db.hdr_raw.flush().context("flush hdr_raw")?;
 
     db.utxo.flush().context("flush utxo")?;
     db.utxo_meta.flush().context("flush utxo_meta")?;
@@ -78,13 +79,39 @@ fn tip_is(db: &Stores, h: &Hash32) -> Result<bool> {
     Ok(get_tip(db)?.map(|t| t == *h).unwrap_or(false))
 }
 
+fn current_tip(db: &Stores) -> Result<Option<Hash32>> {
+    get_tip(db).context("get_tip")
+}
+
+// Drive durable tip DOWN to a target by undoing the current tip until tip==target.
+// Used only in recovery to force a deterministic base.
+fn drive_tip_down_to(db: &Stores, target: &Hash32) -> Result<()> {
+    loop {
+        let tip = match current_tip(db).context("drive_tip_down_to get_tip")? {
+            Some(t) => t,
+            None => {
+                set_tip(db, target).context("drive_tip_down_to set_tip(from None)")?;
+                flush_state_step(db).context("drive_tip_down_to flush(set_tip from None)")?;
+                return Ok(());
+            }
+        };
+
+        if tip == *target {
+            return Ok(());
+        }
+
+        let hi = must_hidx(db, &tip)
+            .with_context(|| format!("drive_tip_down_to must_hidx(cur_tip {})", hex32(&tip)))?;
+
+        undo_block(db, &tip).with_context(|| format!("drive_tip_down_to undo_block {}", hex32(&tip)))?;
+        set_tip(db, &hi.parent).with_context(|| format!("drive_tip_down_to set_tip(parent of {})", hex32(&tip)))?;
+        flush_state_step(db).context("drive_tip_down_to flush(undo)")?;
+    }
+}
+
 // ----------------------
 // Journal helper (seq monotonicity for double-buffer journal)
 // ----------------------
-//
-// Your double-buffer journal uses `seq` to choose the newest valid record when both slots decode.
-// But `journal_write(db, &j)` does not mutate `j.seq` in the caller (it works on a clone).
-// So we advance `j.seq` in-memory after every successful write.
 //
 // IMPORTANT: ctx is &'static str to avoid lifetime issues with anyhow::Context.
 fn jw(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
@@ -96,7 +123,6 @@ fn jw(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
 // ----------------------
 // Bad-block persistence
 // ----------------------
-
 fn is_bad(db: &Stores, h: &Hash32) -> Result<bool> {
     Ok(db.meta.get(k_bad(h))?.is_some())
 }
@@ -110,7 +136,6 @@ fn mark_bad(db: &Stores, h: &Hash32, why: &str) -> Result<()> {
 // ----------------------
 // Mempool helpers
 // ----------------------
-
 fn mempool_remove_mined(mempool: Option<&Mempool>, blk: &Block) {
     let Some(mp) = mempool else { return };
 
@@ -163,7 +188,6 @@ fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &H
 // ----------------------
 // Crash recovery
 // ----------------------
-
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
         return Ok(());
@@ -180,8 +204,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     );
 
     // ---- STALE JOURNAL GUARD ----
-    // If we already committed the reorg (tip==new_tip) but crashed before journal_clear flush,
-    // recovery must NOT replay. Just clear the stale journal and return.
     if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
         println!(
             "[reorg] recovery: tip already at new_tip {}; clearing stale journal",
@@ -205,7 +227,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
             must_hidx(db, bh).with_context(|| format!("recover must_hidx(undo {})", hex32(bh)))?;
         let expected_tip_after_undo = hi.parent;
 
-        // If we're already at the post-undo tip, this step is already durable.
         if tip_is(db, &expected_tip_after_undo)? {
             j.cursor = (i as u64) + 1;
             jw(db, &mut j, "recover journal_write(skip_undo)")?;
@@ -214,7 +235,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
         failpoints::hit(&format!("recover:undo:{}:pre", i));
 
-        // Only undo when current durable tip == bh; otherwise, fall back to the generic loop below.
         if tip_is(db, bh)? {
             undo_block(db, bh).with_context(|| format!("recover undo_block {}", hex32(bh)))?;
             set_tip(db, &expected_tip_after_undo)
@@ -231,7 +251,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         failpoints::hit(&format!("recover:undo:{}:post_journal", i));
     }
 
-    // Generic safety net: if we still aren't at ancestor, undo the current tip until we are.
+    // Generic safety net: if we still aren't at ancestor, undo current tip until we are.
     loop {
         let tip = match get_tip(db).context("recover get_tip")? {
             Some(t) => t,
@@ -251,7 +271,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
         let expected_tip_after_undo = hi.parent;
 
-        // If we're already at parent, skip; otherwise undo current tip.
         if tip_is(db, &expected_tip_after_undo)? {
             continue;
         }
@@ -265,7 +284,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         failpoints::hit("recover:undo_step:post");
     }
 
-    // Ensure tip=ancestor (durable)
     if !tip_is(db, &j.ancestor)? {
         set_tip(db, &j.ancestor).context("recover set_tip(ancestor final)")?;
         flush_state_step(db).context("recover flush_state_step(set ancestor final)")?;
@@ -293,18 +311,37 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     j.cursor = 0;
     jw(db, &mut j, "recover journal_write(start_apply)")?;
 
+    // Key invariant: recovery must apply from a deterministic base.
+    // If tip drifted due to a crash boundary, force it back to ancestor first.
+    if !tip_is(db, &j.ancestor)? {
+        drive_tip_down_to(db, &j.ancestor).context("recover drive_tip_down_to(ancestor)")?;
+    }
+
     for (i, bh) in apply_path.iter().enumerate() {
-        // If already at this block, it's durable; just advance cursor + journal.
         if tip_is(db, bh)? {
             j.cursor = (i as u64) + 1;
             jw(db, &mut j, "recover journal_write(skip_apply)")?;
             continue;
         }
 
+        // Enforce correct parent before applying `bh`.
+        let hi = must_hidx(db, bh).with_context(|| format!("recover must_hidx {}", hex32(bh)))?;
+        let parent = hi.parent;
+
+        if !tip_is(db, &parent)? {
+            // Deterministically drive DOWN to the expected parent. (Safe because it's a pure undo loop.)
+            drive_tip_down_to(db, &parent).with_context(|| {
+                format!(
+                    "recover drive_tip_down_to(parent {} of {})",
+                    hex32(&parent),
+                    hex32(bh)
+                )
+            })?;
+        }
+
         failpoints::hit(&format!("recover:apply:{}:pre", i));
 
         let blk = load_block(db, bh).with_context(|| format!("recover load_block {}", hex32(bh)))?;
-        let hi = must_hidx(db, bh).with_context(|| format!("recover must_hidx {}", hex32(bh)))?;
 
         let r = validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height)
             .with_context(|| format!("recover validate_and_apply_block {}", hex32(bh)));
@@ -327,7 +364,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         flush_state_step(db).context("recover flush_state_step(apply)")?;
 
         j.cursor = (i as u64) + 1;
-
         failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
         jw(db, &mut j, "recover journal_write(progress_apply)")?;
         failpoints::hit(&format!("recover:apply:{}:post_journal", i));
@@ -347,7 +383,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 // ----------------------
 // Main reorg
 // ----------------------
-
 pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) -> Result<()> {
     if is_bad(db, new_tip).context("is_bad(new_tip)")? {
         return Ok(());
@@ -441,12 +476,11 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     );
 
     // Ensure crash-recovery inputs are durable BEFORE we publish the journal.
-// Otherwise journal can point at blocks/hdr indexes that disappear after kill -9.
-db.blocks.flush().context("pre-journal flush blocks")?;
-db.hdr.flush().context("pre-journal flush hdr")?;
-db.hdr_raw.flush().context("pre-journal flush hdr_raw")?;
-db.meta.flush().context("pre-journal flush meta")?;
-
+    // Otherwise journal can point at blocks/hdr indexes that disappear after kill -9.
+    db.blocks.flush().context("pre-journal flush blocks")?;
+    db.hdr.flush().context("pre-journal flush hdr")?;
+    db.hdr_raw.flush().context("pre-journal flush hdr_raw")?;
+    db.meta.flush().context("pre-journal flush meta")?;
 
     // ---------------- Crash-atomic journal start ----------------
     let mut j = ReorgJournal {
@@ -472,10 +506,8 @@ db.meta.flush().context("pre-journal flush meta")?;
         set_tip(db, &hi.parent)
             .with_context(|| format!("[reorg] set_tip(parent of {})", hex32(bh)))?;
 
-        // Make durable first
         flush_state_step(db).context("flush_state_step(undo)")?;
 
-        // Keep the labels post-durability
         failpoints::hit(&format!("undo:{}:post_tip_pre_flush", i));
         failpoints::hit(&format!("undo:{}:post_flush_pre_journal", i));
 
@@ -519,10 +551,8 @@ db.meta.flush().context("pre-journal flush meta")?;
 
             set_tip(db, bh).with_context(|| format!("[reorg] set_tip {}", hex32(bh)))?;
 
-            // Make durable first
             flush_state_step(db).context("flush_state_step(apply)")?;
 
-            // Keep labels post-durability
             failpoints::hit(&format!("apply:{}:post_tip_pre_flush", i));
             failpoints::hit(&format!("apply:{}:post_flush_pre_journal", i));
 
@@ -598,7 +628,6 @@ db.meta.flush().context("pre-journal flush meta")?;
         mempool_prune_if_present(db, mempool);
 
         let _ = journal_clear(db);
-
         return Err(e);
     }
 
