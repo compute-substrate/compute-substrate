@@ -65,18 +65,11 @@ impl Stores {
     }
 
     /// Explicit flush boundary. Avoid calling flush on every tip write.
-    pub fn flush_all(&self) -> Result<()> {
-        self.blocks.flush()?;
-        self.hdr.flush()?;
-        self.hdr_raw.flush()?;
-        self.meta.flush()?;
-        self.utxo.flush()?;
-        self.utxo_meta.flush()?;
-        self.undo.flush()?;
-        self.app.flush()?;
-        self.idx.flush()?;
-        Ok(())
-    }
+    // in impl Stores
+pub fn flush_all(&self) -> Result<()> {
+    self.db.flush()?; // single durability barrier for all trees
+    Ok(())
+}
 
     pub fn flush_meta(&self) -> Result<()> {
         self.meta.flush()?;
