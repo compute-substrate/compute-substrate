@@ -1,7 +1,7 @@
 // src/chain/reorg_journal.rs
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sled::transaction::{Transactional, TransactionError};
+use sled::transaction::ConflictableTransactionError;
 
 use crate::chain::failpoints;
 use crate::state::db::{meta_get_bytes, Stores};
@@ -121,7 +121,7 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     // Atomic update: write inactive slot + flip active pointer together.
     db.meta
         .transaction(|tx| {
-            // Read current active (best-effort) *inside* transaction.
+            // Read current active *inside* transaction.
             let active = match tx.get(k_reorg_active())? {
                 Some(v) if !v.is_empty() => v[0] & 1,
                 _ => 0,
@@ -143,8 +143,10 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
             let mut jj = j.clone();
             jj.seq = next_seq;
 
-            let bytes = encode(&jj)
-                .map_err(|e| TransactionError::Abort(anyhow::anyhow!(e)))?;
+            let bytes = match encode(&jj) {
+                Ok(b) => b,
+                Err(e) => return Err(ConflictableTransactionError::Abort(e)),
+            };
 
             failpoints::hit("journal_write:pre_flush");
 
@@ -157,18 +159,14 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
             Ok(())
         })
         .map_err(|e| match e {
-            TransactionError::Abort(ae) => ae,
-            TransactionError::Storage(se) => anyhow::anyhow!(se),
+            ConflictableTransactionError::Abort(ae) => ae,
+            ConflictableTransactionError::Storage(se) => anyhow::anyhow!(se),
         })
         .context("meta.transaction(journal_write)")?;
 
     failpoints::hit("journal_write:post_flush");
 
-    // NOTE:
-    // We intentionally do NOT flush here.
-    // The caller (reorg.rs) already does Db::flush() via flush_state_step(),
-    // and crash-fuzz expects crash points around that boundary.
-
+    // Intentionally NO flush here; reorg.rs provides Db::flush() boundary.
     Ok(())
 }
 
@@ -186,14 +184,13 @@ pub fn journal_clear(db: &Stores) -> Result<()> {
             Ok(())
         })
         .map_err(|e| match e {
-            TransactionError::Abort(ae) => ae,
-            TransactionError::Storage(se) => anyhow::anyhow!(se),
+            ConflictableTransactionError::Abort(ae) => ae,
+            ConflictableTransactionError::Storage(se) => anyhow::anyhow!(se),
         })
         .context("meta.transaction(journal_clear)")?;
 
     failpoints::hit("journal_clear:post_flush");
 
-    // No flush here; caller provides Db::flush() boundary.
-
+    // Intentionally NO flush here; reorg.rs provides Db::flush() boundary.
     Ok(())
 }
