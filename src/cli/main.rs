@@ -439,6 +439,15 @@ pub async fn run() -> Result<()> {
                 db.flush_meta().expect("db.flush_meta failed");
             }
 
+            // ✅ SAFE PLACE to build explorer index:
+            // after recovery, outside consensus apply/undo loops.
+            #[cfg(feature = "explorer-index")]
+            {
+                // This can take some time on large chains; OK at startup.
+                crate::state::tx_index::rebuild_canonical_index_from_tip(db.as_ref())
+                    .expect("tx index rebuild failed");
+            }
+
             let (tx_gossip_tx, tx_gossip_rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::net::GossipTxEvent>();
             let (mined_hdr_tx, mined_hdr_rx) =
@@ -497,8 +506,6 @@ pub async fn run() -> Result<()> {
                 let chain_lock2 = chain_lock.clone();
 
                 // Gating constants:
-                // - TIP_FRESH: we must be seeing *remote* chain activity
-                // - PEER_STABLE: avoid mining during connect/disconnect churn
                 const TIP_FRESH_SECS: u64 = 30;
                 const PEER_STABLE_SECS: u64 = 3;
 
@@ -517,10 +524,6 @@ pub async fn run() -> Result<()> {
                         let fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
                         let stable = net2.is_peer_stable(PEER_STABLE_SECS);
 
-                        // IMPORTANT FIX:
-                        // Do not hard-gate on peers >= 1. Peer telemetry can be flaky
-                        // (hairpin/public-IP dial, reconnect churn, timing).
-                        // If tips are fresh, we are effectively connected to the network.
                         let effective_peers = if fresh { peers.max(1) } else { peers };
 
                         if !fresh || !stable {
