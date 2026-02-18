@@ -248,6 +248,7 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 // ----------------------
 // Crash recovery
 // ----------------------
+
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
         return Ok(());
@@ -266,16 +267,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         hex32(&cur_tip),
     );
 
-    // ---- JOURNAL APPLICABILITY GUARD (CRITICAL) ----
-    //
-    // This is the missing piece that causes case=9:
-    // If the durable tip is neither old_tip nor new_tip, this journal is from a different
-    // timeline (or partially persisted state), and resuming it will corrupt UTXO/meta.
-    //
-    // Allowed states:
-    // - tip == new_tip: already finished -> clear stale journal
-    // - tip == old_tip: journal applies -> resume recovery
-    // Everything else: journal is stale/invalid -> drop it and do NOT mutate state.
+    // If we've already reached new_tip, the journal is stale.
     if cur_tip == j.new_tip {
         println!(
             "[reorg] recovery: tip already at new_tip {}; clearing stale journal",
@@ -287,16 +279,62 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         return Ok(());
     }
 
-    if cur_tip != j.old_tip {
+    // Validate that this journal matches the actual header index topology.
+    // (Crash fuzz can leave tip in the middle; we must NOT require cur_tip==old_tip.)
+    let journal_ok = (|| -> Result<bool> {
+        let old_hi = must_hidx(db, &j.old_tip).context("journal_ok must_hidx(old_tip)")?;
+        let new_hi = must_hidx(db, &j.new_tip).context("journal_ok must_hidx(new_tip)")?;
+        let anc_hi = must_hidx(db, &j.ancestor).context("journal_ok must_hidx(ancestor)")?;
+
+        let anc2 = find_ancestor(db, old_hi.clone(), new_hi.clone()).context("journal_ok find_ancestor")?;
+        if anc2.hash != anc_hi.hash {
+            println!(
+                "[reorg] recovery: journal invalid (ancestor mismatch): journal={} computed={}",
+                hex32(&anc_hi.hash),
+                hex32(&anc2.hash)
+            );
+            return Ok(false);
+        }
+
+        // Recompute undo/apply paths and require exact match.
+        let mut undo_path: Vec<Hash32> = vec![];
+        let mut cur = old_hi;
+        while cur.hash != anc2.hash {
+            undo_path.push(cur.hash);
+            cur = must_hidx(db, &cur.parent)?;
+        }
+
+        let mut apply_path: Vec<Hash32> = vec![];
+        let mut cur2 = new_hi;
+        while cur2.hash != anc2.hash {
+            apply_path.push(cur2.hash);
+            cur2 = must_hidx(db, &cur2.parent)?;
+        }
+        apply_path.reverse();
+
+        if undo_path != j.undo_path || apply_path != j.apply_path {
+            println!(
+                "[reorg] recovery: journal invalid (path mismatch): undo_len journal={} computed={}, apply_len journal={} computed={}",
+                j.undo_path.len(),
+                undo_path.len(),
+                j.apply_path.len(),
+                apply_path.len()
+            );
+            return Ok(false);
+        }
+
+        Ok(true)
+    })()?;
+
+    if !journal_ok {
         println!(
-            "[reorg] recovery: STALE/INAPPLICABLE JOURNAL; cur_tip={} old_tip={} new_tip={} ancestor={}. Clearing journal and exiting without state changes.",
-            hex32(&cur_tip),
+            "[reorg] recovery: clearing invalid/stale journal old_tip={} new_tip={} ancestor={}",
             hex32(&j.old_tip),
             hex32(&j.new_tip),
             hex32(&j.ancestor),
         );
-        journal_clear(db).context("recover journal_clear(inapplicable)")?;
-        flush_state_step(db).context("recover flush after journal_clear(inapplicable)")?;
+        journal_clear(db).context("recover journal_clear(invalid)")?;
+        flush_state_step(db).context("recover flush after journal_clear(invalid)")?;
         mempool_prune_if_present(db, mempool);
         return Ok(());
     }
@@ -305,6 +343,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     // 1) Rebuild to new_tip if possible.
     // 2) Else rebuild to ancestor if possible, then apply forward (pure replay).
     // 3) Else fall back to journal undo/apply.
+
     if can_rebuild_to_tip(db, &j.new_tip).context("recover can_rebuild_to_tip(new_tip)")? {
         rebuild_state_to_tip(db, &j.new_tip, mempool)
             .context("recover rebuild_state_to_tip(rebuild->new_tip)")?;
@@ -318,7 +357,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         rebuild_state_to_tip(db, &j.ancestor, mempool)
             .context("recover rebuild_state_to_tip(rebuild->ancestor)")?;
 
-        // Now apply forward to new_tip if apply bytes exist.
         let apply_path = j.apply_path.clone();
         if ensure_apply_blocks_present(db, &apply_path, &j.new_tip)? {
             for (i, bh) in apply_path.iter().enumerate() {
@@ -350,6 +388,9 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         mempool_prune_if_present(db, mempool);
         return Ok(());
     }
+
+
+
 
     // ----- journal-driven fallback (your previous logic) -----
     let undo_path = j.undo_path.clone();
