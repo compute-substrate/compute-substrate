@@ -1,9 +1,10 @@
 // src/chain/reorg_journal.rs
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sled::transaction::{Transactional, TransactionError};
 
 use crate::chain::failpoints;
-use crate::state::db::{meta_del, meta_get_bytes, meta_put_bytes, Stores};
+use crate::state::db::{meta_get_bytes, Stores};
 use crate::types::Hash32;
 
 // ----------------------
@@ -19,19 +20,6 @@ fn k_reorg_active() -> &'static [u8] {
     b"reorg:in_progress:active"
 }
 
-fn read_active(db: &Stores) -> Result<u8> {
-    match meta_get_bytes(db, k_reorg_active())? {
-        Some(v) if !v.is_empty() => Ok(v[0] & 1),
-        _ => Ok(0),
-    }
-}
-
-fn write_active(db: &Stores, which: u8) -> Result<()> {
-    meta_put_bytes(db, k_reorg_active(), &[which & 1])?;
-    db.meta.flush().context("flush meta after write_active")?;
-    Ok(())
-}
-
 fn slot_key(which: u8) -> &'static [u8] {
     if (which & 1) == 0 {
         k_reorg_slot_a()
@@ -42,6 +30,25 @@ fn slot_key(which: u8) -> &'static [u8] {
 
 fn other_slot(which: u8) -> u8 {
     (which ^ 1) & 1
+}
+
+fn decode(bytes: &[u8]) -> Result<ReorgJournal> {
+    crate::codec::consensus_bincode()
+        .deserialize::<ReorgJournal>(bytes)
+        .context("decode reorg journal")
+}
+
+fn encode(j: &ReorgJournal) -> Result<Vec<u8>> {
+    crate::codec::consensus_bincode()
+        .serialize(j)
+        .context("encode reorg journal")
+}
+
+fn read_active_best_effort(db: &Stores) -> Result<u8> {
+    match meta_get_bytes(db, k_reorg_active())? {
+        Some(v) if !v.is_empty() => Ok(v[0] & 1),
+        _ => Ok(0),
+    }
 }
 
 // ----------------------
@@ -56,8 +63,8 @@ pub enum Phase {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReorgJournal {
-    // Monotonic journal version. Lets us select the newest valid record if both exist.
-    // Old journals (from before this field existed) decode with seq=0.
+    /// Monotonic journal version. Lets us select the newest valid record if both exist.
+    /// Old journals (from before this field existed) decode with seq=0.
     #[serde(default)]
     pub seq: u64,
 
@@ -76,28 +83,18 @@ pub struct ReorgJournal {
 // ----------------------
 
 pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
-    // Try active slot first; if missing/corrupt, fall back to the other slot.
-    let active = read_active(db).context("read_active")?;
-    let a_key = slot_key(active);
-    let b_key = slot_key(other_slot(active));
+    // Active pointer is advisory; we still pick max(seq) across both slots.
+    let active = read_active_best_effort(db).context("read_active_best_effort")?;
 
-    let decode = |bytes: &[u8]| -> Result<ReorgJournal> {
-        crate::codec::consensus_bincode()
-            .deserialize::<ReorgJournal>(bytes)
-            .context("decode reorg journal")
+    let a = match meta_get_bytes(db, k_reorg_slot_a())? {
+        Some(v) => decode(&v).ok(),
+        None => None,
     };
-
-    let a = match meta_get_bytes(db, a_key)? {
+    let b = match meta_get_bytes(db, k_reorg_slot_b())? {
         Some(v) => decode(&v).ok(),
         None => None,
     };
 
-    let b = match meta_get_bytes(db, b_key)? {
-        Some(v) => decode(&v).ok(),
-        None => None,
-    };
-
-    // Prefer newest seq; tie-break prefers active slot (a).
     let picked = match (a, b) {
         (None, None) => return Ok(None),
         (Some(x), None) => x,
@@ -105,8 +102,12 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
         (Some(x), Some(y)) => {
             if y.seq > x.seq {
                 y
-            } else {
+            } else if x.seq > y.seq {
                 x
+            } else {
+                // Tie-break: prefer the active slot.
+                let prefer_a = (active & 1) == 0;
+                if prefer_a { x } else { y }
             }
         }
     };
@@ -117,46 +118,56 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
 pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     failpoints::hit("journal_write:pre");
 
-    let active = read_active(db).context("read_active")?;
-    let target = other_slot(active);
-    let target_key = slot_key(target);
+    // Atomic update: write inactive slot + flip active pointer together.
+    db.meta
+        .transaction(|tx| {
+            // Read current active (best-effort) *inside* transaction.
+            let active = match tx.get(k_reorg_active())? {
+                Some(v) if !v.is_empty() => v[0] & 1,
+                _ => 0,
+            };
+            let target = other_slot(active);
+            let target_key = slot_key(target);
 
-    // ✅ Monotonic seq derived from DB state (max(seqA, seqB) + 1)
-    let decode = |bytes: &[u8]| -> Result<ReorgJournal> {
-        crate::codec::consensus_bincode()
-            .deserialize::<ReorgJournal>(bytes)
-            .context("decode reorg journal")
-    };
+            // Compute next seq from both slots (decode best-effort).
+            let a_seq = match tx.get(k_reorg_slot_a())? {
+                Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
+                None => 0,
+            };
+            let b_seq = match tx.get(k_reorg_slot_b())? {
+                Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
+                None => 0,
+            };
+            let next_seq = a_seq.max(b_seq).saturating_add(1);
 
-    let a_seq = match meta_get_bytes(db, k_reorg_slot_a())? {
-        Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
-        None => 0,
-    };
-    let b_seq = match meta_get_bytes(db, k_reorg_slot_b())? {
-        Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
-        None => 0,
-    };
-    let next_seq = a_seq.max(b_seq).saturating_add(1);
+            let mut jj = j.clone();
+            jj.seq = next_seq;
 
-    let mut jj = j.clone();
-    jj.seq = next_seq;
+            let bytes = encode(&jj)
+                .map_err(|e| TransactionError::Abort(anyhow::anyhow!(e)))?;
 
-    let bytes = crate::codec::consensus_bincode()
-        .serialize(&jj)
-        .context("encode reorg journal")?;
+            failpoints::hit("journal_write:pre_flush");
 
-    // 1) Write new bytes to inactive slot
-    meta_put_bytes(db, target_key, &bytes)?;
+            // 1) Write new bytes to inactive slot
+            tx.insert(target_key, bytes)?;
 
-    failpoints::hit("journal_write:pre_flush");
+            // 2) Flip active pointer
+            tx.insert(k_reorg_active(), vec![target & 1])?;
 
-    // Make the slot write durable
-    db.meta.flush().context("flush meta after journal_write(slot)")?;
+            Ok(())
+        })
+        .map_err(|e| match e {
+            TransactionError::Abort(ae) => ae,
+            TransactionError::Storage(se) => anyhow::anyhow!(se),
+        })
+        .context("meta.transaction(journal_write)")?;
 
     failpoints::hit("journal_write:post_flush");
 
-    // 2) Flip active pointer (durable)
-    write_active(db, target).context("write_active")?;
+    // NOTE:
+    // We intentionally do NOT flush here.
+    // The caller (reorg.rs) already does Db::flush() via flush_state_step(),
+    // and crash-fuzz expects crash points around that boundary.
 
     Ok(())
 }
@@ -164,13 +175,25 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
 pub fn journal_clear(db: &Stores) -> Result<()> {
     failpoints::hit("journal_clear:pre");
 
-    meta_del(db, k_reorg_active())?;
-    meta_del(db, k_reorg_slot_a())?;
-    meta_del(db, k_reorg_slot_b())?;
+    db.meta
+        .transaction(|tx| {
+            failpoints::hit("journal_clear:pre_flush");
 
-    failpoints::hit("journal_clear:pre_flush");
-    db.meta.flush().context("flush meta after journal_clear")?;
+            tx.remove(k_reorg_active())?;
+            tx.remove(k_reorg_slot_a())?;
+            tx.remove(k_reorg_slot_b())?;
+
+            Ok(())
+        })
+        .map_err(|e| match e {
+            TransactionError::Abort(ae) => ae,
+            TransactionError::Storage(se) => anyhow::anyhow!(se),
+        })
+        .context("meta.transaction(journal_clear)")?;
+
     failpoints::hit("journal_clear:post_flush");
+
+    // No flush here; caller provides Db::flush() boundary.
 
     Ok(())
 }
