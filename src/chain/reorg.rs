@@ -253,24 +253,51 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         return Ok(());
     };
 
+    let cur_tip = current_tip(db).context("recover current_tip")?.unwrap_or([0u8; 32]);
+
     println!(
-        "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={}",
+        "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={} cur_tip={}",
         hex32(&j.old_tip),
         hex32(&j.new_tip),
         hex32(&j.ancestor),
         j.phase,
         j.cursor,
-        j.seq
+        j.seq,
+        hex32(&cur_tip),
     );
 
-    // ---- STALE JOURNAL GUARD ----
-    if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
+    // ---- JOURNAL APPLICABILITY GUARD (CRITICAL) ----
+    //
+    // This is the missing piece that causes case=9:
+    // If the durable tip is neither old_tip nor new_tip, this journal is from a different
+    // timeline (or partially persisted state), and resuming it will corrupt UTXO/meta.
+    //
+    // Allowed states:
+    // - tip == new_tip: already finished -> clear stale journal
+    // - tip == old_tip: journal applies -> resume recovery
+    // Everything else: journal is stale/invalid -> drop it and do NOT mutate state.
+    if cur_tip == j.new_tip {
         println!(
             "[reorg] recovery: tip already at new_tip {}; clearing stale journal",
             hex32(&j.new_tip)
         );
         journal_clear(db).context("recover journal_clear(stale)")?;
         flush_state_step(db).context("recover flush after journal_clear(stale)")?;
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+
+    if cur_tip != j.old_tip {
+        println!(
+            "[reorg] recovery: STALE/INAPPLICABLE JOURNAL; cur_tip={} old_tip={} new_tip={} ancestor={}. Clearing journal and exiting without state changes.",
+            hex32(&cur_tip),
+            hex32(&j.old_tip),
+            hex32(&j.new_tip),
+            hex32(&j.ancestor),
+        );
+        journal_clear(db).context("recover journal_clear(inapplicable)")?;
+        flush_state_step(db).context("recover flush after journal_clear(inapplicable)")?;
+        mempool_prune_if_present(db, mempool);
         return Ok(());
     }
 
