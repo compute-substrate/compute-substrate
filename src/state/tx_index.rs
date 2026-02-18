@@ -71,7 +71,7 @@ pub fn get_tx_locator(db: &Stores, id: &Hash32) -> Result<Option<TxLocator>> {
 }
 
 // --------------------
-// writes (called from set_tip)
+// writes (explorer-only)
 // --------------------
 
 pub fn index_canonical_block(db: &Stores, block_hash: &Hash32, height: u64) -> Result<()> {
@@ -119,5 +119,48 @@ pub fn unindex_canonical_block(db: &Stores, block_hash: &Hash32, height: u64) ->
         let _ = db.idx.remove(k_btx(block_hash))?;
     }
     let _ = db.idx.remove(k_hh(height))?;
+    Ok(())
+}
+
+// --------------------
+// full rebuild (recommended)
+// --------------------
+// This is the safe, deterministic way to ensure idx matches the canonical chain,
+// and it avoids any tip-transition edge cases.
+//
+// Call this from non-consensus code only (startup after recovery, background task, etc).
+
+pub fn rebuild_canonical_index_from_tip(db: &Stores) -> Result<()> {
+    // Wipe explorer index
+    db.idx.clear().context("idx.clear")?;
+
+    // Get tip
+    let Some(tip) = crate::state::db::get_tip(db)? else {
+        db.idx.flush().ok();
+        return Ok(());
+    };
+
+    // Walk back to genesis using header index, collecting (height, hash)
+    let mut chain: Vec<(u64, Hash32)> = Vec::new();
+    let mut cur = crate::chain::index::get_hidx(db, &tip)?
+        .ok_or_else(|| anyhow::anyhow!("missing header index for tip during idx rebuild"))?;
+
+    loop {
+        chain.push((cur.height, cur.hash));
+        if cur.height == 0 {
+            break;
+        }
+        cur = crate::chain::index::get_hidx(db, &cur.parent)?
+            .ok_or_else(|| anyhow::anyhow!("missing header index while walking parents for idx rebuild"))?;
+    }
+
+    chain.reverse();
+
+    for (height, hash) in chain {
+        // best-effort: if block bytes missing, skip (common during header-first sync)
+        let _ = index_canonical_block(db, &hash, height);
+    }
+
+    db.idx.flush().context("idx.flush after rebuild")?;
     Ok(())
 }
