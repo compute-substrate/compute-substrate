@@ -146,6 +146,8 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
                 Err(e) => return Err(ConflictableTransactionError::Abort(e)),
             };
 
+            // We want the crash-fuzz failpoint to be meaningful:
+            // it should occur BEFORE we make the journal durable.
             failpoints::hit("journal_write:pre_flush");
 
             // 1) Write new bytes to inactive slot
@@ -162,9 +164,11 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
         })
         .context("meta.transaction(journal_write)")?;
 
-    failpoints::hit("journal_write:post_flush");
+    // ✅ CRITICAL: durability barrier for crash-fuzz
+    // Transaction commit is atomic but not guaranteed durable across a simulated crash.
+    db.db.flush().context("db.flush after journal_write")?;
 
-    // Intentionally NO flush here; reorg.rs provides Db::flush() boundary.
+    failpoints::hit("journal_write:post_flush");
     Ok(())
 }
 
@@ -173,6 +177,7 @@ pub fn journal_clear(db: &Stores) -> Result<()> {
 
     db.meta
         .transaction(|tx| {
+            // Same deal: allow fuzz to crash before the durable barrier.
             failpoints::hit("journal_clear:pre_flush");
 
             tx.remove(k_reorg_active())?;
@@ -187,8 +192,9 @@ pub fn journal_clear(db: &Stores) -> Result<()> {
         })
         .context("meta.transaction(journal_clear)")?;
 
-    failpoints::hit("journal_clear:post_flush");
+    // ✅ CRITICAL: durability barrier for crash-fuzz
+    db.db.flush().context("db.flush after journal_clear")?;
 
-    // Intentionally NO flush here; reorg.rs provides Db::flush() boundary.
+    failpoints::hit("journal_clear:post_flush");
     Ok(())
 }
