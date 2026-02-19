@@ -318,9 +318,9 @@ fn chain_to_tip_from_blocks(db: &Stores, tip: &Hash32) -> Result<Vec<Hash32>> {
 }
 
 fn can_rebuild_to_tip(db: &Stores, tip: &Hash32) -> Result<bool> {
-    // Prefer hdr path if possible.
-    if get_hidx(db, tip).ok().flatten().is_some() {
-        let chain = chain_to_tip_from_hdr(db, tip)?;
+    // 1) Try hdr chain first, but do NOT treat failure as "not rebuildable".
+    // Crash fuzz can leave hdr incomplete while block bytes are complete.
+    if let Ok(chain) = chain_to_tip_from_hdr(db, tip) {
         for bh in &chain {
             if db.blocks.get(k_block(bh))?.is_none() {
                 return Ok(false);
@@ -329,7 +329,7 @@ fn can_rebuild_to_tip(db: &Stores, tip: &Hash32) -> Result<bool> {
         return Ok(true);
     }
 
-    // Otherwise, require block bytes chain.
+    // 2) Fall back to block-bytes parent chain.
     let chain = chain_to_tip_from_blocks(db, tip)?;
     for bh in &chain {
         if db.blocks.get(k_block(bh))?.is_none() {
@@ -340,12 +340,22 @@ fn can_rebuild_to_tip(db: &Stores, tip: &Hash32) -> Result<bool> {
 }
 
 fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempool>) -> Result<()> {
-    println!("[reorg] recovery fallback: rebuilding state to tip {}", hex32(target_tip));
+    println!(
+        "[reorg] recovery fallback: rebuilding state to tip {}",
+        hex32(target_tip)
+    );
 
-    let chain = if get_hidx(db, target_tip).ok().flatten().is_some() {
-        chain_to_tip_from_hdr(db, target_tip).context("rebuild chain_to_tip_from_hdr")?
-    } else {
-        chain_to_tip_from_blocks(db, target_tip).context("rebuild chain_to_tip_from_blocks")?
+    // Prefer hdr-based chain if possible, but FALL BACK to block chain if hdr chain is incomplete.
+    let chain = match chain_to_tip_from_hdr(db, target_tip) {
+        Ok(c) => c,
+        Err(e) => {
+            println!(
+                "[reorg] rebuild: hdr chain walk failed for {} ({}). Falling back to block-parent chain.",
+                hex32(target_tip),
+                e
+            );
+            chain_to_tip_from_blocks(db, target_tip).context("rebuild chain_to_tip_from_blocks")?
+        }
     };
 
     db.utxo.clear().context("rebuild utxo.clear")?;
@@ -357,14 +367,13 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
     for (i, bh) in chain.iter().enumerate() {
         let blk = load_block(db, bh).with_context(|| format!("rebuild load_block {}", hex32(bh)))?;
 
+        // Height during rebuild: deterministic position in the rebuilt chain.
         let height = i as u64;
+
         validate_and_apply_block(db, &blk, epoch_of(height), height)
             .with_context(|| format!("rebuild validate_and_apply_block {}", hex32(bh)))?;
 
         mempool_remove_mined(mempool, &blk);
-
-        // ✅ NEW: ensure body is durable before advancing tip
-        pre_tip_fence(db, bh).with_context(|| format!("rebuild pre_tip_fence {}", i))?;
 
         set_tip(db, bh).with_context(|| format!("rebuild set_tip {}", hex32(bh)))?;
         flush_state_step(db).with_context(|| format!("rebuild flush step {}", i))?;
