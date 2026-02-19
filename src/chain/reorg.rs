@@ -43,6 +43,33 @@ fn must_hidx(db: &Stores, hash: &Hash32) -> Result<HeaderIndex> {
     get_hidx(db, hash)?.ok_or_else(|| anyhow::anyhow!("missing header index for {}", hex32(hash)))
 }
 
+fn best_header_tip(db: &Stores) -> Result<Option<HeaderIndex>> {
+    let mut best: Option<HeaderIndex> = None;
+
+    for kv in db.hdr.iter() {
+        let (_k, v) = kv.context("hdr.iter()")?;
+        let hi: HeaderIndex = crate::codec::consensus_bincode()
+            .deserialize::<HeaderIndex>(&v)
+            .context("decode HeaderIndex in best_header_tip")?;
+
+        best = match best {
+            None => Some(hi),
+            Some(cur) => {
+                if hi.chainwork > cur.chainwork
+                    || (hi.chainwork == cur.chainwork && hi.height > cur.height)
+                {
+                    Some(hi)
+                } else {
+                    Some(cur)
+                }
+            }
+        };
+    }
+
+    Ok(best)
+}
+
+
 fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<HeaderIndex> {
     while a.height > b.height {
         a = must_hidx(db, &a.parent)?;
@@ -297,8 +324,53 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 // ----------------------
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
+        // ------------------------------
+        // JOURNAL-LESS RECOVERY FALLBACK
+        // ------------------------------
+        //
+        // Crash fuzz can kill us *before* the first journal record is committed.
+        // In that case we still must converge to the best-known header tip.
+        //
+        // Deterministic strategy for tests:
+        // - compute best header by chainwork
+        // - if best > canonical, rebuild to best (if we have block bytes)
+        let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
+        let canon_hi = match canon_tip {
+            Some(t) => get_hidx(db, &t).ok().flatten(),
+            None => None,
+        };
+
+        let best = best_header_tip(db).context("best_header_tip")?;
+        if let Some(best_hi) = best {
+            let canon_work = canon_hi.map(|x| x.chainwork).unwrap_or(0);
+
+            if best_hi.chainwork > canon_work {
+                // Only do it if we have the data to rebuild deterministically.
+                if can_rebuild_to_tip(db, &best_hi.hash)
+                    .context("can_rebuild_to_tip(best)")?
+                {
+                    println!(
+                        "[reorg] recovery(journal-less): rebuilding to best header tip {} (h={}, w={})",
+                        hex32(&best_hi.hash),
+                        best_hi.height,
+                        best_hi.chainwork
+                    );
+
+                    rebuild_state_to_tip(db, &best_hi.hash, mempool)
+                        .context("rebuild_state_to_tip(best header)")?;
+
+                    // ensure durability after rebuild
+                    flush_state_step(db).ok();
+                    mempool_prune_if_present(db, mempool);
+                }
+            }
+        }
+
         return Ok(());
     };
+
+
+
 
     println!(
         "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={}",
