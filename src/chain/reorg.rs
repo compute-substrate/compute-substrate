@@ -378,40 +378,64 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 // ----------------------
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
-        // ------------------------------
-        // JOURNAL-LESS RECOVERY FALLBACK
-        // ------------------------------
-        //
-        // Crash fuzz can kill us *before* the first journal record is committed.
-        // In that case, converge to best-known chainwork *for which we have block bytes*.
+    // ------------------------------
+    // JOURNAL-LESS RECOVERY FALLBACK
+    // ------------------------------
+    //
+    // Crash fuzz can kill us *before* the first journal record is committed.
+    // But meta:tip might already have been advanced. In that case, the DB can be
+    // inconsistent (tip moved, utxo not). So: if we can rebuild to canon_tip,
+    // we always do it.
 
-        let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
-        let canon_work = match canon_tip {
-            Some(t) => get_hidx(db, &t).ok().flatten().map(|x| x.chainwork).unwrap_or(0),
-            None => 0,
-        };
+    let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
 
-        let best = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes")?;
-
-        if let Some(best_hi) = best {
-            if best_hi.chainwork > canon_work {
-                println!(
-                    "[reorg] recovery(journal-less): rebuilding to best block-bytes tip {} (h={}, w={})",
-                    hex32(&best_hi.hash),
-                    best_hi.height,
-                    best_hi.chainwork
-                );
-
-                rebuild_state_to_tip(db, &best_hi.hash, mempool)
-                    .context("rebuild_state_to_tip(best block-bytes tip)")?;
-
-                flush_state_step(db).ok();
-                mempool_prune_if_present(db, mempool);
-            }
+    if let Some(t) = canon_tip {
+        if can_rebuild_to_tip(db, &t).context("journal-less can_rebuild_to_tip(canon_tip)")? {
+            println!(
+                "[reorg] recovery(journal-less): rebuilding to canon tip {}",
+                hex32(&t)
+            );
+            rebuild_state_to_tip(db, &t, mempool)
+                .context("journal-less rebuild_state_to_tip(canon tip)")?;
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
+        } else {
+            println!(
+                "[reorg] recovery(journal-less): canon tip {} not rebuildable (missing bytes); searching best rebuildable tip",
+                hex32(&t)
+            );
         }
+    }
 
-        return Ok(());
+    // If canon tip is None or not rebuildable, fall back to "best tip with block bytes".
+    // (This is your existing behavior, kept.)
+    let canon_work = match canon_tip {
+        Some(t) => get_hidx(db, &t).ok().flatten().map(|x| x.chainwork).unwrap_or(0),
+        None => 0,
     };
+
+    let best = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes")?;
+
+    if let Some(best_hi) = best {
+        if best_hi.chainwork > canon_work {
+            println!(
+                "[reorg] recovery(journal-less): rebuilding to best block-bytes tip {} (h={}, w={})",
+                hex32(&best_hi.hash),
+                best_hi.height,
+                best_hi.chainwork
+            );
+
+            rebuild_state_to_tip(db, &best_hi.hash, mempool)
+                .context("rebuild_state_to_tip(best block-bytes tip)")?;
+
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+        }
+    }
+
+    return Ok(());
+};
 
     println!(
         "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={}",
