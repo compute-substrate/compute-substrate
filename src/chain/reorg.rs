@@ -39,6 +39,43 @@ fn is_missing_undo_err(e: &anyhow::Error) -> bool {
     s.contains("missing undo")
 }
 
+fn hash_from_block_key(k: &[u8]) -> Option<Hash32> {
+    // k_block = b'B' + 32 bytes
+    if k.len() == 33 && k[0] == b'B' {
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&k[1..33]);
+        Some(h)
+    } else {
+        None
+    }
+}
+
+fn best_tip_with_block_bytes(db: &Stores) -> Result<Option<HeaderIndex>> {
+    let mut best: Option<HeaderIndex> = None;
+
+    for kv in db.blocks.iter() {
+        let (k, _v) = kv.context("blocks.iter()")?;
+        let Some(h) = hash_from_block_key(&k) else { continue };
+
+        let Some(hi) = get_hidx(db, &h).ok().flatten() else { continue };
+
+        best = match best {
+            None => Some(hi),
+            Some(cur) => {
+                if hi.chainwork > cur.chainwork
+                    || (hi.chainwork == cur.chainwork && hi.height > cur.height)
+                {
+                    Some(hi)
+                } else {
+                    Some(cur)
+                }
+            }
+        };
+    }
+
+    Ok(best)
+}
+
 fn must_hidx(db: &Stores, hash: &Hash32) -> Result<HeaderIndex> {
     get_hidx(db, hash)?.ok_or_else(|| anyhow::anyhow!("missing header index for {}", hex32(hash)))
 }
@@ -322,6 +359,8 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 // ----------------------
 // Crash recovery
 // ----------------------
+
+        
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
         // ------------------------------
@@ -329,45 +368,36 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         // ------------------------------
         //
         // Crash fuzz can kill us *before* the first journal record is committed.
-        // In that case we still must converge to the best-known header tip.
-        //
-        // Deterministic strategy for tests:
-        // - compute best header by chainwork
-        // - if best > canonical, rebuild to best (if we have block bytes)
+        // In that case, converge to best-known chainwork *for which we have block bytes*.
+
         let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
-        let canon_hi = match canon_tip {
-            Some(t) => get_hidx(db, &t).ok().flatten(),
-            None => None,
+        let canon_work = match canon_tip {
+            Some(t) => get_hidx(db, &t).ok().flatten().map(|x| x.chainwork).unwrap_or(0),
+            None => 0,
         };
 
-        let best = best_header_tip(db).context("best_header_tip")?;
+        let best = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes")?;
+
         if let Some(best_hi) = best {
-            let canon_work = canon_hi.map(|x| x.chainwork).unwrap_or(0);
-
             if best_hi.chainwork > canon_work {
-                // Only do it if we have the data to rebuild deterministically.
-                if can_rebuild_to_tip(db, &best_hi.hash)
-                    .context("can_rebuild_to_tip(best)")?
-                {
-                    println!(
-                        "[reorg] recovery(journal-less): rebuilding to best header tip {} (h={}, w={})",
-                        hex32(&best_hi.hash),
-                        best_hi.height,
-                        best_hi.chainwork
-                    );
+                println!(
+                    "[reorg] recovery(journal-less): rebuilding to best block-bytes tip {} (h={}, w={})",
+                    hex32(&best_hi.hash),
+                    best_hi.height,
+                    best_hi.chainwork
+                );
 
-                    rebuild_state_to_tip(db, &best_hi.hash, mempool)
-                        .context("rebuild_state_to_tip(best header)")?;
+                rebuild_state_to_tip(db, &best_hi.hash, mempool)
+                    .context("rebuild_state_to_tip(best block-bytes tip)")?;
 
-                    // ensure durability after rebuild
-                    flush_state_step(db).ok();
-                    mempool_prune_if_present(db, mempool);
-                }
+                flush_state_step(db).ok();
+                mempool_prune_if_present(db, mempool);
             }
         }
 
         return Ok(());
     };
+
 
 
 
