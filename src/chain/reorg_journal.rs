@@ -1,7 +1,7 @@
 // src/chain/reorg_journal.rs
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sled::transaction::ConflictableTransactionError;
+use sled::transaction::{ConflictableTransactionError, TransactionError};
 
 use crate::chain::failpoints;
 use crate::state::db::{meta_get_bytes, Stores};
@@ -63,8 +63,6 @@ pub enum Phase {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReorgJournal {
-    /// Monotonic journal version. Lets us select the newest valid record if both exist.
-    /// Old journals (from before this field existed) decode with seq=0.
     #[serde(default)]
     pub seq: u64,
 
@@ -105,7 +103,7 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
             } else if x.seq > y.seq {
                 x
             } else {
-                // Tie-break: prefer the active slot.
+                // Tie-break: prefer the active slot
                 let prefer_a = (active & 1) == 0;
                 if prefer_a { x } else { y }
             }
@@ -158,9 +156,9 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
 
             Ok(())
         })
-        .map_err(|e| match e {
-            ConflictableTransactionError::Abort(ae) => ae,
-            ConflictableTransactionError::Storage(se) => anyhow::anyhow!(se),
+        .map_err(|e: TransactionError<anyhow::Error>| match e {
+            TransactionError::Abort(ae) => ae,
+            TransactionError::Storage(se) => anyhow::anyhow!(se),
         })
         .context("meta.transaction(journal_write)")?;
 
@@ -183,9 +181,9 @@ pub fn journal_clear(db: &Stores) -> Result<()> {
 
             Ok(())
         })
-        .map_err(|e| match e {
-            ConflictableTransactionError::Abort(ae) => ae,
-            ConflictableTransactionError::Storage(se) => anyhow::anyhow!(se),
+        .map_err(|e: TransactionError<anyhow::Error>| match e {
+            TransactionError::Abort(ae) => ae,
+            TransactionError::Storage(se) => anyhow::anyhow!(se),
         })
         .context("meta.transaction(journal_clear)")?;
 
