@@ -385,6 +385,8 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 // ----------------------
 // Crash recovery
 // ----------------------
+
+
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     let Some(mut j) = journal_read(db).context("journal_read")? else {
     // ------------------------------
@@ -445,6 +447,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
     return Ok(());
 };
+
 
     println!(
         "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={}",
