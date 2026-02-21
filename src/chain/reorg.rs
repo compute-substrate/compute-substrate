@@ -220,6 +220,47 @@ fn ensure_apply_blocks_present(db: &Stores, apply_hashes: &[Hash32], new_tip: &H
     Ok(true)
 }
 
+fn vec_contains(v: &[Hash32], x: &Hash32) -> bool {
+    v.iter().any(|h| h == x)
+}
+
+fn journal_structurally_plausible(j: &ReorgJournal) -> bool {
+    // undo_path should start at old_tip (if any)
+    if !j.undo_path.is_empty() && j.undo_path[0] != j.old_tip {
+        return false;
+    }
+    // apply_path should end at new_tip (if any)
+    if !j.apply_path.is_empty() {
+        if let Some(last) = j.apply_path.last() {
+            if *last != j.new_tip {
+                return false;
+            }
+        }
+    }
+    // cursor must be in-range for its phase
+    match j.phase {
+        Phase::Undo => j.cursor <= j.undo_path.len() as u64,
+        Phase::Apply => j.cursor <= j.apply_path.len() as u64,
+    }
+}
+
+fn journal_matches_current_tip_state(cur_tip: &Option<Hash32>, j: &ReorgJournal) -> bool {
+    let Some(t) = cur_tip else {
+        // If no tip is set, journal might still be valid (cold-start/crash timing).
+        return true;
+    };
+
+    // Current tip must be something the journal "knows about":
+    // old_tip / ancestor / new_tip or an intermediate point on undo/apply.
+    if *t == j.old_tip || *t == j.ancestor || *t == j.new_tip {
+        return true;
+    }
+    if vec_contains(&j.undo_path, t) || vec_contains(&j.apply_path, t) {
+        return true;
+    }
+    false
+}
+
 // ----------------------
 // Parent resolution (hdr-or-block)
 // ----------------------
@@ -458,6 +499,36 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         j.cursor,
         j.seq
     );
+
+let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
+
+if !journal_structurally_plausible(&j) || !journal_matches_current_tip_state(&cur_tip, &j) {
+    println!(
+        "[reorg] recovery: journal discarded (plausible={}, matches_tip_state={}) cur_tip={:?} old_tip={} new_tip={} ancestor={}",
+        journal_structurally_plausible(&j),
+        journal_matches_current_tip_state(&cur_tip, &j),
+        cur_tip.as_ref().map(|h| hex32(h)),
+        hex32(&j.old_tip),
+        hex32(&j.new_tip),
+        hex32(&j.ancestor),
+    );
+
+    // Clear and fall back to journal-less canonical handling.
+    journal_clear(db).ok();
+    flush_state_step(db).ok();
+    mempool_prune_if_present(db, mempool);
+
+    // (Optional) If tip exists and is rebuildable, rebuild to it to make state canonical.
+    if let Some(t) = cur_tip {
+        if can_rebuild_to_tip(db, &t).ok().unwrap_or(false) {
+            rebuild_state_to_tip(db, &t, mempool).ok();
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+        }
+    }
+
+    return Ok(());
+}
 
     // Stale journal: already at new_tip.
     if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
