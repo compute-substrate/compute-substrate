@@ -213,7 +213,7 @@ fn build_template(
 
     // Build coinbase *after* we know fees, but we must reserve bytes for it.
     // We'll create a placeholder coinbase first to estimate size deterministically (height is committed).
-    let cb_placeholder = coinbase(miner_h160, reward, height);
+    let cb_placeholder = coinbase(miner_h160, reward, height, None);
     let cb_bytes = c.serialized_size(&cb_placeholder)? as usize;
 
     // We must be able to fit coinbase + header structure in MAX_BLOCK_BYTES (practically always true).
@@ -264,7 +264,7 @@ fn build_template(
     let cb_value = reward
         .checked_add(total_fees)
         .ok_or_else(|| anyhow!("coinbase overflow"))?;
-    let cb = coinbase(miner_h160, cb_value, height);
+    let cb = coinbase(miner_h160, cb_value, height, None);
 
     let mut final_txs: Vec<Transaction> = Vec::with_capacity(1 + included.len());
     final_txs.push(cb);
