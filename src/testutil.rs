@@ -30,7 +30,7 @@ fn test_miner() -> [u8; 20] {
 
 /// Coinbase used by tests. Must match consensus coinbase format (height-unique).
 pub fn make_coinbase(height: u64) -> Transaction {
-    coinbase(test_miner(), INITIAL_REWARD, height)
+    coinbase(test_miner(), INITIAL_REWARD, height, None)
 }
 
 /// Minimal merkle for tests (pair-hash, duplicate last).
