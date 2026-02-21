@@ -54,7 +54,7 @@ fn merkle_root(txs: &[Transaction]) -> Hash32 {
 /// Coinbase with guaranteed uniqueness:
 /// - script_sig commits height (consensus rule enforced in utxo.rs)
 /// - locktime commits height (also makes txid unique even if txid strips scriptsig)
-pub fn coinbase(miner_h160: Hash20, value: u64, height: u64) -> Transaction {
+pub fn coinbase(miner_h160: Hash20, value: u64, height: u64, memo: Option<&[u8]>) -> Transaction {
     let script_sig = height.to_le_bytes().to_vec();
     let locktime = height as u32;
 
