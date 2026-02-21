@@ -58,6 +58,7 @@ pub fn coinbase(miner_h160: Hash20, value: u64, height: u64, memo: Option<&[u8]>
     let mut script_sig = height.to_le_bytes().to_vec();
     let locktime = height as u32;
     if let Some(m) = memo {
+    script_sig.push(0x00);
     script_sig.extend_from_slice(m);
 }
     Transaction {
