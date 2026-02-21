@@ -467,24 +467,15 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
         None => 0,
     };
 
-    let best = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes")?;
+let best_hdr = best_header_tip(db)?;
 
-    if let Some(best_hi) = best {
-        if best_hi.chainwork > canon_work {
-            println!(
-                "[reorg] recovery(journal-less): rebuilding to best block-bytes tip {} (h={}, w={})",
-                hex32(&best_hi.hash),
-                best_hi.height,
-                best_hi.chainwork
-            );
-
-            rebuild_state_to_tip(db, &best_hi.hash, mempool)
-                .context("rebuild_state_to_tip(best block-bytes tip)")?;
-
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-        }
+if let Some(best_hi) = best_hdr {
+    if best_hi.chainwork > canon_work {
+        rebuild_state_to_tip(db, &best_hi.hash, mempool)?;
+        flush_state_step(db)?;
+        mempool_prune_if_present(db, mempool);
     }
+}
 
     return Ok(());
 };
