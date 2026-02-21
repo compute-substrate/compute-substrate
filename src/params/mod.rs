@@ -16,6 +16,9 @@ pub const CHAIN_ID_HASH: Hash32 = [
 pub const CHAIN_NAME: &str = "Compute Substrate";
 pub const TICKER: &str = "CSD";
 
+pub const GENESIS_EPIGRAPH: &str =
+    "Reuters 2026-02-05: Britain to work with Microsoft to build deepfake detection system.";
+
 pub const TARGET_BLOCK_SECS: u64 = 60;
 
 // Initial difficulty target (compact bits).
