@@ -50,7 +50,7 @@ fn merkle_root(txs: &[Transaction]) -> crate::types::Hash32 {
 
 pub fn make_genesis_block(burn_addr20: Hash20) -> Result<Block> {
     // height=0 for genesis coinbase
-    let cb = coinbase(burn_addr20, INITIAL_REWARD, 0);
+    let cb = coinbase(burn_addr20, INITIAL_REWARD, 0, Some(GENESIS_EPIGRAPH.as_bytes()));
     let txs = vec![cb];
 
     let merkle = merkle_root(&txs);
