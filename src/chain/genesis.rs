@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::chain::index::{header_hash, index_header};
 use crate::chain::mine::coinbase;
 use crate::chain::pow::pow_ok;
-use crate::params::{GENESIS_HASH, INITIAL_BITS, INITIAL_REWARD};
+use crate::params::{GENESIS_HASH, INITIAL_BITS, INITIAL_REWARD, GENESIS_EPIGRAPH};
 use crate::state::app::current_epoch;
 use crate::state::db::{get_tip, k_block, set_tip, Stores};
 use crate::state::utxo::validate_and_apply_block;
