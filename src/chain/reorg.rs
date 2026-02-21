@@ -493,33 +493,45 @@ if let Some(best_hi) = best_hdr {
 
 let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
 
-if !journal_structurally_plausible(&j) || !journal_matches_current_tip_state(&cur_tip, &j) {
-    println!(
-        "[reorg] recovery: journal discarded (plausible={}, matches_tip_state={}) cur_tip={:?} old_tip={} new_tip={} ancestor={}",
-        journal_structurally_plausible(&j),
-        journal_matches_current_tip_state(&cur_tip, &j),
-        cur_tip.as_ref().map(|h| hex32(h)),
-        hex32(&j.old_tip),
-        hex32(&j.new_tip),
-        hex32(&j.ancestor),
-    );
 
-    // Clear and fall back to journal-less canonical handling.
+
+
+
+
+// after reading j and cur_tip...
+let plausible = journal_structurally_plausible(&j);
+let matches = journal_matches_current_tip_state(&cur_tip, &j);
+
+if !plausible {
+    // truly corrupted -> clear + fall back
     journal_clear(db).ok();
     flush_state_step(db).ok();
     mempool_prune_if_present(db, mempool);
-
-    // (Optional) If tip exists and is rebuildable, rebuild to it to make state canonical.
-    if let Some(t) = cur_tip {
-        if can_rebuild_to_tip(db, &t).ok().unwrap_or(false) {
-            rebuild_state_to_tip(db, &t, mempool).ok();
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-        }
-    }
-
     return Ok(());
 }
+
+// If it’s plausible but doesn’t match current tip, DO NOT clear it.
+// Just converge to what the journal says was intended.
+if !matches {
+    println!(
+        "[reorg] recovery: journal plausible but tip drifted; forcing rebuild to journal.new_tip {}",
+        hex32(&j.new_tip)
+    );
+
+    if can_rebuild_to_tip(db, &j.new_tip).unwrap_or(false) {
+        rebuild_state_to_tip(db, &j.new_tip, mempool)?;
+        journal_clear(db).ok();
+        flush_state_step(db).ok();
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+
+    // If we cannot rebuild to new_tip, then (and only then) fall back.
+    // (optional) try ancestor, else clear + journal-less.
+}
+
+
+
 
     // Stale journal: already at new_tip.
     if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
