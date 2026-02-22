@@ -429,53 +429,82 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 
 
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
-    let Some(mut j) = journal_read(db).context("journal_read")? else {
+
+let Some(mut j) = journal_read(db).context("journal_read")? else {
     // ------------------------------
-    // JOURNAL-LESS RECOVERY FALLBACK
+    // JOURNAL-LESS RECOVERY (do NOT trust meta:tip after crash)
     // ------------------------------
     //
-    // Crash fuzz can kill us *before* the first journal record is committed.
-    // But meta:tip might already have been advanced. In that case, the DB can be
-    // inconsistent (tip moved, utxo not). So: if we can rebuild to canon_tip,
-    // we always do it.
+    // After a crash, meta:tip can drift forward/backward relative to durable state.
+    // So journal-less recovery must converge to the BEST rebuildable tip by chainwork,
+    // not blindly rebuild to meta:tip.
 
     let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
-
-    if let Some(t) = canon_tip {
-        if can_rebuild_to_tip(db, &t).context("journal-less can_rebuild_to_tip(canon_tip)")? {
-            println!(
-                "[reorg] recovery(journal-less): rebuilding to canon tip {}",
-                hex32(&t)
-            );
-            rebuild_state_to_tip(db, &t, mempool)
-                .context("journal-less rebuild_state_to_tip(canon tip)")?;
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            return Ok(());
-        } else {
-            println!(
-                "[reorg] recovery(journal-less): canon tip {} not rebuildable (missing bytes); searching best rebuildable tip",
-                hex32(&t)
-            );
-        }
-    }
-
-    // If canon tip is None or not rebuildable, fall back to "best tip with block bytes".
-    // (This is your existing behavior, kept.)
     let canon_work = match canon_tip {
         Some(t) => get_hidx(db, &t).ok().flatten().map(|x| x.chainwork).unwrap_or(0),
         None => 0,
     };
 
-let best_hdr = best_header_tip(db)?;
+    // Find best tip in hdr index that is rebuildable (block bytes exist along chain).
+    let mut best: Option<HeaderIndex> = None;
 
-if let Some(best_hi) = best_hdr {
-    if best_hi.chainwork > canon_work {
-        rebuild_state_to_tip(db, &best_hi.hash, mempool)?;
-        flush_state_step(db)?;
-        mempool_prune_if_present(db, mempool);
+    for kv in db.hdr.iter() {
+        let (_k, v) = kv.context("hdr.iter()")?;
+        let hi: HeaderIndex = crate::codec::consensus_bincode()
+            .deserialize::<HeaderIndex>(&v)
+            .context("decode HeaderIndex in journal-less scan")?;
+
+        if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
+            best = match best {
+                None => Some(hi),
+                Some(cur) => {
+                    if hi.chainwork > cur.chainwork
+                        || (hi.chainwork == cur.chainwork && hi.height > cur.height)
+                    {
+                        Some(hi)
+                    } else {
+                        Some(cur)
+                    }
+                }
+            };
+        }
     }
-}
+
+    if let Some(best_hi) = best {
+        if best_hi.chainwork > canon_work || canon_tip.is_none() {
+            println!(
+                "[reorg] recovery(journal-less): rebuilding to best rebuildable tip {} (h={}, w={}) canon_tip={:?} canon_w={}",
+                hex32(&best_hi.hash),
+                best_hi.height,
+                best_hi.chainwork,
+                canon_tip.as_ref().map(|h| hex32(h)),
+                canon_work
+            );
+
+            rebuild_state_to_tip(db, &best_hi.hash, mempool)
+                .context("journal-less rebuild_state_to_tip(best rebuildable tip)")?;
+
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
+        }
+    }
+
+    // If nothing better exists, and canon_tip is rebuildable, rebuild to it for canonicalization.
+    if let Some(t) = canon_tip {
+        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+            println!(
+                "[reorg] recovery(journal-less): rebuilding to canon tip {} (no better rebuildable tip found)",
+                hex32(&t)
+            );
+
+            rebuild_state_to_tip(db, &t, mempool)
+                .context("journal-less rebuild_state_to_tip(canon tip)")?;
+
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+        }
+    }
 
     return Ok(());
 };
