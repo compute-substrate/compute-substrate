@@ -528,35 +528,59 @@ let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
 
 
 // after reading j and cur_tip...
+
+// after reading j and cur_tip...
 let plausible = journal_structurally_plausible(&j);
 let matches = journal_matches_current_tip_state(&cur_tip, &j);
 
 if !plausible {
-    // truly corrupted -> clear + fall back
+    // Truly corrupted -> clear + fall back to journal-less handling.
+    println!("[reorg] recovery: journal corrupted; clearing and falling back");
     journal_clear(db).ok();
     flush_state_step(db).ok();
     mempool_prune_if_present(db, mempool);
     return Ok(());
 }
 
-// If it’s plausible but doesn’t match current tip, DO NOT clear it.
-// Just converge to what the journal says was intended.
 if !matches {
+    // Tip drifted relative to journal. Do NOT continue with incremental journal logic.
+    // Converge deterministically to what the journal intended.
     println!(
-        "[reorg] recovery: journal plausible but tip drifted; forcing rebuild to journal.new_tip {}",
+        "[reorg] recovery: journal plausible but tip drifted (cur_tip={:?}); converging to journal.new_tip={}",
+        cur_tip.as_ref().map(|h| hex32(h)),
         hex32(&j.new_tip)
     );
 
+    // 1) Try rebuild directly to intended new_tip.
     if can_rebuild_to_tip(db, &j.new_tip).unwrap_or(false) {
-        rebuild_state_to_tip(db, &j.new_tip, mempool)?;
+        rebuild_state_to_tip(db, &j.new_tip, mempool)
+            .context("recovery: rebuild_state_to_tip(j.new_tip) after tip drift")?;
         journal_clear(db).ok();
         flush_state_step(db).ok();
         mempool_prune_if_present(db, mempool);
         return Ok(());
     }
 
-    // If we cannot rebuild to new_tip, then (and only then) fall back.
-    // (optional) try ancestor, else clear + journal-less.
+    // 2) If we can't rebuild to new_tip, try ancestor (still deterministic).
+    if can_rebuild_to_tip(db, &j.ancestor).unwrap_or(false) {
+        rebuild_state_to_tip(db, &j.ancestor, mempool)
+            .context("recovery: rebuild_state_to_tip(j.ancestor) after tip drift")?;
+        journal_clear(db).ok();
+        flush_state_step(db).ok();
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+
+    // 3) Last resort: clear journal and do nothing else (caller will continue normal startup).
+    println!(
+        "[reorg] recovery: cannot rebuild to journal new_tip {} or ancestor {}; clearing journal",
+        hex32(&j.new_tip),
+        hex32(&j.ancestor),
+    );
+    journal_clear(db).ok();
+    flush_state_step(db).ok();
+    mempool_prune_if_present(db, mempool);
+    return Ok(());
 }
 
 
