@@ -244,21 +244,56 @@ fn journal_structurally_plausible(j: &ReorgJournal) -> bool {
     }
 }
 
-fn journal_matches_current_tip_state(cur_tip: &Option<Hash32>, j: &ReorgJournal) -> bool {
+fn journal_matches_current_tip_state(db: &Stores, cur_tip: &Option<Hash32>, j: &ReorgJournal) -> bool {
     let Some(t) = cur_tip else {
-        // If no tip is set, journal might still be valid (cold-start/crash timing).
+        // Cold start / crash timing: allow recovery to proceed.
         return true;
     };
 
-    // Current tip must be something the journal "knows about":
-    // old_tip / ancestor / new_tip or an intermediate point on undo/apply.
-    if *t == j.old_tip || *t == j.ancestor || *t == j.new_tip {
+    // Stale journal: already fully at new_tip. (We’ll clear it later.)
+    if *t == j.new_tip {
         return true;
     }
-    if vec_contains(&j.undo_path, t) || vec_contains(&j.apply_path, t) {
-        return true;
+
+    match j.phase {
+        Phase::Undo => {
+            // cursor == 0 => tip must still be old_tip
+            if j.cursor == 0 {
+                return *t == j.old_tip;
+            }
+
+            let c = j.cursor as usize;
+            if c > j.undo_path.len() {
+                return false;
+            }
+
+            // After undoing undo_path[c-1], tip is set to its parent.
+            // That parent is either undo_path[c] (next block down), or ancestor when c == len.
+            let expected = if c < j.undo_path.len() {
+                j.undo_path[c]
+            } else {
+                j.ancestor
+            };
+
+            *t == expected
+        }
+
+        Phase::Apply => {
+            // cursor == 0 => tip must be ancestor
+            if j.cursor == 0 {
+                return *t == j.ancestor;
+            }
+
+            let c = j.cursor as usize;
+            if c > j.apply_path.len() {
+                return false;
+            }
+
+            // After applying apply_path[c-1], tip is set to that block hash.
+            let expected = j.apply_path[c - 1];
+            *t == expected
+        }
     }
-    false
 }
 
 // ----------------------
@@ -505,7 +540,8 @@ let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
 
 // after reading j and cur_tip...
 let plausible = journal_structurally_plausible(&j);
-let matches = journal_matches_current_tip_state(&cur_tip, &j);
+
+let matches = journal_matches_current_tip_state(db, &cur_tip, &j);
 
 if !plausible {
     // Truly corrupted -> clear + fall back to journal-less handling.
