@@ -1005,5 +1005,5 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
 
     mempool_prune_if_present(db, mempool);
     Ok(())
-}
-                      }
+
+                      
