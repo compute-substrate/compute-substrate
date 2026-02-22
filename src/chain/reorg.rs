@@ -441,41 +441,41 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
     // for which we *definitely* have block bytes (as seen in blocks tree) AND
     // a header index (so we can compare chainwork deterministically).
 
-    let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
-
-    if let Some(t) = canon_tip {
+match canon_tip {
+    Some(t) => {
         if can_rebuild_to_tip(db, &t).unwrap_or(false) {
-            println!(
-                "[reorg] recovery(journal-less): rebuilding to canon tip {}",
-                hex32(&t)
-            );
+            println!("[reorg] recovery(journal-less): rebuilding to canon tip {}", hex32(&t));
             rebuild_state_to_tip(db, &t, mempool)
                 .context("journal-less rebuild_state_to_tip(canon tip)")?;
             flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            return Ok(());
         } else {
             println!(
-                "[reorg] recovery(journal-less): canon tip {} not rebuildable; falling back",
+                "[reorg] recovery(journal-less): canon tip {} not rebuildable; leaving state unchanged",
                 hex32(&t)
             );
         }
-    } else {
-        println!("[reorg] recovery(journal-less): no canon tip set; falling back");
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
     }
-
-    // Fall back: choose best header that we have *block bytes* for (blocks tree),
-    // not arbitrary hdr tips that may never have been canon-committed.
-
-// If we reach here and meta:tip exists but is not rebuildable,
-// we DO NOT override it. meta:tip is the canonical commitment.
-// Leave state as-is and return.
-println!(
-    "[reorg] recovery(journal-less): meta:tip not rebuildable; leaving state unchanged"
-);
-mempool_prune_if_present(db, mempool);
-return Ok(());
-};
+    None => {
+        // true cold-start: no canonical commitment, choose best tip w/ bytes
+        if let Some(best_hi) = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes (cold-start)")? {
+            println!(
+                "[reorg] recovery(journal-less): cold-start rebuild to best tip with bytes {} (h={}, w={})",
+                hex32(&best_hi.hash),
+                best_hi.height,
+                best_hi.chainwork
+            );
+            rebuild_state_to_tip(db, &best_hi.hash, mempool)
+                .context("journal-less rebuild_state_to_tip(best_tip_with_block_bytes)")?;
+            flush_state_step(db).ok();
+        } else {
+            println!("[reorg] recovery(journal-less): cold-start, no blocks available");
+        }
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+}
 
 
     println!(
@@ -500,7 +500,7 @@ let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
 // after reading j and cur_tip...
 let plausible = journal_structurally_plausible(&j);
 
-let matches = journal_matches_current_tip_state(db, &cur_tip, &j);
+let matches = journal_matches_current_tip_state(&cur_tip, &j);
 
 if !plausible {
     // Truly corrupted -> clear + fall back to journal-less handling.
@@ -520,18 +520,6 @@ if !matches {
     // Do NOT clear. Continue.
 }
 
-
-    if let Some(best_hi) = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes (after stale journal clear)")? {
-        rebuild_state_to_tip(db, &best_hi.hash, mempool)
-            .context("recovery: rebuild_state_to_tip(best_tip_with_block_bytes) after stale journal clear")?;
-        flush_state_step(db).ok();
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
-    }
-
-    mempool_prune_if_present(db, mempool);
-    return Ok(());
-}
 
 
 
