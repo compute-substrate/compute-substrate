@@ -431,51 +431,50 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
 let Some(mut j) = journal_read(db).context("journal_read")? else {
     // ------------------------------
-    // JOURNAL-LESS RECOVERY (trust meta:tip as the only canonical commitment)
+    // JOURNAL-LESS RECOVERY
     // ------------------------------
-    //
-    // If there's no journal, the only thing we can treat as "chosen canonical"
-    // is meta:tip (whatever was last persisted).
-    //
-    // Rebuild state to meta:tip if possible. If not, fall back to the best tip
-    // for which we *definitely* have block bytes (as seen in blocks tree) AND
-    // a header index (so we can compare chainwork deterministically).
+    let canon_tip = get_tip(db).context("get_tip (journal-less)")?;
 
-match canon_tip {
-    Some(t) => {
-        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
-            println!("[reorg] recovery(journal-less): rebuilding to canon tip {}", hex32(&t));
-            rebuild_state_to_tip(db, &t, mempool)
-                .context("journal-less rebuild_state_to_tip(canon tip)")?;
-            flush_state_step(db).ok();
-        } else {
-            println!(
-                "[reorg] recovery(journal-less): canon tip {} not rebuildable; leaving state unchanged",
-                hex32(&t)
-            );
+    match canon_tip {
+        Some(t) => {
+            if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+                println!(
+                    "[reorg] recovery(journal-less): rebuilding to canon tip {}",
+                    hex32(&t)
+                );
+                rebuild_state_to_tip(db, &t, mempool)
+                    .context("journal-less rebuild_state_to_tip(canon tip)")?;
+                flush_state_step(db).ok();
+            } else {
+                println!(
+                    "[reorg] recovery(journal-less): canon tip {} not rebuildable; leaving state unchanged",
+                    hex32(&t)
+                );
+            }
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
         }
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
-    }
-    None => {
-        // true cold-start: no canonical commitment, choose best tip w/ bytes
-        if let Some(best_hi) = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes (cold-start)")? {
-            println!(
-                "[reorg] recovery(journal-less): cold-start rebuild to best tip with bytes {} (h={}, w={})",
-                hex32(&best_hi.hash),
-                best_hi.height,
-                best_hi.chainwork
-            );
-            rebuild_state_to_tip(db, &best_hi.hash, mempool)
-                .context("journal-less rebuild_state_to_tip(best_tip_with_block_bytes)")?;
-            flush_state_step(db).ok();
-        } else {
-            println!("[reorg] recovery(journal-less): cold-start, no blocks available");
+        None => {
+            if let Some(best_hi) =
+                best_tip_with_block_bytes(db).context("best_tip_with_block_bytes (cold-start)")?
+            {
+                println!(
+                    "[reorg] recovery(journal-less): cold-start rebuild to best tip with bytes {} (h={}, w={})",
+                    hex32(&best_hi.hash),
+                    best_hi.height,
+                    best_hi.chainwork
+                );
+                rebuild_state_to_tip(db, &best_hi.hash, mempool)
+                    .context("journal-less rebuild_state_to_tip(best_tip_with_block_bytes)")?;
+                flush_state_step(db).ok();
+            } else {
+                println!("[reorg] recovery(journal-less): cold-start, no blocks available");
+            }
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
         }
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
     }
-}
+};
 
 
     println!(
@@ -1006,5 +1005,3 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     mempool_prune_if_present(db, mempool);
     Ok(())
 }
-}
-                      
