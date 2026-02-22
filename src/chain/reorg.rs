@@ -502,20 +502,15 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
 
     // Fall back: choose best header that we have *block bytes* for (blocks tree),
     // not arbitrary hdr tips that may never have been canon-committed.
-    if let Some(best_hi) = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes")? {
-        println!(
-            "[reorg] recovery(journal-less): rebuilding to best tip with block bytes {} (h={}, w={})",
-            hex32(&best_hi.hash),
-            best_hi.height,
-            best_hi.chainwork
-        );
-        rebuild_state_to_tip(db, &best_hi.hash, mempool)
-            .context("journal-less rebuild_state_to_tip(best_tip_with_block_bytes)")?;
-        flush_state_step(db).ok();
-        mempool_prune_if_present(db, mempool);
-    }
 
-    return Ok(());
+// If we reach here and meta:tip exists but is not rebuildable,
+// we DO NOT override it. meta:tip is the canonical commitment.
+// Leave state as-is and return.
+println!(
+    "[reorg] recovery(journal-less): meta:tip not rebuildable; leaving state unchanged"
+);
+mempool_prune_if_present(db, mempool);
+return Ok(());
 };
 
 
