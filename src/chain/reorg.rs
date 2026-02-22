@@ -517,42 +517,40 @@ if !plausible {
 }
 
 if !matches {
-    // Tip drifted relative to journal. Do NOT continue with incremental journal logic.
-    // Converge deterministically to what the journal intended.
+    // Journal is plausible structurally, but does NOT align with the currently-committed tip state.
+    // In crash fuzz, this happens with stale journals from abandoned reorg attempts.
+    // Treat it as stale: clear it and fall back to journal-less recovery (meta:tip).
     println!(
-        "[reorg] recovery: journal plausible but tip drifted (cur_tip={:?}); converging to journal.new_tip={}",
+        "[reorg] recovery: stale journal (cur_tip={:?}, j.old_tip={}, j.new_tip={}, j.ancestor={}); clearing and falling back to meta:tip",
         cur_tip.as_ref().map(|h| hex32(h)),
-        hex32(&j.new_tip)
-    );
-
-    // 1) Try rebuild directly to intended new_tip.
-    if can_rebuild_to_tip(db, &j.new_tip).unwrap_or(false) {
-        rebuild_state_to_tip(db, &j.new_tip, mempool)
-            .context("recovery: rebuild_state_to_tip(j.new_tip) after tip drift")?;
-        journal_clear(db).ok();
-        flush_state_step(db).ok();
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
-    }
-
-    // 2) If we can't rebuild to new_tip, try ancestor (still deterministic).
-    if can_rebuild_to_tip(db, &j.ancestor).unwrap_or(false) {
-        rebuild_state_to_tip(db, &j.ancestor, mempool)
-            .context("recovery: rebuild_state_to_tip(j.ancestor) after tip drift")?;
-        journal_clear(db).ok();
-        flush_state_step(db).ok();
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
-    }
-
-    // 3) Last resort: clear journal and do nothing else (caller will continue normal startup).
-    println!(
-        "[reorg] recovery: cannot rebuild to journal new_tip {} or ancestor {}; clearing journal",
+        hex32(&j.old_tip),
         hex32(&j.new_tip),
         hex32(&j.ancestor),
     );
+
     journal_clear(db).ok();
     flush_state_step(db).ok();
+
+    // Now do the same logic as the journal-less path:
+    let canon_tip = get_tip(db).context("get_tip (after stale journal clear)")?;
+    if let Some(t) = canon_tip {
+        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+            rebuild_state_to_tip(db, &t, mempool)
+                .context("recovery: rebuild_state_to_tip(canon tip) after stale journal clear")?;
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
+        }
+    }
+
+    if let Some(best_hi) = best_tip_with_block_bytes(db).context("best_tip_with_block_bytes (after stale journal clear)")? {
+        rebuild_state_to_tip(db, &best_hi.hash, mempool)
+            .context("recovery: rebuild_state_to_tip(best_tip_with_block_bytes) after stale journal clear")?;
+        flush_state_step(db).ok();
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+
     mempool_prune_if_present(db, mempool);
     return Ok(());
 }
