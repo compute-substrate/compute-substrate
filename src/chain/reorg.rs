@@ -569,60 +569,77 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
     // Must not depend on hdr durability.
     // Select canonical tip using block bytes only (prev pointers) and work_from_bits(bits).
 
-    println!("[reorg] recovery(journal-less): selecting canonical tip from blocks-only chainwork");
+    println!("[reorg] recovery(journal-less): selecting canonical tip");
 
-let meta_tip = get_tip(db).ok().flatten();
-println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
+    // Read meta tip (what the DB thinks is tip)
+    let meta_tip = get_tip(db).ok().flatten();
 
-let hdr_best = best_header_tip(db).ok().flatten();
-println!(
-    "[reorg] journal-less: hdr_best={}",
-    match &hdr_best {
-        Some(hi) => format!("{} (h={}, w={})", hex32(&hi.hash), hi.height, hi.chainwork),
-        None => "None".to_string(),
-    }
-);
+    // Read best header-indexed tip (fork-choice), if hdr survived
+    let hdr_best = best_header_tip(db).ok().flatten();
 
+    // Blocks-only best (last resort)
     let best = best_tip_from_blocks_only(db)
         .context("journal-less best_tip_from_blocks_only")?;
 
+    // 1) If meta tip exists and is rebuildable, rebuild to it.
+    if let Some(t) = meta_tip {
+        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+            println!("[reorg] journal-less: rebuilding to meta_tip {}", hex32(&t));
+            rebuild_state_to_tip(db, &t, mempool)
+                .context("journal-less rebuild_state_to_tip(meta_tip)")?;
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
+        } else {
+            println!("[reorg] journal-less: meta_tip not rebuildable {}", hex32(&t));
+        }
+    } else {
+        println!("[reorg] journal-less: meta_tip=None");
+    }
+
+    // 2) Else if hdr has a best tip, rebuild to it (if rebuildable by blocks).
+    if let Some(hi) = hdr_best {
+        if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
+            println!(
+                "[reorg] journal-less: rebuilding to hdr_best {} (h={}, w={})",
+                hex32(&hi.hash),
+                hi.height,
+                hi.chainwork
+            );
+            rebuild_state_to_tip(db, &hi.hash, mempool)
+                .context("journal-less rebuild_state_to_tip(hdr_best)")?;
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+            return Ok(());
+        } else {
+            println!(
+                "[reorg] journal-less: hdr_best not rebuildable {}",
+                hex32(&hi.hash)
+            );
+        }
+    } else {
+        println!("[reorg] journal-less: hdr_best=None");
+    }
+
+    // 3) Else fall back to blocks-only best.
     match best {
         Some((best_hash, h, w)) => {
             println!(
-                "[reorg] recovery(journal-less): rebuilding to best tip {} (h={}, w={})",
+                "[reorg] journal-less: rebuilding to blocks_only_best {} (h={}, w={})",
                 hex32(&best_hash),
                 h,
                 w
             );
-
-println!(
-    "[reorg] journal-less: blocks_only_best={}",
-    match &best {
-        Some((h, ht, cw)) => format!("{} (h={}, w={})", hex32(h), ht, cw),
-        None => "None".to_string(),
-    }
-);
-
-// If meta tip exists, see if we can rebuild to it
-if let Some(t) = meta_tip {
-    let ok = can_rebuild_to_tip(db, &t).unwrap_or(false);
-    println!("[reorg] journal-less: can_rebuild_to_meta_tip={} tip={}", ok, hex32(&t));
-}
-
             rebuild_state_to_tip(db, &best_hash, mempool)
-                .context("journal-less rebuild_state_to_tip(best blocks-only)")?;
-
+                .context("journal-less rebuild_state_to_tip(blocks_only_best)")?;
             flush_state_step(db).ok();
         }
-        None => {
-            println!("[reorg] recovery(journal-less): no rebuildable blocks found");
-        }
+        None => println!("[reorg] journal-less: no rebuildable blocks found"),
     }
 
     mempool_prune_if_present(db, mempool);
     return Ok(());
 };
-
 
     println!(
         "[reorg] recovery: found in-progress reorg old_tip={} new_tip={} ancestor={} phase={:?} cursor={} seq={}",
