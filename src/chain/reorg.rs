@@ -681,6 +681,30 @@ match chain_to_tip_from_hdr(db, &t) {
         j.seq
     );
 
+// DEBUG: what chains do we have for the journal targets?
+let meta_tip_dbg = get_tip(db).ok().flatten();
+println!("[reorg] recovery(journal): meta_tip={}", fmt_opt32(meta_tip_dbg));
+
+println!("[reorg] recovery(journal): j.new_tip={}", hex32(&j.new_tip));
+match chain_to_tip_from_blocks(db, &j.new_tip) {
+    Ok(chain) => println!("[reorg] j.new_tip blocks-chain len={}", chain.len()),
+    Err(e) => println!("[reorg] j.new_tip blocks-chain FAIL: {e:#}"),
+}
+match chain_to_tip_from_hdr(db, &j.new_tip) {
+    Ok(chain) => println!("[reorg] j.new_tip hdr-chain len={}", chain.len()),
+    Err(e) => println!("[reorg] j.new_tip hdr-chain FAIL: {e:#}"),
+}
+
+println!("[reorg] recovery(journal): j.ancestor={}", hex32(&j.ancestor));
+match chain_to_tip_from_blocks(db, &j.ancestor) {
+    Ok(chain) => println!("[reorg] j.ancestor blocks-chain len={}", chain.len()),
+    Err(e) => println!("[reorg] j.ancestor blocks-chain FAIL: {e:#}"),
+}
+match chain_to_tip_from_hdr(db, &j.ancestor) {
+    Ok(chain) => println!("[reorg] j.ancestor hdr-chain len={}", chain.len()),
+    Err(e) => println!("[reorg] j.ancestor hdr-chain FAIL: {e:#}"),
+}
+
 let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
 
 
@@ -728,6 +752,17 @@ if !matches {
         mempool_prune_if_present(db, mempool);
         return Ok(());
     }
+
+println!(
+    "[reorg] recovery(journal): can_rebuild new_tip={} -> {:?}",
+    hex32(&j.new_tip),
+    can_rebuild_to_tip(db, &j.new_tip)
+);
+println!(
+    "[reorg] recovery(journal): can_rebuild ancestor={} -> {:?}",
+    hex32(&j.ancestor),
+    can_rebuild_to_tip(db, &j.ancestor)
+);
 
     // ✅ Deterministic recovery order, but now rebuild does NOT require hdr.
     if can_rebuild_to_tip(db, &j.new_tip).context("recover can_rebuild_to_tip(new_tip)")? {
