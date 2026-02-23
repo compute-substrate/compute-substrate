@@ -603,6 +603,16 @@ println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
 
     // 1) If meta tip exists and is rebuildable, rebuild to it.
     if let Some(t) = meta_tip {
+
+match chain_to_tip_from_blocks(db, &t) {
+    Ok(chain) => println!("[reorg] meta_tip blocks-chain len={}", chain.len()),
+    Err(e) => println!("[reorg] meta_tip blocks-chain FAIL: {e:#}"),
+}
+match chain_to_tip_from_hdr(db, &t) {
+    Ok(chain) => println!("[reorg] meta_tip hdr-chain len={}", chain.len()),
+    Err(e) => println!("[reorg] meta_tip hdr-chain FAIL: {e:#}"),
+}
+
         if can_rebuild_to_tip(db, &t).unwrap_or(false) {
             println!("[reorg] journal-less: rebuilding to meta_tip {}", hex32(&t));
             rebuild_state_to_tip(db, &t, mempool)
