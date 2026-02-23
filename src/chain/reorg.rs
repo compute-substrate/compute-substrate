@@ -775,36 +775,6 @@ let cur_tip = get_tip(db).context("get_tip(recover pre-guard)")?;
 
 
 
-
-// after reading j and cur_tip...
-
-// after reading j and cur_tip...
-let plausible = journal_structurally_plausible(&j);
-
-let matches = journal_matches_current_tip_state(&cur_tip, &j);
-
-if !plausible {
-    // Truly corrupted -> clear + fall back to journal-less handling.
-    println!("[reorg] recovery: journal corrupted; clearing and falling back");
-    journal_clear(db).ok();
-    flush_state_step(db).ok();
-    mempool_prune_if_present(db, mempool);
-    return Ok(());
-}
-
-
-if !matches {
-    println!(
-        "[reorg] recovery: cur_tip not on journal path; continuing journal-driven recovery anyway (cur_tip={:?})",
-        cur_tip.as_ref().map(|h| hex32(h))
-    );
-    // Do NOT clear. Continue.
-}
-
-
-
-
-
     // Stale journal: already at new_tip.
     if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
         println!(
@@ -816,18 +786,6 @@ if !matches {
         mempool_prune_if_present(db, mempool);
         return Ok(());
     }
-
-println!(
-    "[reorg] recovery(journal): can_rebuild new_tip={} -> {:?}",
-    hex32(&j.new_tip),
-    can_rebuild_to_tip(db, &j.new_tip)
-);
-println!(
-    "[reorg] recovery(journal): can_rebuild ancestor={} -> {:?}",
-    hex32(&j.ancestor),
-    can_rebuild_to_tip(db, &j.ancestor)
-);
-
 
 eprintln!("[reorg] ENTER journal-present recovery branch");
 
