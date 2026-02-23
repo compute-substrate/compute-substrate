@@ -10,6 +10,7 @@ use crate::state::app_state::epoch_of;
 use crate::state::db::{get_tip, k_bad, k_block, k_undo, set_tip, Stores};
 use crate::state::utxo::{undo_block, validate_and_apply_block};
 use crate::types::{Block, Hash32};
+use std::collections::HashMap;
 
 fn hex32(h: &Hash32) -> String {
     format!("0x{}", hex::encode(h))
@@ -49,6 +50,93 @@ fn hash_from_block_key(k: &[u8]) -> Option<Hash32> {
         None
     }
 }
+
+// ----------------------
+// Best tip selection WITHOUT hdr (blocks-only)
+// ----------------------
+//
+// Journal-less crash recovery must not depend on hdr durability.
+// We derive (height, chainwork) by walking Block.header.prev using block bytes,
+// and compute work via canonical pow::work_from_bits(bits).
+//
+// Any block whose ancestry cannot be resolved from bytes is ignored.
+
+fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>> {
+    // memo[hash] = Some((height, chainwork_to_here)) OR None while visiting (cycle guard)
+    let mut memo: HashMap<Hash32, Option<(u64, u128)>> = HashMap::new();
+
+    fn calc(
+        db: &Stores,
+        h: Hash32,
+        memo: &mut HashMap<Hash32, Option<(u64, u128)>>,
+    ) -> Result<Option<(u64, u128)>> {
+        if let Some(v) = memo.get(&h) {
+            return Ok(*v);
+        }
+
+        // mark visiting (cycle guard)
+        memo.insert(h, None);
+
+        let blk = match load_block(db, &h) {
+            Ok(b) => b,
+            Err(_) => {
+                memo.remove(&h);
+                return Ok(None);
+            }
+        };
+
+        let parent = blk.header.prev;
+
+        // canonical work increment (same as HeaderIndex)
+        let my_work = match crate::chain::pow::work_from_bits(blk.header.bits) {
+            Ok(w) => w,
+            Err(_) => {
+                memo.remove(&h);
+                return Ok(None);
+            }
+        };
+
+        // genesis terminator convention: prev == 0
+        if parent == [0u8; 32] {
+            let out = Some((0u64, my_work));
+            memo.insert(h, out);
+            return Ok(out);
+        }
+
+        // parent must exist (as bytes) to be rebuildable
+        let p = calc(db, parent, memo)?;
+        let out = match p {
+            Some((ph, pw)) => Some((ph + 1, pw.saturating_add(my_work))),
+            None => None,
+        };
+
+        memo.insert(h, out);
+        Ok(out)
+    }
+
+    let mut best: Option<(Hash32, u64, u128)> = None;
+
+    for kv in db.blocks.iter() {
+        let (k, _v) = kv.context("blocks.iter()")?;
+        let Some(h) = hash_from_block_key(&k) else { continue };
+
+        let Some((height, cw)) = calc(db, h, &mut memo)? else { continue };
+
+        best = match best {
+            None => Some((h, height, cw)),
+            Some((bh, bhgt, bcw)) => {
+                if cw > bcw || (cw == bcw && height > bhgt) {
+                    Some((h, height, cw))
+                } else {
+                    Some((bh, bhgt, bcw))
+                }
+            }
+        };
+    }
+
+    Ok(best)
+}
+
 
 fn best_tip_with_block_bytes(db: &Stores) -> Result<Option<HeaderIndex>> {
     let mut best: Option<HeaderIndex> = None;
@@ -444,33 +532,36 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
     // ------------------------------
     // JOURNAL-LESS RECOVERY
     // ------------------------------
+    //
+    // Must not depend on hdr durability.
+    // Select canonical tip using block bytes only (prev pointers) and work_from_bits(bits).
 
-println!("[reorg] recovery(journal-less): selecting canonical tip from chainwork");
+    println!("[reorg] recovery(journal-less): selecting canonical tip from blocks-only chainwork");
 
-let best = best_tip_with_block_bytes(db)
-    .context("journal-less best_tip_with_block_bytes")?;
+    let best = best_tip_from_blocks_only(db)
+        .context("journal-less best_tip_from_blocks_only")?;
 
-match best {
-    Some(best_hi) => {
-        println!(
-            "[reorg] recovery(journal-less): rebuilding to best chainwork tip {} (h={}, w={})",
-            hex32(&best_hi.hash),
-            best_hi.height,
-            best_hi.chainwork
-        );
+    match best {
+        Some((best_hash, h, w)) => {
+            println!(
+                "[reorg] recovery(journal-less): rebuilding to best tip {} (h={}, w={})",
+                hex32(&best_hash),
+                h,
+                w
+            );
 
-        rebuild_state_to_tip(db, &best_hi.hash, mempool)
-            .context("journal-less rebuild_state_to_tip(best chainwork)")?;
+            rebuild_state_to_tip(db, &best_hash, mempool)
+                .context("journal-less rebuild_state_to_tip(best blocks-only)")?;
 
-        flush_state_step(db).ok();
+            flush_state_step(db).ok();
+        }
+        None => {
+            println!("[reorg] recovery(journal-less): no rebuildable blocks found");
+        }
     }
-    None => {
-        println!("[reorg] recovery(journal-less): no blocks found");
-    }
-}
 
-mempool_prune_if_present(db, mempool);
-return Ok(());
+    mempool_prune_if_present(db, mempool);
+    return Ok(());
 };
 
 
