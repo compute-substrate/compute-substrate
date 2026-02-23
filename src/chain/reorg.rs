@@ -143,6 +143,17 @@ fn pre_tip_fence(db: &Stores, bh: &Hash32) -> Result<()> {
     Ok(())
 }
 
+fn set_tip_durable(db: &Stores, h: &Hash32, ctx: &'static str) -> Result<()> {
+    // (Optional but recommended) ensure block bytes durable before tip can point to it.
+    // If you call this in contexts where block bytes might not exist (e.g. drive_tip_down_to),
+    // remove this line there.
+    // pre_tip_fence(db, h).with_context(|| format!("{ctx}: pre_tip_fence"))?;
+
+    set_tip(db, h).with_context(|| format!("{ctx}: set_tip {}", hex32(h)))?;
+    flush_state_step(db).with_context(|| format!("{ctx}: flush_state_step"))?;
+    Ok(())
+}
+
 // Tip helpers
 fn tip_is(db: &Stores, h: &Hash32) -> Result<bool> {
     Ok(get_tip(db)?.map(|t| t == *h).unwrap_or(false))
@@ -415,8 +426,8 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 
         mempool_remove_mined(mempool, &blk);
 
-        set_tip(db, bh).with_context(|| format!("rebuild set_tip {}", hex32(bh)))?;
-        flush_state_step(db).with_context(|| format!("rebuild flush step {}", i))?;
+set_tip_durable(db, bh, "rebuild")?;
+
     }
 
     Ok(())
@@ -568,17 +579,18 @@ if !matches {
                 mempool_remove_mined(mempool, &blk);
 
                 // ✅ NEW: ensure body durable before advancing tip
-                pre_tip_fence(db, bh).with_context(|| format!("recover pre_tip_fence(rebuild->ancestor apply) {}", i))?;
 
-                set_tip(db, bh).with_context(|| format!("recover set_tip {}", hex32(bh)))?;
-                flush_state_step(db).with_context(|| format!("recover flush apply step {}", i))?;
+pre_tip_fence(db, bh)
+    .with_context(|| format!("recover pre_tip_fence {}", i))?;
+set_tip_durable(db, bh, "recover apply")?;
+
             }
 
             // ✅ NEW: fence final new_tip too
             pre_tip_fence(db, &j.new_tip).ok();
 
-            set_tip(db, &j.new_tip).context("recover final set_tip(new_tip)")?;
-            flush_state_step(db).context("recover flush_state_step(final set new_tip)")?;
+set_tip_durable(db, &j.new_tip, "recover final new_tip")?;
+
         } else {
             println!(
                 "[reorg] recovery: missing block bytes on apply path; leaving tip at ancestor {}",
@@ -720,10 +732,10 @@ if !matches {
         mempool_remove_mined(mempool, &blk);
 
         // ✅ NEW: ensure body durable before advancing tip
-        pre_tip_fence(db, bh).with_context(|| format!("recover pre_tip_fence(journal apply) {}", i))?;
 
-        set_tip(db, bh).with_context(|| format!("recover set_tip {}", hex32(bh)))?;
-        flush_state_step(db).context("recover flush_state_step(apply)")?;
+pre_tip_fence(db, bh)
+    .with_context(|| format!("recover pre_tip_fence {}", i))?;
+set_tip_durable(db, bh, "recover apply")?;
 
         j.cursor = (i as u64) + 1;
         failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
@@ -734,8 +746,7 @@ if !matches {
     // ✅ NEW: fence final new_tip too
     pre_tip_fence(db, &j.new_tip).ok();
 
-    set_tip(db, &j.new_tip).context("recover final set_tip(new_tip)")?;
-    flush_state_step(db).context("recover flush_state_step(final set new_tip)")?;
+set_tip_durable(db, &j.new_tip, "recover final new_tip")?;
 
     failpoints::hit("recover:pre_journal_clear");
     journal_clear(db).context("recover journal_clear")?;
@@ -907,10 +918,11 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             mempool_remove_mined(mempool, &blk);
 
             // ✅ NEW: ensure applied head body durable before setting tip
-            pre_tip_fence(db, bh).with_context(|| format!("apply pre_tip_fence {}", i))?;
 
-            set_tip(db, bh).with_context(|| format!("[reorg] set_tip {}", hex32(bh)))?;
-            flush_state_step(db).context("flush_state_step(apply)")?;
+pre_tip_fence(db, bh)
+    .with_context(|| format!("apply pre_tip_fence {}", i))?;
+
+set_tip_durable(db, bh, "apply")?;
 
             applied_new.push(*bh);
 
@@ -959,10 +971,11 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             mempool_remove_mined(mempool, &blk);
 
             // ✅ NEW: fence before advancing tip in rollback replay too
-            pre_tip_fence(db, bh).with_context(|| format!("rollback reapply_old pre_tip_fence {}", i))?;
 
-            set_tip(db, bh).with_context(|| format!("[reorg] rollback set_tip(old {})", hex32(bh)))?;
-            flush_state_step(db).context("rollback flush_state_step(reapply old)")?;
+pre_tip_fence(db, bh)
+    .with_context(|| format!("rollback reapply_old pre_tip_fence {}", i))?;
+set_tip_durable(db, bh, "rollback reapply_old")?;
+
         }
 
         set_tip(db, &old_tip).context("[reorg] rollback final set_tip(old_tip)")?;
@@ -977,10 +990,9 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     }
 
     // ✅ NEW: fence final new_tip before setting tip to it (paranoia)
-    pre_tip_fence(db, new_tip).ok();
 
-    set_tip(db, new_tip).context("[reorg] final set_tip(new_tip)")?;
-    flush_state_step(db).context("flush_state_step(final set new_tip)")?;
+pre_tip_fence(db, new_tip).ok();
+set_tip_durable(db, new_tip, "final new_tip")?;
 
     let final_tip = get_tip(db).context("get_tip(final)")?.unwrap_or([0u8; 32]);
     if final_tip != *new_tip {
