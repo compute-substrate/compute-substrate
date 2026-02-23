@@ -16,6 +16,13 @@ fn hex32(h: &Hash32) -> String {
     format!("0x{}", hex::encode(h))
 }
 
+fn fmt_opt32(x: Option<Hash32>) -> String {
+    match x {
+        Some(h) => hex32(&h),
+        None => "None".to_string(),
+    }
+}
+
 fn load_block(db: &Stores, hash: &Hash32) -> Result<Block> {
     let Some(v) = db
         .blocks
@@ -538,6 +545,18 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
 
     println!("[reorg] recovery(journal-less): selecting canonical tip from blocks-only chainwork");
 
+let meta_tip = get_tip(db).ok().flatten();
+println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
+
+let hdr_best = best_header_tip(db).ok().flatten();
+println!(
+    "[reorg] journal-less: hdr_best={}",
+    match &hdr_best {
+        Some(hi) => format!("{} (h={}, w={})", hex32(&hi.hash), hi.height, hi.chainwork),
+        None => "None".to_string(),
+    }
+);
+
     let best = best_tip_from_blocks_only(db)
         .context("journal-less best_tip_from_blocks_only")?;
 
@@ -549,6 +568,20 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
                 h,
                 w
             );
+
+println!(
+    "[reorg] journal-less: blocks_only_best={}",
+    match &best {
+        Some((h, ht, cw)) => format!("{} (h={}, w={})", hex32(h), ht, cw),
+        None => "None".to_string(),
+    }
+);
+
+// If meta tip exists, see if we can rebuild to it
+if let Some(t) = meta_tip {
+    let ok = can_rebuild_to_tip(db, &t).unwrap_or(false);
+    println!("[reorg] journal-less: can_rebuild_to_meta_tip={} tip={}", ok, hex32(&t));
+}
 
             rebuild_state_to_tip(db, &best_hash, mempool)
                 .context("journal-less rebuild_state_to_tip(best blocks-only)")?;
