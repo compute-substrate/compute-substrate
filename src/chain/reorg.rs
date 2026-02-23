@@ -579,7 +579,12 @@ set_tip_durable(db, bh, "rebuild")?;
 
 pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
+eprintln!("[reorg] ENTER recover_if_needed");
+
 let Some(mut j) = journal_read(db).context("journal_read")? else {
+
+eprintln!("[reorg] ENTER journal-less recovery branch");
+
     // ------------------------------
     // JOURNAL-LESS RECOVERY
     // ------------------------------
@@ -636,6 +641,9 @@ match chain_to_tip_from_hdr(db, &t) {
                 hi.height,
                 hi.chainwork
             );
+
+eprintln!("[reorg] ENTER journal-present recovery branch");
+
             rebuild_state_to_tip(db, &hi.hash, mempool)
                 .context("journal-less rebuild_state_to_tip(hdr_best)")?;
             flush_state_step(db).ok();
