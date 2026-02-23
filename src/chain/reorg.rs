@@ -32,6 +32,11 @@ fn load_block(db: &Stores, hash: &Hash32) -> Result<Block> {
         bail!("missing block bytes for {}", hex32(hash));
     };
 
+    crate::codec::consensus_bincode()
+        .deserialize::<Block>(&v)
+        .context("consensus_bincode::deserialize(Block)")
+}
+
 fn tip_on_journal_path(t: &Hash32, j: &ReorgJournal) -> bool {
     *t == j.old_tip
         || *t == j.ancestor
@@ -89,12 +94,6 @@ fn choose_resume_tip(db: &Stores, j: &ReorgJournal) -> Result<Hash32> {
         }
     }
     expected_tip_from_journal(db, j)
-}
-
-
-    crate::codec::consensus_bincode()
-        .deserialize::<Block>(&v)
-        .context("consensus_bincode::deserialize(Block)")
 }
 
 fn header_hash_matches_key(bh: &Hash32, blk: &Block) -> bool {
@@ -993,7 +992,7 @@ mempool_prune_if_present(db, mempool);
 
 println!("[reorg] recovery success: now tip={}", hex32(&j.new_tip));
 return Ok(());
-
+}
 
 // ----------------------
 // Main reorg
