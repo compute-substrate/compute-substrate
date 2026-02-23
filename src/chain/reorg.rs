@@ -32,6 +32,65 @@ fn load_block(db: &Stores, hash: &Hash32) -> Result<Block> {
         bail!("missing block bytes for {}", hex32(hash));
     };
 
+fn tip_on_journal_path(t: &Hash32, j: &ReorgJournal) -> bool {
+    *t == j.old_tip
+        || *t == j.ancestor
+        || *t == j.new_tip
+        || j.undo_path.iter().any(|h| h == t)
+        || j.apply_path.iter().any(|h| h == t)
+}
+
+/// Cursor semantics: number of steps already completed (next index).
+fn expected_tip_from_journal(db: &Stores, j: &ReorgJournal) -> Result<Hash32> {
+    match j.phase {
+        Phase::Undo => {
+            if j.cursor == 0 {
+                Ok(j.old_tip)
+            } else {
+                let idx = (j.cursor - 1) as usize;
+                if idx >= j.undo_path.len() {
+                    bail!(
+                        "expected_tip_from_journal: undo cursor out of range cursor={} len={}",
+                        j.cursor,
+                        j.undo_path.len()
+                    );
+                }
+                let bh = j.undo_path[idx];
+                let p = parent_of(db, &bh)
+                    .with_context(|| format!("expected_tip_from_journal parent_of(undo[{}])", idx))?;
+                Ok(p) // when idx==last, this should be ancestor
+            }
+        }
+        Phase::Apply => {
+            if j.cursor == 0 {
+                Ok(j.ancestor)
+            } else {
+                let idx = (j.cursor - 1) as usize;
+                if idx >= j.apply_path.len() {
+                    bail!(
+                        "expected_tip_from_journal: apply cursor out of range cursor={} len={}",
+                        j.cursor,
+                        j.apply_path.len()
+                    );
+                }
+                Ok(j.apply_path[idx])
+            }
+        }
+    }
+}
+
+/// Resume tip choice:
+/// 1) meta_tip if it's on journal path
+/// 2) else the expected tip from (phase,cursor)
+fn choose_resume_tip(db: &Stores, j: &ReorgJournal) -> Result<Hash32> {
+    if let Ok(Some(mt)) = get_tip(db) {
+        if tip_on_journal_path(&mt, j) {
+            return Ok(mt);
+        }
+    }
+    expected_tip_from_journal(db, j)
+}
+
 
     crate::codec::consensus_bincode()
         .deserialize::<Block>(&v)
@@ -642,8 +701,6 @@ match chain_to_tip_from_hdr(db, &t) {
                 hi.chainwork
             );
 
-eprintln!("[reorg] ENTER journal-present recovery branch");
-
             rebuild_state_to_tip(db, &hi.hash, mempool)
                 .context("journal-less rebuild_state_to_tip(hdr_best)")?;
             flush_state_step(db).ok();
@@ -772,216 +829,171 @@ println!(
     can_rebuild_to_tip(db, &j.ancestor)
 );
 
-    // ✅ Deterministic recovery order, but now rebuild does NOT require hdr.
-    if can_rebuild_to_tip(db, &j.new_tip).context("recover can_rebuild_to_tip(new_tip)")? {
-        rebuild_state_to_tip(db, &j.new_tip, mempool)
-            .context("recover rebuild_state_to_tip(rebuild->new_tip)")?;
-        journal_clear(db).ok();
-        flush_state_step(db).ok();
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
-    }
 
-    if can_rebuild_to_tip(db, &j.ancestor).context("recover can_rebuild_to_tip(ancestor)")? {
-        rebuild_state_to_tip(db, &j.ancestor, mempool)
-            .context("recover rebuild_state_to_tip(rebuild->ancestor)")?;
+eprintln!("[reorg] ENTER journal-present recovery branch");
 
-        let apply_path = j.apply_path.clone();
-        if ensure_apply_blocks_present(db, &apply_path, &j.new_tip)? {
-            // Apply forward using ONLY block bytes for parent alignment.
-            for (i, bh) in apply_path.iter().enumerate() {
-                let blk = load_block(db, bh).with_context(|| format!("recover load_block {}", hex32(bh)))?;
-
-                let height = if let Ok(Some(hi)) = get_hidx(db, bh) {
-                    hi.height
-                } else {
-                    let chain = chain_to_tip_from_blocks(db, bh)?;
-                    (chain.len().saturating_sub(1)) as u64
-                };
-
-                validate_and_apply_block(db, &blk, epoch_of(height), height)
-                    .with_context(|| format!("recover validate_and_apply_block {}", hex32(bh)))?;
-
-                mempool_remove_mined(mempool, &blk);
-
-                // ✅ NEW: ensure body durable before advancing tip
-
-pre_tip_fence(db, bh)
-    .with_context(|| format!("recover pre_tip_fence {}", i))?;
-set_tip_durable(db, bh, "recover apply")?;
-
-            }
-
-            // ✅ NEW: fence final new_tip too
-            pre_tip_fence(db, &j.new_tip).ok();
-
-set_tip_durable(db, &j.new_tip, "recover final new_tip")?;
-
-        } else {
-            println!(
-                "[reorg] recovery: missing block bytes on apply path; leaving tip at ancestor {}",
-                hex32(&j.ancestor)
-            );
-        }
-
-        journal_clear(db).ok();
-        flush_state_step(db).ok();
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
-    }
-
-    // ----- journal-driven fallback -----
-    let undo_path = j.undo_path.clone();
-    let apply_path = j.apply_path.clone();
-
-    j.phase = Phase::Undo;
-
-    for (i, bh) in undo_path.iter().enumerate() {
-        let expected_tip_after_undo = parent_of(db, bh)
-            .with_context(|| format!("recover expected_tip_after_undo parent_of {}", hex32(bh)))?;
-
-        if tip_is(db, &expected_tip_after_undo)? {
-            j.cursor = (i as u64) + 1;
-            jw(db, &mut j, "recover journal_write(skip_undo)")?;
-            continue;
-        }
-
-        failpoints::hit(&format!("recover:undo:{}:pre", i));
-
-        if tip_is(db, bh)? {
-            let r = undo_block_idempotent(db, bh);
-            if let Err(e) = r {
-                if is_missing_undo_err(&e) {
-                    println!(
-                        "[reorg] recovery: missing undo while undoing {}; falling back to rebuild",
-                        hex32(bh)
-                    );
-                    rebuild_state_to_tip(db, &j.new_tip, mempool)
-                        .context("recover rebuild_state_to_tip(missing undo during undo)")?;
-                    journal_clear(db).ok();
-                    flush_state_step(db).ok();
-                    mempool_prune_if_present(db, mempool);
-                    return Ok(());
-                }
-                return Err(e).context("recover undo_block_idempotent")?;
-            }
-
-            set_tip(db, &expected_tip_after_undo)
-                .with_context(|| format!("recover set_tip(parent of {})", hex32(bh)))?;
-            flush_state_step(db).context("recover flush_state_step(undo)")?;
-        } else {
-            break;
-        }
-
-        j.cursor = (i as u64) + 1;
-        failpoints::hit(&format!("recover:undo:{}:pre_journal", i));
-        jw(db, &mut j, "recover journal_write(progress_undo)")?;
-        failpoints::hit(&format!("recover:undo:{}:post_journal", i));
-    }
-
-    if !tip_is(db, &j.ancestor)? {
-        let r = drive_tip_down_to(db, &j.ancestor);
-        if let Err(e) = r {
-            if is_missing_undo_err(&e) {
-                println!(
-                    "[reorg] recovery: missing undo while driving down; falling back to rebuild"
-                );
-                rebuild_state_to_tip(db, &j.new_tip, mempool)
-                    .context("recover rebuild_state_to_tip(missing undo drive_down)")?;
-                journal_clear(db).ok();
-                flush_state_step(db).ok();
-                mempool_prune_if_present(db, mempool);
-                return Ok(());
-            }
-            return Err(e).context("recover drive_tip_down_to(ancestor)")?;
-        }
-    }
-
+let cur_tip = get_tip(db).context("get_tip(recover)")?;
+let plausible = journal_structurally_plausible(&j);
+if !plausible {
+    println!("[reorg] recovery: journal corrupted; clearing and falling back");
+    journal_clear(db).ok();
+    flush_state_step(db).ok();
     mempool_prune_if_present(db, mempool);
+    return Ok(());
+}
 
-    if !ensure_apply_blocks_present(db, &apply_path, &j.new_tip)? {
-        println!(
-            "[reorg] recovery: missing block bytes for apply path; leaving tip at ancestor {}",
-            hex32(&j.ancestor)
-        );
-        return Ok(());
-    }
-
+// already-at-new_tip => clear
+if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
     println!(
-        "[reorg] recovery: applying new branch toward {}",
+        "[reorg] recovery: tip already at new_tip {}; clearing stale journal",
         hex32(&j.new_tip)
     );
+    journal_clear(db).context("recover journal_clear(stale)")?;
+    flush_state_step(db).context("recover flush after journal_clear(stale)")?;
+    mempool_prune_if_present(db, mempool);
+    return Ok(());
+}
 
+// 1) pick resume tip (meta tip if on-path, else expected tip from phase/cursor)
+let resume_tip = choose_resume_tip(db, &j).context("choose_resume_tip")?;
+println!(
+    "[reorg] recovery(journal): resume_tip={} (phase={:?} cursor={})",
+    hex32(&resume_tip),
+    j.phase,
+    j.cursor
+);
+
+// 2) rebuild to resume tip (NOT new_tip)
+if can_rebuild_to_tip(db, &resume_tip).context("recover can_rebuild_to_tip(resume_tip)")? {
+    rebuild_state_to_tip(db, &resume_tip, mempool)
+        .context("recover rebuild_state_to_tip(resume_tip)")?;
+} else {
+    // if the “resume” tip isn't rebuildable, fall back to ancestor if possible,
+    // else fall back to journal-less selection
+    if can_rebuild_to_tip(db, &j.ancestor).unwrap_or(false) {
+        rebuild_state_to_tip(db, &j.ancestor, mempool)
+            .context("recover rebuild_state_to_tip(ancestor fallback)")?;
+        // align journal to Apply/cursor=0 in this case
+        j.phase = Phase::Apply;
+        j.cursor = 0;
+        jw(db, &mut j, "recover journal_write(force_apply_at_ancestor)")?;
+    } else {
+        println!("[reorg] recovery(journal): cannot rebuild to resume_tip or ancestor; clearing journal and falling back");
+        journal_clear(db).ok();
+        flush_state_step(db).ok();
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+}
+
+// 3) resume reorg state machine step-by-step from (phase,cursor)
+
+// --- UNDO remainder ---
+if matches!(j.phase, Phase::Undo) {
+    // j.cursor = number of undo steps already completed
+    for i in (j.cursor as usize)..j.undo_path.len() {
+        let bh = j.undo_path[i];
+
+        // we should be at `bh` before undoing it; if not, rebuild to expected state for i
+        if !tip_is(db, &bh)? {
+            let expected = if i == 0 { j.old_tip } else { parent_of(db, &j.undo_path[i - 1])? };
+            // expected here is tip after i undos; but before undoing bh we need tip==bh.
+            // easiest: rebuild to bh (if possible) else rebuild to expected.
+            if can_rebuild_to_tip(db, &bh).unwrap_or(false) {
+                rebuild_state_to_tip(db, &bh, mempool)
+                    .with_context(|| format!("recover rebuild to undo bh {}", hex32(&bh)))?;
+            } else if can_rebuild_to_tip(db, &expected).unwrap_or(false) {
+                rebuild_state_to_tip(db, &expected, mempool)
+                    .with_context(|| format!("recover rebuild to undo expected {}", hex32(&expected)))?;
+                // if expected != bh, we can’t undo bh deterministically; bail to journal-less
+                // (this should be rare if resume_tip was chosen correctly)
+                if expected != bh {
+                    bail!(
+                        "recover undo misalignment: expected to be at {}, but bh={}",
+                        hex32(&expected),
+                        hex32(&bh)
+                    );
+                }
+            } else {
+                bail!("recover undo: cannot rebuild to bh or expected tip");
+            }
+        }
+
+        // undo bh
+        undo_block_idempotent(db, &bh)
+            .with_context(|| format!("recover undo_block_idempotent {}", hex32(&bh)))?;
+
+        let p = parent_of(db, &bh)
+            .with_context(|| format!("recover undo parent_of {}", hex32(&bh)))?;
+
+        set_tip(db, &p).with_context(|| format!("recover set_tip(parent of {})", hex32(&bh)))?;
+        flush_state_step(db).context("recover flush_state_step(undo)")?;
+
+        j.cursor = (i as u64) + 1;
+        jw(db, &mut j, "recover journal_write(progress_undo)")?;
+    }
+
+    // land exactly at ancestor
+    if !tip_is(db, &j.ancestor)? {
+        set_tip(db, &j.ancestor).context("recover set_tip(ancestor after undo)")?;
+        flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
+    }
+
+    // transition to apply
     j.phase = Phase::Apply;
     j.cursor = 0;
     jw(db, &mut j, "recover journal_write(start_apply)")?;
+}
 
-    for (i, bh) in apply_path.iter().enumerate() {
-        if tip_is(db, bh)? {
-            j.cursor = (i as u64) + 1;
-            jw(db, &mut j, "recover journal_write(skip_apply)")?;
-            continue;
-        }
+// --- APPLY remainder ---
+if !ensure_apply_blocks_present(db, &j.apply_path, &j.new_tip)? {
+    println!(
+        "[reorg] recovery: missing block bytes for apply path; leaving journal in-place (tip={})",
+        fmt_opt32(get_tip(db).ok().flatten())
+    );
+    mempool_prune_if_present(db, mempool);
+    return Ok(());
+}
 
-        let blk = load_block(db, bh).with_context(|| format!("recover load_block {}", hex32(bh)))?;
+// j.cursor = number of apply steps already completed
+for i in (j.cursor as usize)..j.apply_path.len() {
+    let bh = j.apply_path[i];
 
-        let height = if let Ok(Some(hi)) = get_hidx(db, bh) {
-            hi.height
-        } else {
-            let chain = chain_to_tip_from_blocks(db, bh)?;
-            (chain.len().saturating_sub(1)) as u64
-        };
-
-        failpoints::hit(&format!("recover:apply:{}:pre", i));
-
-        let r = validate_and_apply_block(db, &blk, epoch_of(height), height)
-            .with_context(|| format!("recover validate_and_apply_block {}", hex32(bh)));
-
-        if let Err(e) = r {
-            println!("[reorg] recovery: apply failed at {}: {e:#}", hex32(bh));
-
-            if !is_missing_block_bytes_err(&e) {
-                let _ = mark_bad(db, bh, "recovery apply failed");
-                let _ = mark_bad(db, &j.new_tip, "recovery apply path contains invalid block");
-            } else {
-                println!("[reorg] recovery: missing bytes; not marking bad");
-            }
-
-            rebuild_state_to_tip(db, &j.new_tip, mempool)
-                .context("recover rebuild_state_to_tip(apply failed)")?;
-            journal_clear(db).ok();
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            return Ok(());
-        }
-
-        mempool_remove_mined(mempool, &blk);
-
-        // ✅ NEW: ensure body durable before advancing tip
-
-pre_tip_fence(db, bh)
-    .with_context(|| format!("recover pre_tip_fence {}", i))?;
-set_tip_durable(db, bh, "recover apply")?;
-
+    // if already at bh, just advance cursor
+    if tip_is(db, &bh)? {
         j.cursor = (i as u64) + 1;
-        failpoints::hit(&format!("recover:apply:{}:pre_journal", i));
-        jw(db, &mut j, "recover journal_write(progress_apply)")?;
-        failpoints::hit(&format!("recover:apply:{}:post_journal", i));
+        jw(db, &mut j, "recover journal_write(skip_apply)")?;
+        continue;
     }
 
-    // ✅ NEW: fence final new_tip too
-    pre_tip_fence(db, &j.new_tip).ok();
+    let blk = load_block(db, &bh).with_context(|| format!("recover load_block {}", hex32(&bh)))?;
+    let height = if let Ok(Some(hi)) = get_hidx(db, &bh) { hi.height }
+                 else { (chain_to_tip_from_blocks(db, &bh)?.len().saturating_sub(1)) as u64 };
 
-set_tip_durable(db, &j.new_tip, "recover final new_tip")?;
+    validate_and_apply_block(db, &blk, epoch_of(height), height)
+        .with_context(|| format!("recover validate_and_apply_block {}", hex32(&bh)))?;
 
-    failpoints::hit("recover:pre_journal_clear");
-    journal_clear(db).context("recover journal_clear")?;
-    flush_state_step(db).context("recover flush after journal_clear")?;
+    mempool_remove_mined(mempool, &blk);
 
-    mempool_prune_if_present(db, mempool);
-    println!("[reorg] recovery success: now tip={}", hex32(&j.new_tip));
-    Ok(())
+    pre_tip_fence(db, &bh).with_context(|| format!("recover pre_tip_fence apply {}", i))?;
+    set_tip_durable(db, &bh, "recover apply")?;
+
+    j.cursor = (i as u64) + 1;
+    jw(db, &mut j, "recover journal_write(progress_apply)")?;
 }
+
+// finish: must be at new_tip now
+if !tip_is(db, &j.new_tip)? {
+    set_tip_durable(db, &j.new_tip, "recover final new_tip")?;
+}
+
+journal_clear(db).context("recover journal_clear")?;
+flush_state_step(db).context("recover flush after journal_clear")?;
+mempool_prune_if_present(db, mempool);
+
+println!("[reorg] recovery success: now tip={}", hex32(&j.new_tip));
+return Ok(());
+
 
 // ----------------------
 // Main reorg
