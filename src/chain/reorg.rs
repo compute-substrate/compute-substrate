@@ -490,15 +490,21 @@ fn chain_to_tip_from_blocks(db: &Stores, tip: &Hash32) -> Result<Vec<Hash32>> {
 }
 
 fn can_rebuild_to_tip(db: &Stores, tip: &Hash32) -> Result<bool> {
-    // 1) Try hdr chain first, but do NOT treat failure as "not rebuildable".
-    // Crash fuzz can leave hdr incomplete while block bytes are complete.
+    // 1) Try hdr chain first.
+    // If hdr walk succeeds AND all block bytes exist -> rebuildable.
+    // If hdr walk succeeds BUT some bytes are missing -> FALL BACK to blocks chain.
     if let Ok(chain) = chain_to_tip_from_hdr(db, tip) {
+        let mut missing = false;
         for bh in &chain {
             if db.blocks.get(k_block(bh))?.is_none() {
-                return Ok(false);
+                missing = true;
+                break;
             }
         }
-        return Ok(true);
+        if !missing {
+            return Ok(true);
+        }
+        // else: fall through to blocks-walk
     }
 
     // 2) Fall back to block-bytes parent chain.
@@ -510,6 +516,7 @@ fn can_rebuild_to_tip(db: &Stores, tip: &Hash32) -> Result<bool> {
     }
     Ok(true)
 }
+
 
 fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempool>) -> Result<()> {
     println!(
@@ -573,6 +580,8 @@ let Some(mut j) = journal_read(db).context("journal_read")? else {
 
     // Read meta tip (what the DB thinks is tip)
     let meta_tip = get_tip(db).ok().flatten();
+
+println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
 
     // Read best header-indexed tip (fork-choice), if hdr survived
     let hdr_best = best_header_tip(db).ok().flatten();
