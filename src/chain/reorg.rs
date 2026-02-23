@@ -32,9 +32,29 @@ fn load_block(db: &Stores, hash: &Hash32) -> Result<Block> {
         bail!("missing block bytes for {}", hex32(hash));
     };
 
+
     crate::codec::consensus_bincode()
         .deserialize::<Block>(&v)
         .context("consensus_bincode::deserialize(Block)")
+}
+
+fn header_hash_matches_key(bh: &Hash32, blk: &Block) -> bool {
+    let hh = crate::chain::index::header_hash(&blk.header);
+    &hh == bh
+}
+
+fn header_min_valid(bh: &Hash32, blk: &Block) -> bool {
+    if !header_hash_matches_key(bh, blk) {
+        return false;
+    }
+    if !crate::chain::pow::bits_within_pow_limit(blk.header.bits) {
+        return false;
+    }
+    // pow_ok honors CSD_BYPASS_POW=1 in tests; otherwise strict.
+    if !crate::chain::pow::pow_ok(bh, blk.header.bits) {
+        return false;
+    }
+    true
 }
 
 fn is_missing_block_bytes_err(e: &anyhow::Error) -> bool {
@@ -84,13 +104,19 @@ fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>>
         // mark visiting (cycle guard)
         memo.insert(h, None);
 
-        let blk = match load_block(db, &h) {
-            Ok(b) => b,
-            Err(_) => {
-                memo.remove(&h);
-                return Ok(None);
-            }
-        };
+
+let blk = match load_block(db, &h) {
+    Ok(b) => b,
+    Err(_) => {
+        memo.remove(&h);
+        return Ok(None);
+    }
+};
+
+if !header_min_valid(&h, &blk) {
+    memo.remove(&h);
+    return Ok(None);
+}
 
         let parent = blk.header.prev;
 
