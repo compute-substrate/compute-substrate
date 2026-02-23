@@ -62,6 +62,25 @@ fn is_missing_block_bytes_err(e: &anyhow::Error) -> bool {
     s.contains("missing block bytes for 0x")
 }
 
+fn chain_to_tip_safe(db: &Stores, tip: &Hash32) -> Result<Vec<Hash32>> {
+    // Try hdr chain first, but only accept it if ALL block bytes exist.
+    if let Ok(chain) = chain_to_tip_from_hdr(db, tip) {
+        let mut missing = false;
+        for bh in &chain {
+            if db.blocks.get(k_block(bh))?.is_none() {
+                missing = true;
+                break;
+            }
+        }
+        if !missing {
+            return Ok(chain);
+        }
+    }
+
+    // Fallback: block-prev chain
+    chain_to_tip_from_blocks(db, tip)
+}
+
 fn is_missing_undo_err(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}");
     s.contains("missing undo")
@@ -525,17 +544,9 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
     );
 
     // Prefer hdr-based chain if possible, but FALL BACK to block chain if hdr chain is incomplete.
-    let chain = match chain_to_tip_from_hdr(db, target_tip) {
-        Ok(c) => c,
-        Err(e) => {
-            println!(
-                "[reorg] rebuild: hdr chain walk failed for {} ({}). Falling back to block-parent chain.",
-                hex32(target_tip),
-                e
-            );
-            chain_to_tip_from_blocks(db, target_tip).context("rebuild chain_to_tip_from_blocks")?
-        }
-    };
+
+let chain = chain_to_tip_safe(db, target_tip)
+    .with_context(|| format!("rebuild chain_to_tip_safe {}", hex32(target_tip)))?;
 
     db.utxo.clear().context("rebuild utxo.clear")?;
     db.utxo_meta.clear().context("rebuild utxo_meta.clear")?;
