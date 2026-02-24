@@ -643,38 +643,6 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
     Ok(())
 }
 
-fn infer_phase_cursor_from_tip(
-    db: &Stores,
-    j: &ReorgJournal,
-    tip: &Hash32,
-) -> Result<Option<(Phase, u64)>> {
-    // Undo start
-    if *tip == j.old_tip {
-        return Ok(Some((Phase::Undo, 0)));
-    }
-
-    // Apply start
-    if *tip == j.ancestor {
-        return Ok(Some((Phase::Apply, 0)));
-    }
-
-    // Undo phase: tip is parent(undo_path[i])
-    for (i, bh) in j.undo_path.iter().enumerate() {
-        let parent = parent_of(db, bh)?;
-        if &parent == tip {
-            return Ok(Some((Phase::Undo, (i as u64) + 1)));
-        }
-    }
-
-    // Apply phase: tip is apply_path[i]
-    for (i, bh) in j.apply_path.iter().enumerate() {
-        if bh == tip {
-            return Ok(Some((Phase::Apply, (i as u64) + 1)));
-        }
-    }
-
-    Ok(None)
-}
 
 // ----------------------
 // Crash recovery
