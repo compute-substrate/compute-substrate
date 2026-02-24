@@ -660,29 +660,6 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
     if let Some(mut j) = j_opt {
         eprintln!("[reorg] ENTER journal-present recovery branch");
 
-let meta_tip = get_tip(db)?.unwrap_or(Hash32::zero());
-
-if let Some((phase, cursor)) =
-    infer_phase_cursor_from_tip(db, &j, &meta_tip)?
-{
-    if phase != j.phase || cursor != j.cursor {
-        println!(
-            "[reorg] recovery: aligning journal to durable tip {} => phase={:?} cursor={}",
-            hex32(&meta_tip),
-            phase,
-            cursor
-        );
-
-        j.phase = phase;
-        j.cursor = cursor;
-        store_journal(db, &j)?;
-        db.flush()?;
-    }
-} else {
-    println!(
-        "[reorg] recovery: durable tip not on journal path, leaving journal unchanged"
-    );
-}
 
         if !journal_structurally_plausible(&j) {
             println!("[reorg] recovery: journal corrupted; clearing and falling back");
@@ -690,26 +667,28 @@ if let Some((phase, cursor)) =
             flush_state_step(db).ok();
             mempool_prune_if_present(db, mempool);
         } else {
-            // 1) Align journal to durable meta_tip
-            let meta_tip = get_tip(db).ok().flatten();
-            if let Some(mt) = meta_tip {
-                if tip_on_journal_path(&mt, &j) {
-                    if let Some((ph, cur)) = infer_phase_cursor_from_tip(db, &j, &mt)? {
-                        if ph != j.phase || cur != j.cursor {
-                            println!(
-                                "[reorg] recovery: aligning journal to meta_tip {} => phase={:?} cursor={}",
-                                hex32(&mt),
-                                ph,
-                                cur
-                            );
-                            j.phase = ph;
-                            j.cursor = cur;
-                            jw(db, &mut j, "recovery: align journal to meta_tip")?;
-                            flush_state_step(db).context("recovery: flush align journal")?;
-                        }
-                    }
-                }
+// 1) Align journal to durable meta_tip (prevents journal cursor getting ahead of durable tip)
+let meta_tip_opt = get_tip(db).context("recover get_tip(meta_tip)")?;
+if let Some(mt) = meta_tip_opt {
+    if tip_on_journal_path(&mt, &j) {
+        if let Some((ph, cur)) = infer_phase_cursor_from_tip(db, &j, &mt)? {
+            if ph != j.phase || cur != j.cursor {
+                println!(
+                    "[reorg] recovery: aligning journal to meta_tip {} => phase={:?} cursor={}",
+                    hex32(&mt),
+                    ph,
+                    cur
+                );
+                j.phase = ph;
+                j.cursor = cur;
+                jw(db, &mut j, "recovery: align journal to meta_tip")?;
+                flush_state_step(db).context("recovery: flush align journal")?;
             }
+        }
+    }
+} else {
+    println!("[reorg] recovery: meta_tip=None; leaving journal unchanged");
+}
 
             // 2) If already at new_tip, clear stale journal
             if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
