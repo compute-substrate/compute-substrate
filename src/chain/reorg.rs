@@ -938,7 +938,7 @@ match chain_to_tip_from_hdr(db, &t) {
 
     mempool_prune_if_present(db, mempool);
     return Ok(());
-};
+}
 
 // ----------------------
 // Main reorg
