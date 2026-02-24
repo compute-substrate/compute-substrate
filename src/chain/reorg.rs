@@ -85,14 +85,9 @@ fn expected_tip_from_journal(db: &Stores, j: &ReorgJournal) -> Result<Hash32> {
 }
 
 /// Resume tip choice:
-/// 1) meta_tip if it's on journal path
-/// 2) else the expected tip from (phase,cursor)
+/// Always trust the journal's (phase,cursor) semantics.
+/// meta_tip can be ahead/behind due to crash timing; journal is the intent log.
 fn choose_resume_tip(db: &Stores, j: &ReorgJournal) -> Result<Hash32> {
-    if let Ok(Some(mt)) = get_tip(db) {
-        if tip_on_journal_path(&mt, j) {
-            return Ok(mt);
-        }
-    }
     expected_tip_from_journal(db, j)
 }
 
@@ -345,7 +340,9 @@ fn set_tip_durable(db: &Stores, h: &Hash32, ctx: &'static str) -> Result<()> {
     // (Optional but recommended) ensure block bytes durable before tip can point to it.
     // If you call this in contexts where block bytes might not exist (e.g. drive_tip_down_to),
     // remove this line there.
-    // pre_tip_fence(db, h).with_context(|| format!("{ctx}: pre_tip_fence"))?;
+
+// Ensure the block bytes are present and durable *before* meta:tip can point to `h`.
+pre_tip_fence(db, h).with_context(|| format!("{ctx}: pre_tip_fence"))?;
 
     set_tip(db, h).with_context(|| format!("{ctx}: set_tip {}", hex32(h)))?;
     flush_state_step(db).with_context(|| format!("{ctx}: flush_state_step"))?;
@@ -520,8 +517,9 @@ fn drive_tip_down_to(db: &Stores, target: &Hash32) -> Result<()> {
         let p = parent_of(db, &tip)
             .with_context(|| format!("drive_tip_down_to parent_of(cur_tip {})", hex32(&tip)))?;
 
-        set_tip(db, &p).with_context(|| format!("drive_tip_down_to set_tip(parent of {})", hex32(&tip)))?;
-        flush_state_step(db).context("drive_tip_down_to flush(undo)")?;
+set_tip_durable(db, &p, "drive_tip_down_to")
+    .with_context(|| format!("drive_tip_down_to set_tip_durable(parent of {})", hex32(&tip)))?;
+
     }
 }
 
@@ -642,6 +640,40 @@ eprintln!("[reorg] ENTER recover_if_needed");
 let Some(mut j) = journal_read(db).context("journal_read")? else {
 
 eprintln!("[reorg] ENTER journal-less recovery branch");
+
+// ------------------------------
+// JOURNAL-PRESENT RECOVERY (CONSERVATIVE)
+// ------------------------------
+//
+// In crash-fuzz, "clean/replay" may abort the reorg attempt and remain on old_tip,
+// while a naïve recovery that continues the journal can incorrectly complete to new_tip.
+// To match clean semantics and keep startup safe, we always restore the last-known-good
+// canonical chain (old_tip), then clear the journal.
+//
+// A later fork-choice pass (normal node operation) can re-attempt the reorg if it is still valid.
+eprintln!(
+    "[reorg] recovery(journal): CONSERVATIVE restore to old_tip={} (new_tip={} ancestor={} phase={:?} cursor={})",
+    hex32(&j.old_tip),
+    hex32(&j.new_tip),
+    hex32(&j.ancestor),
+    j.phase,
+    j.cursor
+);
+
+// If old_tip is rebuildable from bytes, rebuild to it. Otherwise fall back to meta_tip if possible.
+if can_rebuild_to_tip(db, &j.old_tip).unwrap_or(false) {
+    rebuild_state_to_tip(db, &j.old_tip, mempool)
+        .context("recovery(journal): rebuild_state_to_tip(old_tip)")?;
+    journal_clear(db).context("recovery(journal): journal_clear")?;
+    flush_state_step(db).ok();
+    mempool_prune_if_present(db, mempool);
+    eprintln!("[reorg] recovery(journal) success: restored old_tip and cleared journal");
+    return Ok(());
+} else {
+    eprintln!(
+        "[reorg] recovery(journal): old_tip not rebuildable (missing bytes). Falling back to existing logic."
+    );
+}
 
     // ------------------------------
     // JOURNAL-LESS RECOVERY
