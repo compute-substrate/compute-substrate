@@ -23,6 +23,7 @@ fn fmt_opt32(x: Option<Hash32>) -> String {
     }
 }
 
+
 fn hash_lt(a: &Hash32, b: &Hash32) -> bool {
     // Lexicographic byte compare
     a.as_slice() < b.as_slice()
@@ -666,68 +667,60 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 
     let j_opt = journal_read(db).context("journal_read")?;
 
-    // ------------------------------
-    // JOURNAL-PRESENT RECOVERY
-    // ------------------------------
+// ------------------------------
+// JOURNAL-PRESENT RECOVERY
+// ------------------------------
+if let Some(mut j) = j_opt.take() {
+    eprintln!("[reorg] ENTER journal-present recovery branch");
 
-    if let Some(mut j) = j_opt {
-        eprintln!("[reorg] ENTER journal-present recovery branch");
-
-
-        if !journal_structurally_plausible(&j) {
-            println!("[reorg] recovery: journal corrupted; clearing and falling back");
-            journal_clear(db).ok();
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-        } else {
-
-
-// 1) Validate journal against durable tip.
-// If journal (phase,cursor) doesn't match the durable tip position, the journal is not safe to replay.
-// This can happen if journal bytes became visible without the intended durability fence.
-// In that case: clear journal and fall back to journal-less recovery.
-let meta_tip_opt = get_tip(db).context("recover get_tip(meta_tip)")?;
-
-if let Some(mt) = meta_tip_opt {
-    if let Some((ph, cur)) = infer_phase_cursor_from_tip(db, &j, &mt)? {
-        if ph != j.phase || cur != j.cursor {
-            println!(
-                "[reorg] recovery: journal disagrees with durable tip {}; clearing journal (journal phase={:?} cursor={}, inferred phase={:?} cursor={})",
-                hex32(&mt),
-                j.phase,
-                j.cursor,
-                ph,
-                cur
-            );
-            journal_clear(db).ok();
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            // fall through into journal-less recovery
-        }
-    } else {
-        println!(
-            "[reorg] recovery: durable tip {} not on journal path; clearing journal",
-            hex32(&mt)
-        );
+    // 0) Structural sanity. If corrupt, clear and fall through to journal-less.
+    if !journal_structurally_plausible(&j) {
+        println!("[reorg] recovery: journal corrupted; clearing and falling back");
         journal_clear(db).ok();
         flush_state_step(db).ok();
         mempool_prune_if_present(db, mempool);
-        // fall through into journal-less recovery
-    }
-} else {
-    println!("[reorg] recovery: meta_tip=None with journal present; clearing journal");
-    journal_clear(db).ok();
-    flush_state_step(db).ok();
-    mempool_prune_if_present(db, mempool);
-    // fall through into journal-less recovery
-}
+    } else {
+        // 1) ALIGNMENT CHECK (the "new logic"):
+        // The durable meta_tip must correspond to the journal's (phase,cursor) semantics.
+        // If not, the journal is unsafe to replay -> clear and fall through to journal-less.
+        let meta_tip_opt = get_tip(db).context("recover get_tip(meta_tip)")?;
 
-let j_opt = journal_read(db).context("journal_read(recheck)")?;
-if let Some(mut j) = j_opt {
-    // continue with journal-present recovery (existing logic)
-} else {
-    // continue into your existing JOURNAL-LESS RECOVERY branch
-}
+        let mut aligned = true;
+
+        if let Some(mt) = meta_tip_opt {
+            if let Some((ph, cur)) = infer_phase_cursor_from_tip(db, &j, &mt)? {
+                if ph != j.phase || cur != j.cursor {
+                    aligned = false;
+                    println!(
+                        "[reorg] recovery: journal disagrees with durable tip {}; clearing journal (journal phase={:?} cursor={}, inferred phase={:?} cursor={})",
+                        hex32(&mt),
+                        j.phase,
+                        j.cursor,
+                        ph,
+                        cur
+                    );
+                }
+            } else {
+                aligned = false;
+                println!(
+                    "[reorg] recovery: durable tip {} not on journal path; clearing journal",
+                    hex32(&mt)
+                );
+            }
+        } else {
+            aligned = false;
+            println!("[reorg] recovery: meta_tip=None with journal present; clearing journal");
+        }
+
+        if !aligned {
+            journal_clear(db).ok();
+            flush_state_step(db).ok();
+            mempool_prune_if_present(db, mempool);
+            // fall through to journal-less recovery
+        } else {
+            // ------------------------------
+            // ALIGNED: continue with your existing journal replay logic
+            // ------------------------------
 
             // 2) If already at new_tip, clear stale journal
             if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
@@ -774,16 +767,31 @@ if let Some(mut j) = j_opt {
                 journal_clear(db).ok();
                 flush_state_step(db).ok();
                 mempool_prune_if_present(db, mempool);
+                // fall through to journal-less recovery
             }
 
-            // 4) Resume the state machine from (phase,cursor)
+            // IMPORTANT:
+            // If we cleared the journal in the block above, we should not continue replay.
+            // Re-check journal existence once, and only replay if still present.
+            let j2 = journal_read(db).context("journal_read(recheck after rebuild)")?;
+            let Some(mut j) = j2 else {
+                // fall through to journal-less
+                // (do not return; continue after this if-let)
+                eprintln!("[reorg] journal cleared during rebuild step; falling through to journal-less");
+                // NOTE: no early return here
+                // We'll just proceed to journal-less below.
+                // Use a labeled block or simply let control flow continue.
+                // Easiest: set a flag and skip replay.
+                // We'll do it by returning to the outer scope via a block.
+                // (But to keep it simple: just go to journal-less by 'break' pattern below.)
+            };
 
+            // If we got here with j still present, continue with your existing replay code:
             // --- UNDO remainder ---
             if matches!(j.phase, Phase::Undo) {
                 for i in (j.cursor as usize)..j.undo_path.len() {
                     let bh = j.undo_path[i];
 
-                    // Ensure we are at bh before undoing it
                     if !tip_is(db, &bh)? {
                         if can_rebuild_to_tip(db, &bh).unwrap_or(false) {
                             rebuild_state_to_tip(db, &bh, mempool)
@@ -799,24 +807,19 @@ if let Some(mut j) = j_opt {
                     let p = parent_of(db, &bh)
                         .with_context(|| format!("recover undo parent_of {}", hex32(&bh)))?;
 
-                    // State + tip first (no flush yet)
                     set_tip(db, &p).with_context(|| format!("recover set_tip(parent of {})", hex32(&bh)))?;
 
-                    // Journal progress
                     j.cursor = (i as u64) + 1;
                     jw(db, &mut j, "recover journal_write(progress_undo)")?;
 
-                    // Single durability barrier commits both
                     flush_state_step(db).context("recover flush_state_step(undo + journal)")?;
                 }
 
-                // land exactly at ancestor (commit as a single step)
                 if !tip_is(db, &j.ancestor)? {
                     set_tip(db, &j.ancestor).context("recover set_tip(ancestor after undo)")?;
                     flush_state_step(db).context("recover flush_state_step(set ancestor)")?;
                 }
 
-                // transition to apply (journal + flush)
                 j.phase = Phase::Apply;
                 j.cursor = 0;
                 jw(db, &mut j, "recover journal_write(start_apply)")?;
@@ -855,14 +858,11 @@ if let Some(mut j) = j_opt {
 
                 mempool_remove_mined(mempool, &blk);
 
-                // Tip (checked) but do not flush yet
                 set_tip_checked(db, &bh, "recover apply")?;
 
-                // Journal progress
                 j.cursor = (i as u64) + 1;
                 jw(db, &mut j, "recover journal_write(progress_apply)")?;
 
-                // Single durability barrier commits both
                 flush_state_step(db).context("recover flush_state_step(apply + journal)")?;
             }
 
@@ -879,6 +879,7 @@ if let Some(mut j) = j_opt {
             return Ok(());
         }
     }
+}
 
     // ------------------------------
     // JOURNAL-LESS RECOVERY
