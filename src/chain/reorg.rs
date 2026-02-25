@@ -774,17 +774,6 @@ if let Some(mut j) = j_opt.take() {
             // If we cleared the journal in the block above, we should not continue replay.
             // Re-check journal existence once, and only replay if still present.
             let j2 = journal_read(db).context("journal_read(recheck after rebuild)")?;
-            let Some(mut j) = j2 else {
-                // fall through to journal-less
-                // (do not return; continue after this if-let)
-                eprintln!("[reorg] journal cleared during rebuild step; falling through to journal-less");
-                // NOTE: no early return here
-                // We'll just proceed to journal-less below.
-                // Use a labeled block or simply let control flow continue.
-                // Easiest: set a flag and skip replay.
-                // We'll do it by returning to the outer scope via a block.
-                // (But to keep it simple: just go to journal-less by 'break' pattern below.)
-            };
 
             // If we got here with j still present, continue with your existing replay code:
             // --- UNDO remainder ---
