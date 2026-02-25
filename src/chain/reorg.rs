@@ -670,7 +670,7 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 // ------------------------------
 // JOURNAL-PRESENT RECOVERY
 // ------------------------------
-if let Some(mut j) = j_opt() {
+if let Some(mut j) = j_opt {
     eprintln!("[reorg] ENTER journal-present recovery branch");
 
     // 0) Structural sanity. If corrupt, clear and fall through to journal-less.
