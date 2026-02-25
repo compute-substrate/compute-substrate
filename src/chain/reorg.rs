@@ -23,6 +23,23 @@ fn fmt_opt32(x: Option<Hash32>) -> String {
     }
 }
 
+fn hash_lt(a: &Hash32, b: &Hash32) -> bool {
+    // Lexicographic byte compare
+    a.as_slice() < b.as_slice()
+}
+
+fn better_candidate(cw_a: u128, h_a: u64, hash_a: &Hash32, cw_b: u128, h_b: u64, hash_b: &Hash32) -> bool {
+    // true if A is strictly better than B
+    if cw_a != cw_b {
+        return cw_a > cw_b;
+    }
+    if h_a != h_b {
+        return h_a > h_b;
+    }
+    // deterministic tie-break: smallest hash wins
+    hash_lt(hash_a, hash_b)
+}
+
 fn load_block(db: &Stores, hash: &Hash32) -> Result<Block> {
     let Some(v) = db
         .blocks
@@ -187,6 +204,8 @@ fn hash_from_block_key(k: &[u8]) -> Option<Hash32> {
 // Best tip selection WITHOUT hdr (blocks-only)
 // ----------------------
 
+
+
 fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>> {
     // memo[hash] = Some((height, chainwork_to_here)) OR None while visiting (cycle guard)
     let mut memo: HashMap<Hash32, Option<(u64, u128)>> = HashMap::new();
@@ -218,7 +237,6 @@ fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>>
 
         let parent = blk.header.prev;
 
-        // canonical work increment (same as HeaderIndex)
         let my_work = match crate::chain::pow::work_from_bits(blk.header.bits) {
             Ok(w) => w,
             Err(_) => {
@@ -234,7 +252,7 @@ fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>>
             return Ok(out);
         }
 
-        // parent must exist (as bytes) to be rebuildable
+        // parent must exist to be rebuildable
         let p = calc(db, parent, memo)?;
         let out = match p {
             Some((ph, pw)) => Some((ph + 1, pw.saturating_add(my_work))),
@@ -256,7 +274,7 @@ fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>>
         best = match best {
             None => Some((h, height, cw)),
             Some((bh, bhgt, bcw)) => {
-                if cw > bcw || (cw == bcw && height > bhgt) {
+                if better_candidate(cw, height, &h, bcw, bhgt, &bh) {
                     Some((h, height, cw))
                 } else {
                     Some((bh, bhgt, bcw))
@@ -280,9 +298,7 @@ fn best_tip_with_block_bytes(db: &Stores) -> Result<Option<HeaderIndex>> {
         best = match best {
             None => Some(hi),
             Some(cur) => {
-                if hi.chainwork > cur.chainwork
-                    || (hi.chainwork == cur.chainwork && hi.height > cur.height)
-                {
+                if better_candidate(hi.chainwork, hi.height, &hi.hash, cur.chainwork, cur.height, &cur.hash) {
                     Some(hi)
                 } else {
                     Some(cur)
@@ -311,9 +327,7 @@ fn best_header_tip(db: &Stores) -> Result<Option<HeaderIndex>> {
         best = match best {
             None => Some(hi),
             Some(cur) => {
-                if hi.chainwork > cur.chainwork
-                    || (hi.chainwork == cur.chainwork && hi.height > cur.height)
-                {
+                if better_candidate(hi.chainwork, hi.height, &hi.hash, cur.chainwork, cur.height, &cur.hash) {
                     Some(hi)
                 } else {
                     Some(cur)
@@ -324,7 +338,6 @@ fn best_header_tip(db: &Stores) -> Result<Option<HeaderIndex>> {
 
     Ok(best)
 }
-
 fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<HeaderIndex> {
     while a.height > b.height {
         a = must_hidx(db, &a.parent)?;
