@@ -770,10 +770,7 @@ if let Some(mut j) = j_opt() {
                 // fall through to journal-less recovery
             }
 
-            // IMPORTANT:
-            // If we cleared the journal in the block above, we should not continue replay.
-            // Re-check journal existence once, and only replay if still present.
-            let j2 = journal_read(db).context("journal_read(recheck after rebuild)")?;
+
 
             // If we got here with j still present, continue with your existing replay code:
             // --- UNDO remainder ---
