@@ -944,7 +944,7 @@ match pick_best_rebuildable_tip(db).context("journal-less pick_best_rebuildable_
 }
 
 mempool_prune_if_present(db, mempool);
-Ok(())
+Ok(());
 
 // ----------------------
 // Main reorg
