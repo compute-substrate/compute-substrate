@@ -657,6 +657,54 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
     Ok(())
 }
 
+fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &'static str)>> {
+    let meta_tip = get_tip(db).ok().flatten();
+    let hdr_best = best_header_tip(db).ok().flatten();
+    let blocks_best = best_tip_from_blocks_only(db).context("pick_best best_tip_from_blocks_only")?;
+
+    let mut best: Option<(Hash32, u64, u128, &'static str)> = None;
+
+    // helper closure to consider a candidate
+    let mut consider = |h: Hash32, height: u64, cw: u128, tag: &'static str| {
+        best = match best {
+            None => Some((h, height, cw, tag)),
+            Some((bh, bhgt, bcw, btag)) => {
+                if better_candidate(cw, height, &h, bcw, bhgt, &bh) {
+                    Some((h, height, cw, tag))
+                } else {
+                    Some((bh, bhgt, bcw, btag))
+                }
+            }
+        };
+    };
+
+    // 1) meta_tip (only if it has a header index we can score, AND is rebuildable)
+    if let Some(t) = meta_tip {
+        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+            if let Ok(Some(hi)) = get_hidx(db, &t) {
+                consider(hi.hash, hi.height, hi.chainwork, "meta_tip");
+            }
+        }
+    }
+
+    // 2) hdr_best
+    if let Some(hi) = hdr_best {
+        if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
+            consider(hi.hash, hi.height, hi.chainwork, "hdr_best");
+        }
+    }
+
+    // 3) blocks-only best
+    if let Some((h, height, cw)) = blocks_best {
+        if can_rebuild_to_tip(db, &h).unwrap_or(false) {
+            consider(h, height, cw, "blocks_only_best");
+        }
+    }
+
+    Ok(best)
+}
+
+
 
 // ----------------------
 // Crash recovery
@@ -867,83 +915,36 @@ if let Some(mut j) = j_opt {
     }
 }
 
-    // ------------------------------
-    // JOURNAL-LESS RECOVERY
-    // ------------------------------
-    eprintln!("[reorg] ENTER journal-less recovery branch");
+// ------------------------------
+// JOURNAL-LESS RECOVERY
+// ------------------------------
+eprintln!("[reorg] ENTER journal-less recovery branch");
+println!("[reorg] recovery(journal-less): selecting canonical tip");
 
-    println!("[reorg] recovery(journal-less): selecting canonical tip");
+let meta_tip = get_tip(db).ok().flatten();
+println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
 
-    let meta_tip = get_tip(db).ok().flatten();
-    println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
+match pick_best_rebuildable_tip(db).context("journal-less pick_best_rebuildable_tip")? {
+    Some((h, height, cw, tag)) => {
+        println!(
+            "[reorg] journal-less: selected {} tip={} (h={}, w={})",
+            tag,
+            hex32(&h),
+            height,
+            cw
+        );
 
-    let hdr_best = best_header_tip(db).ok().flatten();
-
-    let best = best_tip_from_blocks_only(db).context("journal-less best_tip_from_blocks_only")?;
-
-    // 1) meta_tip
-    if let Some(t) = meta_tip {
-        match chain_to_tip_from_blocks(db, &t) {
-            Ok(chain) => println!("[reorg] meta_tip blocks-chain len={}", chain.len()),
-            Err(e) => println!("[reorg] meta_tip blocks-chain FAIL: {e:#}"),
-        }
-        match chain_to_tip_from_hdr(db, &t) {
-            Ok(chain) => println!("[reorg] meta_tip hdr-chain len={}", chain.len()),
-            Err(e) => println!("[reorg] meta_tip hdr-chain FAIL: {e:#}"),
-        }
-
-        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
-            println!("[reorg] journal-less: rebuilding to meta_tip {}", hex32(&t));
-            rebuild_state_to_tip(db, &t, mempool).context("journal-less rebuild_state_to_tip(meta_tip)")?;
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            return Ok(());
-        } else {
-            println!("[reorg] journal-less: meta_tip not rebuildable {}", hex32(&t));
-        }
-    } else {
-        println!("[reorg] journal-less: meta_tip=None");
+        rebuild_state_to_tip(db, &h, mempool)
+            .with_context(|| format!("journal-less rebuild_state_to_tip({})", tag))?;
+        flush_state_step(db).ok();
     }
-
-    // 2) hdr_best
-    if let Some(hi) = hdr_best {
-        if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
-            println!(
-                "[reorg] journal-less: rebuilding to hdr_best {} (h={}, w={})",
-                hex32(&hi.hash),
-                hi.height,
-                hi.chainwork
-            );
-
-            rebuild_state_to_tip(db, &hi.hash, mempool).context("journal-less rebuild_state_to_tip(hdr_best)")?;
-            flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            return Ok(());
-        } else {
-            println!("[reorg] journal-less: hdr_best not rebuildable {}", hex32(&hi.hash));
-        }
-    } else {
-        println!("[reorg] journal-less: hdr_best=None");
+    None => {
+        println!("[reorg] journal-less: no rebuildable candidate tip found");
     }
-
-    // 3) blocks-only best
-    match best {
-        Some((best_hash, h, w)) => {
-            println!(
-                "[reorg] journal-less: rebuilding to blocks_only_best {} (h={}, w={})",
-                hex32(&best_hash),
-                h,
-                w
-            );
-            rebuild_state_to_tip(db, &best_hash, mempool).context("journal-less rebuild_state_to_tip(blocks_only_best)")?;
-            flush_state_step(db).ok();
-        }
-        None => println!("[reorg] journal-less: no rebuildable blocks found"),
-    }
-
-    mempool_prune_if_present(db, mempool);
-    Ok(())
 }
+
+mempool_prune_if_present(db, mempool);
+Ok(())
 
 // ----------------------
 // Main reorg
