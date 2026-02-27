@@ -26,7 +26,7 @@ fn test_addr20() -> Hash20 {
 
 /// Coinbase helper (matches mine::coinbase(miner_h160, value, height))
 fn make_coinbase(height: u64) -> Transaction {
-    csd::chain::mine::coinbase(test_addr20(), INITIAL_REWARD, height)
+    csd::chain::mine::coinbase(test_addr20(), INITIAL_REWARD, height, None)
 }
 
 /// Minimal merkle for test blocks.
