@@ -721,13 +721,34 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 if let Some(mut j) = j_opt {
     eprintln!("[reorg] ENTER journal-present recovery branch");
 
-    // 0) Structural sanity. If corrupt, clear and fall through to journal-less.
-    if !journal_structurally_plausible(&j) {
-        println!("[reorg] recovery: journal corrupted; clearing and falling back");
-        journal_clear(db).ok();
-        flush_state_step(db).ok();
+// 0) Structural sanity. If corrupt, clear journal and rebuild to durable meta_tip (do NOT fork-choice).
+if !journal_structurally_plausible(&j) {
+    println!("[reorg] recovery: journal corrupted; clearing and rebuilding to durable meta_tip");
+
+    // Capture durable tip BEFORE clearing.
+    let mt = get_tip(db).context("recover get_tip(meta_tip)")?;
+
+    journal_clear(db).ok();
+    flush_state_step(db).ok();
+
+    if let Some(t) = mt {
+        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+            rebuild_state_to_tip(db, &t, mempool)
+                .context("recover: rebuild to durable meta_tip after journal corruption")?;
+            flush_state_step(db).ok();
+        } else {
+            println!(
+                "[reorg] recovery: meta_tip {} not rebuildable after journal corruption; falling through to journal-less",
+                hex32(&t)
+            );
+        }
+
         mempool_prune_if_present(db, mempool);
-    } else {
+        return Ok(());
+    }
+
+    // meta_tip=None (true cold start) -> fall through to journal-less recovery
+} else {
         // 1) ALIGNMENT CHECK (the "new logic"):
         // The durable meta_tip must correspond to the journal's (phase,cursor) semantics.
         // If not, the journal is unsafe to replay -> clear and fall through to journal-less.
@@ -760,15 +781,36 @@ if let Some(mut j) = j_opt {
             println!("[reorg] recovery: meta_tip=None with journal present; clearing journal");
         }
 
-        if !aligned {
-            journal_clear(db).ok();
+if !aligned {
+    println!("[reorg] recovery: journal unsafe; clearing and rebuilding to durable meta_tip");
+
+    // Capture durable tip BEFORE clearing.
+    let mt = meta_tip_opt;
+
+    journal_clear(db).ok();
+    flush_state_step(db).ok();
+
+    if let Some(t) = mt {
+        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+            rebuild_state_to_tip(db, &t, mempool)
+                .context("recover: rebuild to durable meta_tip after journal misalignment")?;
             flush_state_step(db).ok();
-            mempool_prune_if_present(db, mempool);
-            // fall through to journal-less recovery
         } else {
-            // ------------------------------
-            // ALIGNED: continue with your existing journal replay logic
-            // ------------------------------
+            println!(
+                "[reorg] recovery: meta_tip {} not rebuildable after journal misalignment; falling through to journal-less",
+                hex32(&t)
+            );
+        }
+
+        mempool_prune_if_present(db, mempool);
+        return Ok(());
+    }
+
+    // meta_tip=None (true cold start) -> fall through to journal-less recovery
+} else {
+    // ------------------------------
+    // ALIGNED: continue with your existing journal replay logic
+    // ------------------------------
 
             // 2) If already at new_tip, clear stale journal
             if tip_is(db, &j.new_tip).context("recover tip_is(new_tip)")? {
