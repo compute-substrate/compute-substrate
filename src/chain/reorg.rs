@@ -992,6 +992,7 @@ return recover_journal_less(db, mempool);
 // ------------------------------
 
 return recover_journal_less(db, mempool);
+}
 
 // ----------------------
 // Main reorg
