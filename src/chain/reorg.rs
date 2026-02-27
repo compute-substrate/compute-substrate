@@ -749,6 +749,34 @@ pub fn recover_if_needed(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
 if let Some(mut j) = j_opt {
     eprintln!("[reorg] ENTER journal-present recovery branch");
 
+// Before trusting the journal, ensure it doesn't force us onto a worse chain than current fork-choice.
+// If fork-choice prefers a different tip, discard the journal and do journal-less recovery.
+{
+    // Best candidate from hdr index (chainwork-based)
+    let best_hi = best_header_tip(db).ok().flatten();
+
+    // Journal's new tip index (if present)
+    let j_new_hi = get_hidx(db, &j.new_tip).ok().flatten();
+
+    if let (Some(best), Some(jn)) = (best_hi, j_new_hi) {
+        // If best tip is strictly better than journal's intended new_tip, don't honor journal.
+        if better_candidate(best.chainwork, best.height, &best.hash, jn.chainwork, jn.height, &jn.hash)
+            && best.hash != j.new_tip
+        {
+            println!(
+                "[reorg] recovery: fork-choice prefers tip {} (h={}, w={}) over journal new_tip {} (h={}, w={}); discarding journal",
+                hex32(&best.hash), best.height, best.chainwork,
+                hex32(&j.new_tip), jn.height, jn.chainwork
+            );
+
+            // Journal is stale/wrong relative to fork-choice; clear it and rebuild canonically.
+            journal_clear(db).ok();
+            flush_state_step(db).ok();
+            return recover_journal_less(db, mempool);
+        }
+    }
+}
+
 // 0) Structural sanity. If corrupt, clear journal and rebuild to durable meta_tip (do NOT fork-choice).
 if !journal_structurally_plausible(&j) {
     println!("[reorg] recovery: journal corrupted; clearing and rebuilding to durable meta_tip");
