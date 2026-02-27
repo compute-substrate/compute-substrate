@@ -20,7 +20,7 @@ fn open_db(tmp: &TempDir) -> Result<Stores> {
 
 fn make_coinbase(height: u64) -> Transaction {
     let miner: [u8; 20] = [0x11u8; 20];
-    csd::chain::mine::coinbase(miner, INITIAL_REWARD, height)
+    csd::chain::mine::coinbase(miner, INITIAL_REWARD, height, None)
 }
 
 /// Minimal merkle for tests.
