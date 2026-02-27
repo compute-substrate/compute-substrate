@@ -64,15 +64,29 @@ fn validate_coinbase_scriptsig_height(cb: &Transaction, height: u64) -> Result<(
         .script_sig
         .as_slice();
 
-    if got.len() != 8 {
+    // NEW: allow optional memo bytes, but require the first 8 bytes to be the height
+    if got.len() < 8 {
         bail!(
-            "coinbase script_sig must be exactly 8 bytes (height.to_le_bytes). got_len={}",
+            "coinbase script_sig must be at least 8 bytes (height.to_le_bytes prefix). got_len={}",
             got.len()
         );
     }
-    if got != want {
-        bail!("coinbase script_sig must equal height.to_le_bytes()");
+
+    if &got[..8] != want.as_slice() {
+        bail!("coinbase script_sig must start with height.to_le_bytes()");
     }
+
+    // Optional: DoS guard. Pick a small cap that still allows memos.
+    // (If you don't want a new const, hardcode 256 here.)
+    const MAX_COINBASE_SCRIPTSIG_BYTES: usize = 256;
+    if got.len() > MAX_COINBASE_SCRIPTSIG_BYTES {
+        bail!(
+            "coinbase script_sig too large. got_len={} max={}",
+            got.len(),
+            MAX_COINBASE_SCRIPTSIG_BYTES
+        );
+    }
+
     Ok(())
 }
 
