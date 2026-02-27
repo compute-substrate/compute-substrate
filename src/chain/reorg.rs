@@ -704,7 +704,35 @@ fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &
     Ok(best)
 }
 
+fn recover_journal_less(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
+    eprintln!("[reorg] ENTER journal-less recovery branch");
+    println!("[reorg] recovery(journal-less): selecting canonical tip");
 
+    let meta_tip = get_tip(db).ok().flatten();
+    println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
+
+    match pick_best_rebuildable_tip(db).context("journal-less pick_best_rebuildable_tip")? {
+        Some((h, height, cw, tag)) => {
+            println!(
+                "[reorg] journal-less: selected {} tip={} (h={}, w={})",
+                tag,
+                hex32(&h),
+                height,
+                cw
+            );
+
+            rebuild_state_to_tip(db, &h, mempool)
+                .with_context(|| format!("journal-less rebuild_state_to_tip({})", tag))?;
+            flush_state_step(db).ok();
+        }
+        None => {
+            println!("[reorg] journal-less: no rebuildable candidate tip found");
+        }
+    }
+
+    mempool_prune_if_present(db, mempool);
+    Ok(())
+}
 
 // ----------------------
 // Crash recovery
@@ -743,8 +771,9 @@ if !journal_structurally_plausible(&j) {
             );
         }
 
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
+mempool_prune_if_present(db, mempool);
+return recover_journal_less(db, mempool);
+
     }
 
     // meta_tip=None (true cold start) -> fall through to journal-less recovery
@@ -802,8 +831,9 @@ if !aligned {
             );
         }
 
-        mempool_prune_if_present(db, mempool);
-        return Ok(());
+mempool_prune_if_present(db, mempool);
+return recover_journal_less(db, mempool);
+
     }
 
     // meta_tip=None (true cold start) -> fall through to journal-less recovery
@@ -960,34 +990,8 @@ if !aligned {
 // ------------------------------
 // JOURNAL-LESS RECOVERY
 // ------------------------------
-eprintln!("[reorg] ENTER journal-less recovery branch");
-println!("[reorg] recovery(journal-less): selecting canonical tip");
 
-let meta_tip = get_tip(db).ok().flatten();
-println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
-
-match pick_best_rebuildable_tip(db).context("journal-less pick_best_rebuildable_tip")? {
-    Some((h, height, cw, tag)) => {
-        println!(
-            "[reorg] journal-less: selected {} tip={} (h={}, w={})",
-            tag,
-            hex32(&h),
-            height,
-            cw
-        );
-
-        rebuild_state_to_tip(db, &h, mempool)
-            .with_context(|| format!("journal-less rebuild_state_to_tip({})", tag))?;
-        flush_state_step(db).ok();
-    }
-    None => {
-        println!("[reorg] journal-less: no rebuildable candidate tip found");
-    }
-}
-
-mempool_prune_if_present(db, mempool);
-Ok(())
-}
+return recover_journal_less(db, mempool);
 
 // ----------------------
 // Main reorg
