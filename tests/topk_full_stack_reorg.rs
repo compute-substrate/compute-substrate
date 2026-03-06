@@ -41,7 +41,7 @@ fn make_spend_tx(
         app,
     };
 
-    let (sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&tx, sk32);
+    let (sig64, pub33) = csd::crypto::mod::sign_tx_compact_secp256k1(&tx, sk32);
 
     // scriptsig format: [sig_len u8][sig64][pub_len u8][pub33]
     let mut ss = Vec::with_capacity(99);
