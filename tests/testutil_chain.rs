@@ -10,6 +10,9 @@ use csd::state::app_state::epoch_of;
 use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{Block, BlockHeader, Hash32, Transaction};
+use csd::params::{MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
+use csd::chain::time::median_time_past;
+
 
 pub fn open_db(tmp: &TempDir) -> Result<Stores> {
     Stores::open(tmp.path().to_str().unwrap()).context("Stores::open")
@@ -18,6 +21,41 @@ pub fn open_db(tmp: &TempDir) -> Result<Stores> {
 pub fn make_coinbase(height: u64) -> Transaction {
     let miner: [u8; 20] = [0x11u8; 20];
     csd::chain::mine::coinbase(miner, INITIAL_REWARD, height, None)
+}
+
+pub fn make_test_header(
+    db: &csd::state::db::Stores,
+    parent: Hash32,
+    txs: &[Transaction],
+    height: u64,
+) -> Result<BlockHeader> {
+    let parent_hi = get_hidx(db, &parent)?.expect("missing parent hidx");
+    let mtp = median_time_past(db, &parent_hi.hash).unwrap_or(parent_hi.time);
+    let min_spacing = parent_hi.time.saturating_add(MIN_BLOCK_SPACING_SECS);
+    let mtp_time = mtp.saturating_add(1);
+    let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+    let mut time = min_spacing.max(mtp_time).min(max_allowed);
+    if time <= mtp {
+        time = mtp_time;
+    }
+
+    let bits = expected_bits(db, height, Some(&parent_hi))?;
+
+    Ok(BlockHeader {
+        version: 1,
+        prev: parent,
+        merkle: {
+            // reuse your merkle implementation if exported; otherwise recompute like mine.rs
+            let mut ids: Vec<[u8; 32]> = Vec::with_capacity(txs.len());
+            for tx in txs {
+                ids.push(csd::crypto::txid(tx));
+            }
+            csd::chain::mine::merkle_root_txids(&ids)
+        },
+        time,
+        bits,
+        nonce: 0,
+    })
 }
 
 /// Minimal merkle for tests.
