@@ -121,3 +121,30 @@ pub fn verify_sig(tx: &Transaction, sig64: &[u8; 64], pub33: &[u8]) -> Result<()
     Secp256k1::verification_only().verify_ecdsa(&msg, &sig, &pk)?;
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-bypass"))]
+pub fn sign_tx_compact_secp256k1(
+    tx: &crate::types::Transaction,
+    sk32: [u8; 32],
+) -> ([u8; 64], [u8; 33]) {
+    use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+
+    let digest = sighash(tx);
+    let msg = Message::from_digest_slice(&digest).expect("valid 32-byte sighash");
+
+    let secp = Secp256k1::signing_only();
+
+    let sk = SecretKey::from_slice(&sk32).expect("bad sk32");
+    let pk = PublicKey::from_secret_key(&secp, &sk);
+
+    let mut sig = secp.sign_ecdsa(&msg, &sk);
+    sig.normalize_s();
+
+    let mut sig64 = [0u8; 64];
+    sig64.copy_from_slice(&sig.serialize_compact());
+
+    let mut pub33 = [0u8; 33];
+    pub33.copy_from_slice(&pk.serialize());
+
+    (sig64, pub33)
+}
