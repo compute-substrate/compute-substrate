@@ -21,7 +21,7 @@ use crate::types::{
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
 /// - internal nodes are sha256d(left || right), duplicating last if odd
-fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
+pub fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
     if txids.is_empty() {
         return [0u8; 32];
     }
@@ -43,7 +43,7 @@ fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
     layer[0]
 }
 
-pub fn merkle_root(txs: &[Transaction]) -> Hash32 {
+fn merkle_root(txs: &[Transaction]) -> Hash32 {
     let mut ids: Vec<Hash32> = Vec::with_capacity(txs.len());
     for tx in txs {
         ids.push(txid(tx));
