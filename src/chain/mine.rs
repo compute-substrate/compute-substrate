@@ -43,7 +43,7 @@ fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
     layer[0]
 }
 
-fn merkle_root(txs: &[Transaction]) -> Hash32 {
+pub fn merkle_root(txs: &[Transaction]) -> Hash32 {
     let mut ids: Vec<Hash32> = Vec::with_capacity(txs.len());
     for tx in txs {
         ids.push(txid(tx));
