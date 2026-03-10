@@ -280,7 +280,7 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
     // Grab a funding coinbase
     let b = load_block(&db, &base[5])?;
     let cb = &b.txs[0];
-    let cbid = csd::crypto::mod::txid(cb);
+    let cbid = csd::crypto::txid(cb);
     let v = cb.outputs[0].value;
     let op = OutPoint { txid: cbid, vout: 0 };
 
