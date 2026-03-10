@@ -166,14 +166,18 @@ fn deep_reorg_across_epoch_boundary_with_heavy_app_history_matches_replay() -> R
 
     // Funding outputs from the shared prefix.
     let mut funds: Vec<(OutPoint, u64)> = Vec::new();
-    for bh in shared.iter().skip(2).take(40) {
+    for bh in shared.iter().skip(2) {
         let b = load_block(&db, bh)?;
         let cb = &b.txs[0];
         let cbid = csd::crypto::txid(cb);
         let v = cb.outputs[0].value;
         funds.push((OutPoint { txid: cbid, vout: 0 }, v));
     }
-    assert!(funds.len() >= 24, "not enough funding outputs");
+    assert!(
+        funds.len() >= 86,
+        "not enough funding outputs: have {}, need at least 86",
+        funds.len()
+    );
 
     // -----------------------------
     // Canonical branch (shorter)
