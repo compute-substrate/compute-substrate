@@ -71,11 +71,31 @@ fn make_spend_tx(
 }
 
 fn apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
+    let bh = csd::chain::index::header_hash(&blk.header);
+
+    // Persist block bytes first
+    db.blocks.insert(
+        csd::state::db::k_block(&bh),
+        csd::codec::consensus_bincode().serialize(blk)?,
+    )?;
+
+    // Index header against parent, like normal chain processing
+    let parent_hi = if blk.header.prev == [0u8; 32] {
+        None
+    } else {
+        csd::chain::index::get_hidx(db, &blk.header.prev)?
+    };
+
+    csd::chain::index::index_header(db, &blk.header, parent_hi.as_ref())
+        .with_context(|| format!("index_header h={height}"))?;
+
+    // Apply consensus state transition
     validate_and_apply_block(db, blk, epoch_of(height), height)
         .with_context(|| format!("apply h={height}"))?;
 
-    let bh = csd::chain::index::header_hash(&blk.header);
     set_tip(db, &bh)?;
+    db.db.flush()?;
+
     Ok(bh)
 }
 
