@@ -121,8 +121,14 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
     let mut fund_i = 0usize;
 
     for _ in 0..blocks_to_make {
-        let parent_hi = get_hidx(&db, &cur_tip)?.expect("missing parent hidx");
-        let height = parent_hi.height + 1;
+let parent_hidx = match get_hidx(parent_hash) {
+    Some(h) => h,
+    None => {
+        eprintln!("Missing parent hidx for parent: {}", parent_hash);
+        eprintln!("Current tip: {}", get_tip(stores));
+        panic!("missing parent hidx");
+    }
+};        let height = parent_hi.height + 1;
         let epoch = epoch_of(height);
 
         let mut txs: Vec<Transaction> = Vec::new();
