@@ -128,6 +128,23 @@ fn persist_index_only_block(db: &Stores, blk: &Block) -> Result<Hash32> {
     Ok(bh)
 }
 
+fn take_fund(
+    funds: &[(OutPoint, u64)],
+    fund_i: &mut usize,
+    ctx: &str,
+) -> (OutPoint, u64) {
+    let idx = *fund_i;
+    let (op, v) = *funds.get(idx).unwrap_or_else(|| {
+        panic!(
+            "funds exhausted in {ctx}: need index {}, have {}",
+            idx,
+            funds.len()
+        )
+    });
+    *fund_i += 1;
+    (op, v)
+}
+
 fn build_branch(
     db: &Stores,
     start_prev: Hash32,
@@ -165,8 +182,11 @@ fn build_branch(
         };
 
         for j in 0..propose_count {
-            let (op, v) = funds[*fund_i];
-            *fund_i += 1;
+            let (op, v) = take_fund(
+                funds,
+                fund_i,
+                &format!("build_branch flavor={} step={} propose={}", flavor, step, j),
+            );
 
             let fee = csd::params::MIN_FEE_PROPOSE;
             let send = v - fee;
@@ -249,8 +269,11 @@ fn build_branch(
                 }
             };
 
-            let (op, v) = funds[*fund_i];
-            *fund_i += 1;
+            let (op, v) = take_fund(
+                funds,
+                fund_i,
+                &format!("build_branch flavor={} step={} attest={}", flavor, step, k),
+            );
 
             let fee = csd::params::MIN_FEE_ATTEST + (flavor as u64) * 200 + (k as u64) * 77;
             let send = v - fee;
@@ -313,7 +336,8 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     let miner_c = h20(0xC3);
     let user_addr = signer;
 
-    let shared_len = 120u64;
+    // Larger shared prefix so the synthetic multi-branch workload has enough funding.
+    let shared_len = 220u64;
     let fork_parent_height = 100u64;
     let start_time = 1_700_300_000u64;
 
@@ -321,6 +345,7 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
         .context("build_base_chain_with_miner(shared)")?;
     let shared_tip = shared[fork_parent_height as usize];
 
+    // Rewind logical tip to the intended fork point.
     set_tip(&db, &shared_tip)?;
     assert_tip_eq(&db, shared_tip)?;
 
@@ -334,8 +359,8 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     }
 
     assert!(
-        funds.len() >= 110,
-        "not enough funding outputs: have {}, need at least 110",
+        funds.len() >= 180,
+        "not enough funding outputs for multi-switch test: have {}, need at least 180",
         funds.len()
     );
 
