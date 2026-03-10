@@ -151,14 +151,15 @@ fn deep_reorg_across_epoch_boundary_with_heavy_app_history_matches_replay() -> R
     let miner_fork = h20(0xB2);
     let user_addr = signer;
 
-    let boundary_h = first_epoch_boundary();
-    assert!(boundary_h >= 3, "boundary too early for fork setup");
+let boundary_h = first_epoch_boundary();
+assert!(boundary_h >= 3, "boundary too early for fork setup");
 
-    // Shared tip is 2 blocks before the epoch rollover.
-let fork_parent_height = boundary_h - 2;
+// Move fork later so shared prefix contains enough funding outputs.
+// We still cross the SAME epoch boundary, just deeper in history.
+let fork_parent_height = boundary_h + 40;
 
-// Build a longer shared prefix so we have enough funding outputs.
-let shared_len = 96u64;
+// Shared prefix must extend beyond fork point.
+let shared_len = fork_parent_height + 1;
 
 let start_time = 1_700_200_000u64;
 let shared = build_base_chain_with_miner(&db, shared_len, start_time, signer)
