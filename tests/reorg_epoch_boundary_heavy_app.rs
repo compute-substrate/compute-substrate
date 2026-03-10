@@ -155,18 +155,25 @@ fn deep_reorg_across_epoch_boundary_with_heavy_app_history_matches_replay() -> R
     assert!(boundary_h >= 3, "boundary too early for fork setup");
 
     // Shared tip is 2 blocks before the epoch rollover.
-    let fork_parent_height = boundary_h - 2;
-    let shared_len = fork_parent_height + 1;
+let fork_parent_height = boundary_h - 2;
 
-    let start_time = 1_700_200_000u64;
-    let shared = build_base_chain_with_miner(&db, shared_len, start_time, signer)
-        .context("build_base_chain_with_miner(shared)")?;
-    let shared_tip = shared[fork_parent_height as usize];
-    assert_tip_eq(&db, shared_tip)?;
+// Build a longer shared prefix so we have enough funding outputs.
+let shared_len = 96u64;
+
+let start_time = 1_700_200_000u64;
+let shared = build_base_chain_with_miner(&db, shared_len, start_time, signer)
+    .context("build_base_chain_with_miner(shared)")?;
+
+// Fork point is still the block 2 before the epoch boundary.
+let shared_tip = shared[fork_parent_height as usize];
+
+// Rewind logical tip to the fork point we want to branch from.
+set_tip(&db, &shared_tip)?;
+assert_tip_eq(&db, shared_tip)?;
 
     // Funding outputs from the shared prefix.
     let mut funds: Vec<(OutPoint, u64)> = Vec::new();
-    for bh in shared.iter().skip(2) {
+        for bh in shared.iter().take((fork_parent_height as usize) + 1).skip(2) {        
         let b = load_block(&db, bh)?;
         let cb = &b.txs[0];
         let cbid = csd::crypto::txid(cb);
