@@ -47,7 +47,7 @@ fn make_spend_tx(
         version: 1,
         inputs: vec![TxIn {
             prevout: prev,
-            script_sig: vec![0u8; 99], // filled after signing
+            script_sig: vec![0u8; 99],
         }],
         outputs: vec![TxOut {
             value: send_value,
@@ -59,7 +59,7 @@ fn make_spend_tx(
 
     let (sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&tx, sk32);
 
-    // scriptsig format: [sig_len u8][sig64][pub_len u8][pub33]
+    // [sig_len u8][sig64][pub_len u8][pub33]
     let mut ss = Vec::with_capacity(99);
     ss.push(64u8);
     ss.extend_from_slice(&sig64);
@@ -91,7 +91,6 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
-    // Keys + actual owning addresses
     let sk_a = [7u8; 32];
     let sk_f = [11u8; 32];
 
@@ -100,14 +99,19 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
 
     let domain = "science";
 
-    // Build base chain so coinbases belong to sk_a-derived address.
+    // Must satisfy consensus minimums
+    let propose_fee = csd::params::MIN_FEE_PROPOSE;
+    let attest_fee_low = csd::params::MIN_FEE_ATTEST;
+    let attest_fee_mid = csd::params::MIN_FEE_ATTEST + 10_000_000;
+    let attest_fee_high = csd::params::MIN_FEE_ATTEST + 30_000_000;
+    let attest_fee_top = csd::params::MIN_FEE_ATTEST + 60_000_000;
+
     let start_time = 1_700_100_000u64;
     let base = build_base_chain_with_miner(&db, 20, start_time, addr_a)
         .context("build_base_chain_with_miner")?;
     let tip_a = *base.last().unwrap();
     set_tip(&db, &tip_a)?;
 
-    // Pick three spendable coinbases from early blocks
     let b1 = load_block(&db, &base[5])?;
     let b2 = load_block(&db, &base[6])?;
     let b3 = load_block(&db, &base[7])?;
@@ -124,13 +128,12 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let v2 = b2.txs[0].outputs[0].value;
     let v3 = b3.txs[0].outputs[0].value;
 
-    // Proposal txs
     let propose1 = make_spend_tx(
         op1,
         v1,
         addr_a,
-        v1 - 10_000,
-        10_000,
+        v1 - propose_fee,
+        propose_fee,
         sk_a,
         AppPayload::Propose {
             domain: domain.to_string(),
@@ -144,8 +147,8 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         op2,
         v2,
         addr_a,
-        v2 - 10_000,
-        10_000,
+        v2 - propose_fee,
+        propose_fee,
         sk_a,
         AppPayload::Propose {
             domain: domain.to_string(),
@@ -159,8 +162,8 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         op3,
         v3,
         addr_a,
-        v3 - 10_000,
-        10_000,
+        v3 - propose_fee,
+        propose_fee,
         sk_a,
         AppPayload::Propose {
             domain: domain.to_string(),
@@ -170,7 +173,6 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         },
     );
 
-    // Proposals block
     let tip_hi = csd::chain::index::get_hidx(&db, &tip_a)?.expect("tip hidx");
     let height_p = tip_hi.height + 1;
 
@@ -189,22 +191,21 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let pid2 = csd::crypto::txid(&propose2);
     let pid3 = csd::crypto::txid(&propose3);
 
-    // Spend proposal outputs for canonical chain A attests
     let op_p1 = OutPoint { txid: pid1, vout: 0 };
     let op_p2 = OutPoint { txid: pid2, vout: 0 };
     let op_p3 = OutPoint { txid: pid3, vout: 0 };
 
-    let pv1 = v1 - 10_000;
-    let pv2 = v2 - 10_000;
-    let pv3 = v3 - 10_000;
+    let pv1 = v1 - propose_fee;
+    let pv2 = v2 - propose_fee;
+    let pv3 = v3 - propose_fee;
 
     // Chain A: pid2 wins
     let a_att1 = make_spend_tx(
         op_p1,
         pv1,
         addr_a,
-        pv1 - 30_000,
-        30_000,
+        pv1 - attest_fee_mid,
+        attest_fee_mid,
         sk_a,
         AppPayload::Attest {
             proposal_id: pid1,
@@ -216,8 +217,8 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         op_p2,
         pv2,
         addr_a,
-        pv2 - 50_000,
-        50_000,
+        pv2 - attest_fee_top,
+        attest_fee_top,
         sk_a,
         AppPayload::Attest {
             proposal_id: pid2,
@@ -229,8 +230,8 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         op_p3,
         pv3,
         addr_a,
-        pv3 - 10_000,
-        10_000,
+        pv3 - attest_fee_low,
+        attest_fee_low,
         sk_a,
         AppPayload::Attest {
             proposal_id: pid3,
@@ -252,43 +253,12 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let blk_a = Block { header: hdr_a, txs: txs_a };
     let _bh_a = apply_block(&db, &blk_a, height_a).context("apply attests A")?;
 
-    let ep = epoch_of(height_a);
-    let topk_a = get_topk(&db, ep, domain).context("get_topk A")?;
+    let ep_a = epoch_of(height_a);
+    let topk_a = get_topk(&db, ep_a, domain).context("get_topk A")?;
     assert!(!topk_a.is_empty(), "TopK should not be empty");
     assert_eq!(topk_a[0].0, pid2, "expected pid2 top on chain A");
 
-    // Fork-B funding coinbases must also belong to the signer used for fork-B.
-    // Build them by hand as stored+applied blocks on the existing canonical base
-    // so their outputs belong to addr_f.
-    //
-    // We place them earlier than the fork point in terms of spendability source,
-    // but they are distinct UTXOs from chain A’s proposal-output spends.
-
-    let b4 = load_block(&db, &base[8])?;
-    let b5 = load_block(&db, &base[9])?;
-    let b6 = load_block(&db, &base[10])?;
-
-    let _ = (b4, b5, b6); // only keeping timeline alignment explicit
-
-    // Instead of reusing base-chain coinbases mined to addr_a, create three new
-    // canonical funding blocks to addr_f after chain A, then fork from bh_p using their outputs
-    // would not work because those funding blocks would not exist on fork B.
-    //
-    // So for this test we use three distinct earlier base-chain coinbases mined to addr_a? No:
-    // fork-B signer is sk_f, so ownership must match.
-    //
-    // Therefore we derive fork-B attests from fresh coinbases INSIDE fork-B's own block ancestry
-    // by first creating a heavier fork from bh_p:
-    //   B1: funding block to addr_f
-    //   B2: attestation block using B1 coinbase and two more earlier funding coinbases from B1/B2 chain
-    //
-    // To keep this simple and deterministic, we build a 3-block fork:
-    //   fork_fund1 off bh_p
-    //   fork_fund2 off fork_fund1
-    //   fork_att   off fork_fund2
-    //
-    // Then maybe_reorg_to(fork_att).
-
+    // Build heavier fork B off bh_p
     let height_b1 = height_a;
     let txs_b1 = vec![
         csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_b1), height_b1, None),
@@ -316,7 +286,6 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     )?;
     csd::chain::index::index_header(&db, &blk_b2.header, Some(&hi_b1))?;
 
-    // Need a third funding coinbase too, so create one more fork block.
     let hi_b2 = csd::chain::index::get_hidx(&db, &bh_b2)?.expect("hidx b2");
     let height_b3 = hi_b2.height + 1;
     let txs_b3 = vec![
@@ -331,7 +300,6 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     )?;
     csd::chain::index::index_header(&db, &blk_b3.header, Some(&hi_b2))?;
 
-    // Spend the three fork funding coinbases in the next block.
     let fund1_cb = csd::crypto::txid(&blk_b1.txs[0]);
     let fund2_cb = csd::crypto::txid(&blk_b2.txs[0]);
     let fund3_cb = csd::crypto::txid(&blk_b3.txs[0]);
@@ -340,12 +308,13 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let fv2 = blk_b2.txs[0].outputs[0].value;
     let fv3 = blk_b3.txs[0].outputs[0].value;
 
+    // Chain B: pid3 wins
     let b_att1 = make_spend_tx(
         OutPoint { txid: fund1_cb, vout: 0 },
         fv1,
         addr_f,
-        fv1 - 20_000,
-        20_000,
+        fv1 - attest_fee_mid,
+        attest_fee_mid,
         sk_f,
         AppPayload::Attest {
             proposal_id: pid1,
@@ -357,8 +326,8 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         OutPoint { txid: fund2_cb, vout: 0 },
         fv2,
         addr_f,
-        fv2 - 10_000,
-        10_000,
+        fv2 - attest_fee_low,
+        attest_fee_low,
         sk_f,
         AppPayload::Attest {
             proposal_id: pid2,
@@ -370,8 +339,8 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         OutPoint { txid: fund3_cb, vout: 0 },
         fv3,
         addr_f,
-        fv3 - 70_000,
-        70_000,
+        fv3 - attest_fee_top,
+        attest_fee_top,
         sk_f,
         AppPayload::Attest {
             proposal_id: pid3,
