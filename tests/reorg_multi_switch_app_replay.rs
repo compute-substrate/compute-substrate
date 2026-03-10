@@ -336,7 +336,8 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     let miner_c = h20(0xC3);
     let user_addr = signer;
 
-    // Larger shared prefix so the synthetic multi-branch workload has enough funding.
+    // Build a long enough chain for convenience, but only use funding from the
+    // shared prefix up to fork_parent_height.
     let shared_len = 220u64;
     let fork_parent_height = 100u64;
     let start_time = 1_700_300_000u64;
@@ -349,8 +350,15 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     set_tip(&db, &shared_tip)?;
     assert_tip_eq(&db, shared_tip)?;
 
+    // IMPORTANT:
+    // Only collect funding outputs from the canonical shared prefix that exists
+    // on every competing branch. Never use outputs from blocks after the fork point.
     let mut funds: Vec<(OutPoint, u64)> = Vec::new();
-    for bh in shared.iter().take(shared_len as usize).skip(2) {
+    for bh in shared
+        .iter()
+        .take((fork_parent_height as usize) + 1)
+        .skip(2)
+    {
         let b = load_block(&db, bh)?;
         let cb = &b.txs[0];
         let cbid = csd::crypto::txid(cb);
@@ -359,8 +367,8 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     }
 
     assert!(
-        funds.len() >= 180,
-        "not enough funding outputs for multi-switch test: have {}, need at least 180",
+        funds.len() >= 70,
+        "not enough prefix funding outputs for multi-switch test: have {}, need at least 70",
         funds.len()
     );
 
@@ -384,7 +392,9 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     assert_tip_eq(&db, tip_a)?;
 
     // Branch B: indexed only, heavier than A.
-    let mut fund_b = 30usize;
+    // Reuse prefix funding independently because this is an alternative branch
+    // from the same ancestor, not simultaneous canonical spending.
+    let mut fund_b = 0usize;
     let tip_b = build_branch(
         &db,
         shared_tip,
@@ -408,7 +418,7 @@ fn multi_reorg_sequence_with_app_state_matches_replay() -> Result<()> {
     assert_tip_eq(&db, tip_b)?;
 
     // Branch C: also forks from same ancestor, even heavier than B.
-    let mut fund_c = 70usize;
+    let mut fund_c = 0usize;
     let tip_c = build_branch(
         &db,
         shared_tip,
