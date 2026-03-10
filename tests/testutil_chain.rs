@@ -1,4 +1,3 @@
-//testutil_chain.rs
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -10,14 +9,50 @@ use csd::params::{INITIAL_REWARD, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS}
 use csd::state::app_state::epoch_of;
 use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
-use csd::types::{Block, BlockHeader, Hash20, Hash32, Transaction};
+use csd::types::{AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
 pub fn open_db(tmp: &TempDir) -> Result<Stores> {
     Stores::open(tmp.path().to_str().unwrap()).context("Stores::open")
 }
 
+// -----------------------------------------------------------------------------
+// Deterministic test signer helpers
+// -----------------------------------------------------------------------------
+//
+// These are used by tests that need coinbases to be spendable by the same key
+// that signs spending transactions.
+//
+
+pub fn test_signer_sk() -> [u8; 32] {
+    [7u8; 32]
+}
+
+pub fn test_signer_addr() -> Hash20 {
+    // Dummy tx just to obtain the compressed pubkey from the exact signing helper.
+    let dummy = Transaction {
+        version: 1,
+        inputs: vec![TxIn {
+            prevout: OutPoint {
+                txid: [0u8; 32],
+                vout: 0,
+            },
+            script_sig: vec![],
+        }],
+        outputs: vec![TxOut {
+            value: 1,
+            script_pubkey: [0u8; 20],
+        }],
+        locktime: 0,
+        app: AppPayload::None,
+    };
+
+    let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, test_signer_sk());
+    csd::crypto::hash160(&pub33)
+}
+
 pub fn make_coinbase(height: u64) -> Transaction {
-    make_coinbase_to(height, [0x11u8; 20])
+    // Default test coinbases are now signer-owned so spending tests work out of the box.
+    make_coinbase_to(height, test_signer_addr())
 }
 
 pub fn make_coinbase_to(height: u64, miner: Hash20) -> Transaction {
@@ -103,7 +138,7 @@ pub fn apply_canonical_block(
     height: u64,
     time: u64,
 ) -> Result<Hash32> {
-    apply_canonical_block_to(db, prev, height, time, [0x11u8; 20])
+    apply_canonical_block_to(db, prev, height, time, test_signer_addr())
 }
 
 /// Apply a canonical block (persist + index + validate/apply + set_tip), with explicit miner address.
@@ -149,7 +184,7 @@ pub fn store_index_fork_block(
     height: u64,
     time: u64,
 ) -> Result<Hash32> {
-    store_index_fork_block_to(db, prev, height, time, [0x11u8; 20])
+    store_index_fork_block_to(db, prev, height, time, test_signer_addr())
 }
 
 /// Store + index a fork block (persist + index ONLY; no apply, no tip change), with explicit miner.
@@ -188,7 +223,7 @@ pub fn store_index_fork_block_to(
 
 /// Build canonical base chain of length `n` (applied).
 pub fn build_base_chain(db: &Stores, n: u64, start_time: u64) -> Result<Vec<Hash32>> {
-    build_base_chain_with_miner(db, n, start_time, [0x11u8; 20])
+    build_base_chain_with_miner(db, n, start_time, test_signer_addr())
 }
 
 /// Build canonical base chain of length `n` (applied), with explicit miner address.
