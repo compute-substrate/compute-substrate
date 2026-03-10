@@ -1,44 +1,21 @@
-//app_payload_robustness.rs
 use anyhow::{Context, Result};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
-use csd::chain::index::{get_hidx, index_header};
-use csd::chain::pow::expected_bits;
+use csd::chain::index::get_hidx;
 use csd::state::app_state::{epoch_of, get_topk};
 use csd::state::db::{k_block, set_tip, Stores};
 use csd::state::utxo::{undo_block, validate_and_apply_block};
-use csd::types::{AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
+use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
 mod testutil_chain;
-use testutil_chain::{make_test_header, open_db};
+use testutil_chain::{
+    build_base_chain_with_miner, make_test_header, open_db, test_signer_addr, test_signer_sk,
+};
 
 fn h20(n: u8) -> Hash20 {
     [n; 20]
-}
-
-fn signer_addr(sk32: [u8; 32]) -> Hash20 {
-    // Dummy tx just to get the compressed pubkey from your exact signer helper.
-    let dummy = Transaction {
-        version: 1,
-        inputs: vec![TxIn {
-            prevout: OutPoint {
-                txid: [0u8; 32],
-                vout: 0,
-            },
-            script_sig: vec![],
-        }],
-        outputs: vec![TxOut {
-            value: 1,
-            script_pubkey: [0u8; 20],
-        }],
-        locktime: 0,
-        app: AppPayload::None,
-    };
-
-    let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, sk32);
-    csd::crypto::hash160(&pub33)
 }
 
 fn apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
@@ -55,62 +32,6 @@ fn load_block(db: &Stores, bh: &Hash32) -> Result<Block> {
         anyhow::bail!("missing block bytes for 0x{}", hex::encode(bh));
     };
     Ok(csd::codec::consensus_bincode().deserialize::<Block>(&v)?)
-}
-
-fn build_owned_base_chain(
-    db: &Stores,
-    n: u64,
-    start_time: u64,
-    miner_addr: Hash20,
-) -> Result<Vec<Hash32>> {
-    let mut out = Vec::with_capacity(n as usize);
-    let mut prev = [0u8; 32];
-
-    for height in 0..n {
-        let txs = vec![csd::chain::mine::coinbase(
-            miner_addr,
-            csd::params::block_reward(height),
-            height,
-            None,
-        )];
-
-        let parent_hi = if prev == [0u8; 32] {
-            None
-        } else {
-            get_hidx(db, &prev).context("get_hidx(parent)")?
-        };
-
-        let bits = expected_bits(db, height, parent_hi.as_ref()).context("expected_bits")?;
-
-        let hdr = BlockHeader {
-            version: 1,
-            prev,
-            merkle: testutil_chain::merkle_root(&txs),
-            time: start_time + height * 60,
-            bits,
-            nonce: 0, // test-bypass mode
-        };
-
-        let blk = Block { header: hdr, txs };
-        let bh = csd::chain::index::header_hash(&blk.header);
-
-        let bytes = csd::codec::consensus_bincode()
-            .serialize(&blk)
-            .context("serialize block")?;
-        db.blocks
-            .insert(k_block(&bh), bytes)
-            .context("db.blocks.insert")?;
-
-        index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
-        validate_and_apply_block(db, &blk, epoch_of(height), height)
-            .with_context(|| format!("apply h={height}"))?;
-        set_tip(db, &bh).context("set_tip")?;
-
-        out.push(bh);
-        prev = bh;
-    }
-
-    Ok(out)
 }
 
 /// Spend a single UTXO into one output, paying `fee`.
@@ -166,12 +87,13 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
-    let sk = [7u8; 32];
-    let signer = signer_addr(sk);
+    let sk = test_signer_sk();
+    let signer = test_signer_addr();
 
-    // Build enough coinbases to fund a bunch of txs, but pay them to the signer.
+    // Build enough coinbases to fund a bunch of txs, and pay them to the signer.
     let start_time = 1_700_100_000u64;
-    let base = build_owned_base_chain(&db, 80, start_time, signer).context("build_owned_base_chain")?;
+    let base = build_base_chain_with_miner(&db, 80, start_time, signer)
+        .context("build_base_chain_with_miner")?;
     let tip0 = *base.last().unwrap();
     set_tip(&db, &tip0)?;
 
@@ -188,7 +110,7 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
     let domains = ["science", "finance", "ai", "weather", "sports"];
     let addr_miner = h20(0xA1);
 
-    // Send change back to signer so future spends remain valid
+    // Send change back to signer so spends keep matching the same pubkey hash.
     let addr_user = signer;
 
     let mut proposals_by_domain: HashMap<String, Vec<Hash32>> = HashMap::new();
@@ -204,13 +126,7 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
         let epoch = epoch_of(height);
 
         let mut txs: Vec<Transaction> = Vec::new();
-
-        txs.push(csd::chain::mine::coinbase(
-            addr_miner,
-            csd::params::block_reward(height),
-            height,
-            None,
-        ));
+        let mut total_fees: u64 = 0;
 
         let n_prop = rng.gen_range(0..=4);
         let n_att = rng.gen_range(0..=8);
@@ -223,12 +139,16 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             fund_i += 1;
 
             let d = domains[rng.gen_range(0..domains.len())].to_string();
-            let payload_hash: Hash32 = rng.gen();
+            let mut payload_hash: Hash32 = rng.gen();
+            if payload_hash == [0u8; 32] {
+                payload_hash[0] = 1;
+            }
 
             let expires_epoch = epoch + rng.gen_range(0..=5);
 
             let fee = csd::params::MIN_FEE_PROPOSE;
             let send = v.saturating_sub(fee);
+            total_fees = total_fees.saturating_add(fee);
 
             let tx = make_spend_tx(
                 op,
@@ -281,6 +201,7 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
 
             let fee = csd::params::MIN_FEE_ATTEST + (rng.gen_range(0..=5) as u64) * 100;
             let send = v.saturating_sub(fee);
+            total_fees = total_fees.saturating_add(fee);
 
             let tx = make_spend_tx(
                 op,
@@ -302,8 +223,19 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             txs.push(tx);
         }
 
-        let hdr = make_test_header(&db, cur_tip, &txs, height)?;
-        let blk = Block { header: hdr, txs };
+        let mut all_txs: Vec<Transaction> = Vec::with_capacity(1 + txs.len());
+        all_txs.push(csd::chain::mine::coinbase(
+            addr_miner,
+            csd::params::block_reward(height)
+                .checked_add(total_fees)
+                .expect("coinbase reward+fees overflow"),
+            height,
+            None,
+        ));
+        all_txs.extend(txs);
+
+        let hdr = make_test_header(&db, cur_tip, &all_txs, height)?;
+        let blk = Block { header: hdr, txs: all_txs };
 
         let bh = apply_block(&db, &blk, height)?;
         cur_tip = bh;
@@ -335,11 +267,13 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
-    let sk = [7u8; 32];
-    let signer = signer_addr(sk);
+    let sk = test_signer_sk();
+    let signer = test_signer_addr();
 
+    // Must be > 1 epoch so we can actually test expires_epoch < current_epoch.
     let start_time = 1_700_100_000u64;
-    let base = build_owned_base_chain(&db, 12, start_time, signer).context("build_owned_base_chain")?;
+    let base = build_base_chain_with_miner(&db, 80, start_time, signer)
+        .context("build_base_chain_with_miner")?;
     let tip0 = *base.last().unwrap();
     set_tip(&db, &tip0)?;
 
@@ -358,6 +292,8 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
 
     // 1) PROPOSE with expires_epoch < current epoch must reject
     {
+        assert!(epoch > 0, "test requires epoch > 0");
+
         let bad = make_spend_tx(
             op,
             v,
@@ -369,7 +305,7 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
                 domain: "science".to_string(),
                 payload_hash: [9u8; 32],
                 uri: "ipfs://x".to_string(),
-                expires_epoch: epoch.saturating_sub(1),
+                expires_epoch: epoch - 1,
             },
         );
 
@@ -452,11 +388,12 @@ fn app_undo_rolls_back_spam_block_correctly() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
-    let sk = [7u8; 32];
-    let signer = signer_addr(sk);
+    let sk = test_signer_sk();
+    let signer = test_signer_addr();
 
     let start_time = 1_700_100_000u64;
-    let base = build_owned_base_chain(&db, 30, start_time, signer).context("build_owned_base_chain")?;
+    let base = build_base_chain_with_miner(&db, 30, start_time, signer)
+        .context("build_base_chain_with_miner")?;
     let tip0 = *base.last().unwrap();
     set_tip(&db, &tip0)?;
 
@@ -485,7 +422,9 @@ fn app_undo_rolls_back_spam_block_correctly() -> Result<()> {
         let (op, v) = fund[i];
         let fee = csd::params::MIN_FEE_PROPOSE;
         let send = v - fee;
-        let ph = [i as u8; 32];
+
+        let mut ph = [0u8; 32];
+        ph[0] = (i as u8) + 1; // avoid all-zero payload hash
 
         let tx = make_spend_tx(
             op,
