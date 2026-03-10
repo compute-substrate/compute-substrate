@@ -19,10 +19,29 @@ fn h20(n: u8) -> Hash20 {
 }
 
 fn apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
+    let bh = csd::chain::index::header_hash(&blk.header);
+
+    // Persist block bytes first
+    let bytes = csd::codec::consensus_bincode()
+        .serialize(blk)
+        .context("serialize block")?;
+    db.blocks
+        .insert(csd::state::db::k_block(&bh), bytes)
+        .context("db.blocks.insert")?;
+
+    // Index header against current parent
+    let parent_hi = if blk.header.prev == [0u8; 32] {
+        None
+    } else {
+        get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
+    };
+    csd::chain::index::index_header(db, &blk.header, parent_hi.as_ref())
+        .context("index_header")?;
+
+    // Apply state transition
     validate_and_apply_block(db, blk, epoch_of(height), height)
         .with_context(|| format!("apply h={height}"))?;
 
-    let bh = csd::chain::index::header_hash(&blk.header);
     set_tip(db, &bh)?;
     Ok(bh)
 }
