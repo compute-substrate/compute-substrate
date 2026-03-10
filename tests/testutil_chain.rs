@@ -1,26 +1,56 @@
-// tests/testutil_chain.rs
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
 use csd::chain::index::{get_hidx, header_hash, index_header};
 use csd::chain::pow::expected_bits;
+use csd::chain::time::median_time_past;
 use csd::codec;
-use csd::params::INITIAL_REWARD;
+use csd::params::{INITIAL_REWARD, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
 use csd::state::app_state::epoch_of;
 use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
-use csd::types::{Block, BlockHeader, Hash32, Transaction};
-use csd::params::{MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
-use csd::chain::time::median_time_past;
-
+use csd::types::{Block, BlockHeader, Hash20, Hash32, Transaction};
 
 pub fn open_db(tmp: &TempDir) -> Result<Stores> {
     Stores::open(tmp.path().to_str().unwrap()).context("Stores::open")
 }
 
 pub fn make_coinbase(height: u64) -> Transaction {
-    let miner: [u8; 20] = [0x11u8; 20];
+    make_coinbase_to(height, [0x11u8; 20])
+}
+
+pub fn make_coinbase_to(height: u64, miner: Hash20) -> Transaction {
     csd::chain::mine::coinbase(miner, INITIAL_REWARD, height, None)
+}
+
+/// Minimal merkle for tests.
+/// Must match consensus merkle logic used by mining/block construction.
+pub fn merkle_root(txs: &[Transaction]) -> Hash32 {
+    use csd::crypto::{sha256d, txid};
+
+    let mut layer: Vec<Hash32> = txs.iter().map(txid).collect();
+    if layer.is_empty() {
+        return [0u8; 32];
+    }
+
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut i = 0usize;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
+
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&left);
+            buf[32..].copy_from_slice(&right);
+            next.push(sha256d(&buf));
+
+            i += 2;
+        }
+        layer = next;
+    }
+
+    layer[0]
 }
 
 pub fn make_test_header(
@@ -30,10 +60,12 @@ pub fn make_test_header(
     height: u64,
 ) -> Result<BlockHeader> {
     let parent_hi = get_hidx(db, &parent)?.expect("missing parent hidx");
+
     let mtp = median_time_past(db, &parent_hi.hash).unwrap_or(parent_hi.time);
     let min_spacing = parent_hi.time.saturating_add(MIN_BLOCK_SPACING_SECS);
     let mtp_time = mtp.saturating_add(1);
     let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+
     let mut time = min_spacing.max(mtp_time).min(max_allowed);
     if time <= mtp {
         time = mtp_time;
@@ -44,51 +76,11 @@ pub fn make_test_header(
     Ok(BlockHeader {
         version: 1,
         prev: parent,
-        merkle: {
-            // reuse your merkle implementation if exported; otherwise recompute like mine.rs
-            let mut ids: Vec<[u8; 32]> = Vec::with_capacity(txs.len());
-            for tx in txs {
-                ids.push(csd::crypto::txid(tx));
-            }
-            csd::chain::mine::merkle_root_txids(&ids)
-        },
+        merkle: merkle_root(txs),
         time,
         bits,
-        nonce: 0,
+        nonce: 0, // tests rely on PoW bypass mode when needed
     })
-}
-
-/// Minimal merkle for tests.
-pub fn merkle_root(txs: &[Transaction]) -> Hash32 {
-    use csd::crypto::txid;
-    use sha2::{Digest, Sha256};
-
-    fn h2(a: &Hash32, b: &Hash32) -> Hash32 {
-        let mut hasher = Sha256::new();
-        hasher.update(a);
-        hasher.update(b);
-        let x = hasher.finalize();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&x);
-        out
-    }
-
-    let mut layer: Vec<Hash32> = txs.iter().map(txid).collect();
-    if layer.is_empty() {
-        return [0u8; 32];
-    }
-    while layer.len() > 1 {
-        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
-        let mut i = 0usize;
-        while i < layer.len() {
-            let a = layer[i];
-            let b = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
-            next.push(h2(&a, &b));
-            i += 2;
-        }
-        layer = next;
-    }
-    layer[0]
 }
 
 /// Persist block bytes into db.blocks.
@@ -104,8 +96,24 @@ fn persist_block(db: &Stores, blk: &Block) -> Result<Hash32> {
 }
 
 /// Apply a canonical block (persist + index + validate/apply + set_tip).
-pub fn apply_canonical_block(db: &Stores, prev: Hash32, height: u64, time: u64) -> Result<Hash32> {
-    let cb = make_coinbase(height);
+pub fn apply_canonical_block(
+    db: &Stores,
+    prev: Hash32,
+    height: u64,
+    time: u64,
+) -> Result<Hash32> {
+    apply_canonical_block_to(db, prev, height, time, [0x11u8; 20])
+}
+
+/// Apply a canonical block (persist + index + validate/apply + set_tip), with explicit miner address.
+pub fn apply_canonical_block_to(
+    db: &Stores,
+    prev: Hash32,
+    height: u64,
+    time: u64,
+    miner: Hash20,
+) -> Result<Hash32> {
+    let cb = make_coinbase_to(height, miner);
     let txs = vec![cb];
 
     let parent_hi = if prev == [0u8; 32] {
@@ -122,7 +130,7 @@ pub fn apply_canonical_block(db: &Stores, prev: Hash32, height: u64, time: u64) 
         merkle: merkle_root(&txs),
         time,
         bits,
-        nonce: 0, // tests rely on PoW bypass mode
+        nonce: 0,
     };
 
     let blk = Block { header: hdr, txs };
@@ -134,8 +142,24 @@ pub fn apply_canonical_block(db: &Stores, prev: Hash32, height: u64, time: u64) 
 }
 
 /// Store + index a fork block (persist + index ONLY; no apply, no tip change).
-pub fn store_index_fork_block(db: &Stores, prev: Hash32, height: u64, time: u64) -> Result<Hash32> {
-    let cb = make_coinbase(height);
+pub fn store_index_fork_block(
+    db: &Stores,
+    prev: Hash32,
+    height: u64,
+    time: u64,
+) -> Result<Hash32> {
+    store_index_fork_block_to(db, prev, height, time, [0x11u8; 20])
+}
+
+/// Store + index a fork block (persist + index ONLY; no apply, no tip change), with explicit miner.
+pub fn store_index_fork_block_to(
+    db: &Stores,
+    prev: Hash32,
+    height: u64,
+    time: u64,
+    miner: Hash20,
+) -> Result<Hash32> {
+    let cb = make_coinbase_to(height, miner);
     let txs = vec![cb];
 
     let parent_hi = if prev == [0u8; 32] {
@@ -163,14 +187,27 @@ pub fn store_index_fork_block(db: &Stores, prev: Hash32, height: u64, time: u64)
 
 /// Build canonical base chain of length `n` (applied).
 pub fn build_base_chain(db: &Stores, n: u64, start_time: u64) -> Result<Vec<Hash32>> {
+    build_base_chain_with_miner(db, n, start_time, [0x11u8; 20])
+}
+
+/// Build canonical base chain of length `n` (applied), with explicit miner address.
+pub fn build_base_chain_with_miner(
+    db: &Stores,
+    n: u64,
+    start_time: u64,
+    miner: Hash20,
+) -> Result<Vec<Hash32>> {
     let mut out = Vec::with_capacity(n as usize);
     let mut prev = [0u8; 32];
+
     for h in 0..n {
         let t = start_time + h * 60;
-        let bh = apply_canonical_block(db, prev, h, t).with_context(|| format!("apply h={h}"))?;
+        let bh = apply_canonical_block_to(db, prev, h, t, miner)
+            .with_context(|| format!("apply h={h}"))?;
         out.push(bh);
         prev = bh;
     }
+
     Ok(out)
 }
 
@@ -184,20 +221,23 @@ pub fn build_fork_index_only(
     start_time: u64,
 ) -> Result<Vec<Hash32>> {
     anyhow::ensure!(fork_height > 0, "fork_height must be > 0");
+
     let mut out = Vec::with_capacity(fork_len as usize);
     let mut prev = base_hashes[(fork_height - 1) as usize];
 
     for i in 0..fork_len {
         let h = fork_height + i;
         let t = start_time + h * 60 + 17;
-        let bh = store_index_fork_block(db, prev, h, t).with_context(|| format!("fork h={h}"))?;
+        let bh = store_index_fork_block(db, prev, h, t)
+            .with_context(|| format!("fork h={h}"))?;
         out.push(bh);
         prev = bh;
     }
+
     Ok(out)
 }
 
-/// Walk tip->genesis via header index (in `src`), then replay bytes into `dst`.
+/// Walk tip->genesis via header index, then replay bytes into `dst`.
 pub fn replay_canonical_from_tip(dst: &Stores, src: &Stores, tip: Hash32) -> Result<()> {
     let mut rev = Vec::<Hash32>::new();
     let mut cur = tip;
@@ -217,7 +257,10 @@ pub fn replay_canonical_from_tip(dst: &Stores, src: &Stores, tip: Hash32) -> Res
         let Some(v) = src.blocks.get(k_block(bh)).context("src.blocks.get")? else {
             anyhow::bail!("missing block bytes for {}", hex::encode(bh));
         };
-        let blk: Block = codec::consensus_bincode().deserialize(&v).context("deserialize Block")?;
+
+        let blk: Block = codec::consensus_bincode()
+            .deserialize(&v)
+            .context("deserialize Block")?;
 
         let parent_hi = if blk.header.prev == [0u8; 32] {
             None
@@ -235,8 +278,7 @@ pub fn replay_canonical_from_tip(dst: &Stores, src: &Stores, tip: Hash32) -> Res
 }
 
 /// Flush all trees that reorg touches.
-/// IMPORTANT: This must be a *single* DB-level durability fence (not per-tree flush),
-/// to match `reorg.rs` using `db.db.flush()` and to avoid cross-tree persistence skew in crash fuzz.
+/// Must be a DB-level durability fence to match production semantics.
 pub fn flush_all_state_trees(db: &Stores) -> anyhow::Result<()> {
     db.db.flush().context("db.flush (all trees)")?;
     Ok(())
