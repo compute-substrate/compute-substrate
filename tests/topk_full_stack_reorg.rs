@@ -176,12 +176,15 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let tip_hi = csd::chain::index::get_hidx(&db, &tip_a)?.expect("tip hidx");
     let height_p = tip_hi.height + 1;
 
-    let txs_p = vec![
-        csd::chain::mine::coinbase(addr_a, csd::params::block_reward(height_p), height_p, None),
-        propose1.clone(),
-        propose2.clone(),
-        propose3.clone(),
-    ];
+let reward_p = csd::params::block_reward(height_p);
+let fees_p = propose_fee * 3;
+
+let txs_p = vec![
+    csd::chain::mine::coinbase(addr_a, reward_p + fees_p, height_p, None),
+    propose1.clone(),
+    propose2.clone(),
+    propose3.clone(),
+];
 
     let hdr_p = make_test_header(&db, tip_a, &txs_p, height_p)?;
     let blk_p = Block { header: hdr_p, txs: txs_p };
@@ -243,12 +246,16 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let tip_hi2 = csd::chain::index::get_hidx(&db, &bh_p)?.expect("hidx p");
     let height_a = tip_hi2.height + 1;
 
-    let txs_a = vec![
-        csd::chain::mine::coinbase(addr_a, csd::params::block_reward(height_a), height_a, None),
-        a_att1.clone(),
-        a_att2.clone(),
-        a_att3.clone(),
-    ];
+let reward_a = csd::params::block_reward(height_a);
+let fees_a = attest_fee_mid + attest_fee_top + attest_fee_low;
+
+let txs_a = vec![
+    csd::chain::mine::coinbase(addr_a, reward_a + fees_a, height_a, None),
+    a_att1.clone(),
+    a_att2.clone(),
+    a_att3.clone(),
+];
+
     let hdr_a = make_test_header(&db, bh_p, &txs_a, height_a)?;
     let blk_a = Block { header: hdr_a, txs: txs_a };
     let _bh_a = apply_block(&db, &blk_a, height_a).context("apply attests A")?;
@@ -352,12 +359,16 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let hi_b3 = csd::chain::index::get_hidx(&db, &bh_b3)?.expect("hidx b3");
     let height_b4 = hi_b3.height + 1;
 
-    let txs_b4 = vec![
-        csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_b4), height_b4, None),
-        b_att1,
-        b_att2,
-        b_att3,
-    ];
+let reward_b = csd::params::block_reward(height_b4);
+let fees_b = attest_fee_mid + attest_fee_low + attest_fee_top;
+
+let txs_b4 = vec![
+    csd::chain::mine::coinbase(addr_f, reward_b + fees_b, height_b4, None),
+    b_att1,
+    b_att2,
+    b_att3,
+];
+
     let hdr_b4 = make_test_header(&db, bh_b3, &txs_b4, height_b4)?;
     let blk_b4 = Block { header: hdr_b4, txs: txs_b4 };
     let bh_b4 = csd::chain::index::header_hash(&blk_b4.header);
