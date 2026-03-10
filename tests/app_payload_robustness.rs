@@ -3,22 +3,47 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
-use csd::chain::index::get_hidx;
+use csd::chain::index::{get_hidx, index_header};
+use csd::chain::pow::expected_bits;
 use csd::state::app_state::{epoch_of, get_topk};
-use csd::state::db::{get_tip, set_tip, Stores};
+use csd::state::db::{k_block, set_tip, Stores};
 use csd::state::utxo::{undo_block, validate_and_apply_block};
-use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
+use csd::types::{AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
 mod testutil_chain;
-use testutil_chain::{build_base_chain, make_test_header, open_db};
+use testutil_chain::{make_test_header, open_db};
 
 fn h20(n: u8) -> Hash20 {
     [n; 20]
 }
 
+fn signer_addr(sk32: [u8; 32]) -> Hash20 {
+    // Dummy tx just to get the compressed pubkey from your exact signer helper.
+    let dummy = Transaction {
+        version: 1,
+        inputs: vec![TxIn {
+            prevout: OutPoint {
+                txid: [0u8; 32],
+                vout: 0,
+            },
+            script_sig: vec![],
+        }],
+        outputs: vec![TxOut {
+            value: 1,
+            script_pubkey: [0u8; 20],
+        }],
+        locktime: 0,
+        app: AppPayload::None,
+    };
+
+    let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, sk32);
+    csd::crypto::hash160(&pub33)
+}
+
 fn apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
     validate_and_apply_block(db, blk, epoch_of(height), height)
         .with_context(|| format!("apply h={height}"))?;
+
     let bh = csd::chain::index::header_hash(&blk.header);
     set_tip(db, &bh)?;
     Ok(bh)
@@ -29,6 +54,62 @@ fn load_block(db: &Stores, bh: &Hash32) -> Result<Block> {
         anyhow::bail!("missing block bytes for 0x{}", hex::encode(bh));
     };
     Ok(csd::codec::consensus_bincode().deserialize::<Block>(&v)?)
+}
+
+fn build_owned_base_chain(
+    db: &Stores,
+    n: u64,
+    start_time: u64,
+    miner_addr: Hash20,
+) -> Result<Vec<Hash32>> {
+    let mut out = Vec::with_capacity(n as usize);
+    let mut prev = [0u8; 32];
+
+    for height in 0..n {
+        let txs = vec![csd::chain::mine::coinbase(
+            miner_addr,
+            csd::params::block_reward(height),
+            height,
+            None,
+        )];
+
+        let parent_hi = if prev == [0u8; 32] {
+            None
+        } else {
+            get_hidx(db, &prev).context("get_hidx(parent)")?
+        };
+
+        let bits = expected_bits(db, height, parent_hi.as_ref()).context("expected_bits")?;
+
+        let hdr = BlockHeader {
+            version: 1,
+            prev,
+            merkle: testutil_chain::merkle_root(&txs),
+            time: start_time + height * 60,
+            bits,
+            nonce: 0, // test-bypass mode
+        };
+
+        let blk = Block { header: hdr, txs };
+        let bh = csd::chain::index::header_hash(&blk.header);
+
+        let bytes = csd::codec::consensus_bincode()
+            .serialize(&blk)
+            .context("serialize block")?;
+        db.blocks
+            .insert(k_block(&bh), bytes)
+            .context("db.blocks.insert")?;
+
+        index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
+        validate_and_apply_block(db, &blk, epoch_of(height), height)
+            .with_context(|| format!("apply h={height}"))?;
+        set_tip(db, &bh).context("set_tip")?;
+
+        out.push(bh);
+        prev = bh;
+    }
+
+    Ok(out)
 }
 
 /// Spend a single UTXO into one output, paying `fee`.
@@ -84,14 +165,16 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
-    // Build enough coinbases to fund a bunch of txs.
+    let sk = [7u8; 32];
+    let signer = signer_addr(sk);
+
+    // Build enough coinbases to fund a bunch of txs, but pay them to the signer.
     let start_time = 1_700_100_000u64;
-    let base = build_base_chain(&db, 80, start_time).context("build_base_chain")?;
+    let base = build_owned_base_chain(&db, 80, start_time, signer).context("build_owned_base_chain")?;
     let tip0 = *base.last().unwrap();
     set_tip(&db, &tip0)?;
 
-    // We'll use coinbases from early blocks as funding inputs.
-    // Each "funding UTXO" is (coinbase txid, vout=0).
+    // Funding UTXOs = signer-owned coinbases
     let mut fund_utxos: Vec<(OutPoint, u64)> = Vec::new();
     for bh in base.iter().take(60).skip(2) {
         let b = load_block(&db, bh)?;
@@ -101,27 +184,17 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
         fund_utxos.push((OutPoint { txid: cbid, vout: 0 }, v));
     }
 
-    // Domains to spread across
     let domains = ["science", "finance", "ai", "weather", "sports"];
     let addr_miner = h20(0xA1);
-    let addr_user = h20(0xB2);
-    let sk = [7u8; 32];
 
-    // Track proposals so we can attest them later
+    // Send change back to signer so future spends remain valid
+    let addr_user = signer;
+
     let mut proposals_by_domain: HashMap<String, Vec<Hash32>> = HashMap::new();
-
-    // Reference score model: (epoch, domain) -> proposal_id -> score
     let mut ref_scores: HashMap<(u64, String), HashMap<Hash32, u128>> = HashMap::new();
 
-    // Make many blocks. Each block:
-    // - includes 1 coinbase
-    // - includes up to a few proposals and attestations
-    //
-    // Total operations small enough to be fast, big enough to shake out bugs.
     let blocks_to_make = 40usize;
     let mut cur_tip = tip0;
-
-    // We will "consume" fund_utxos sequentially as inputs so every tx is connectable.
     let mut fund_i = 0usize;
 
     for _ in 0..blocks_to_make {
@@ -131,7 +204,6 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
 
         let mut txs: Vec<Transaction> = Vec::new();
 
-        // coinbase first
         txs.push(csd::chain::mine::coinbase(
             addr_miner,
             csd::params::block_reward(height),
@@ -139,11 +211,9 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             None,
         ));
 
-        // decide how many proposals and attests this block will contain
         let n_prop = rng.gen_range(0..=4);
         let n_att = rng.gen_range(0..=8);
 
-        // ---- proposals ----
         for _ in 0..n_prop {
             if fund_i >= fund_utxos.len() {
                 break;
@@ -154,10 +224,8 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             let d = domains[rng.gen_range(0..domains.len())].to_string();
             let payload_hash: Hash32 = rng.gen();
 
-            // expires at or after current epoch (valid)
             let expires_epoch = epoch + rng.gen_range(0..=5);
 
-            // fee must meet MIN_FEE_PROPOSE
             let fee = csd::params::MIN_FEE_PROPOSE;
             let send = v.saturating_sub(fee);
 
@@ -179,7 +247,6 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             let pid = csd::crypto::txid(&tx);
             proposals_by_domain.entry(d.clone()).or_default().push(pid);
 
-            // Ensure score entry exists (0) in reference model for this epoch/domain
             ref_scores
                 .entry((epoch, d.clone()))
                 .or_default()
@@ -189,13 +256,11 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             txs.push(tx);
         }
 
-        // ---- attestations ----
         for _ in 0..n_att {
             if fund_i >= fund_utxos.len() {
                 break;
             }
 
-            // pick a random domain that has at least one proposal so far
             let eligible: Vec<String> = proposals_by_domain
                 .iter()
                 .filter(|(_, v)| !v.is_empty())
@@ -213,7 +278,6 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
             let (op, v) = fund_utxos[fund_i];
             fund_i += 1;
 
-            // fee must meet MIN_FEE_ATTEST; also becomes weight
             let fee = csd::params::MIN_FEE_ATTEST + (rng.gen_range(0..=5) as u64) * 100;
             let send = v.saturating_sub(fee);
 
@@ -231,7 +295,6 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
                 },
             );
 
-            // Update reference score
             let m = ref_scores.entry((epoch, d.clone())).or_default();
             *m.entry(proposal_id).or_insert(0) += fee as u128;
 
@@ -244,13 +307,12 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
         let bh = apply_block(&db, &blk, height)?;
         cur_tip = bh;
 
-        // Spot-check: for one random domain at this epoch, TopK matches reference
         let d = domains[rng.gen_range(0..domains.len())].to_string();
         let key = (epoch, d.clone());
         let ref_map = ref_scores.get(&key).cloned().unwrap_or_default();
 
-        let mut ref_vec: Vec<(Hash32, u128)> = ref_map.into_iter().collect();
-        let ref_top = topk_ref(ref_vec, csd::params::TOP_K as usize);
+        let ref_vec: Vec<(Hash32, u128)> = ref_map.into_iter().collect();
+        let ref_top = topk_ref(ref_vec, csd::params::TOP_K);
 
         let got = get_topk(&db, epoch, &d)?;
         if got != ref_top {
@@ -272,21 +334,22 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
+    let sk = [7u8; 32];
+    let signer = signer_addr(sk);
+
     let start_time = 1_700_100_000u64;
-    let base = build_base_chain(&db, 12, start_time).context("build_base_chain")?;
+    let base = build_owned_base_chain(&db, 12, start_time, signer).context("build_owned_base_chain")?;
     let tip0 = *base.last().unwrap();
     set_tip(&db, &tip0)?;
 
-    // Grab a funding coinbase
     let b = load_block(&db, &base[5])?;
     let cb = &b.txs[0];
     let cbid = csd::crypto::txid(cb);
     let v = cb.outputs[0].value;
     let op = OutPoint { txid: cbid, vout: 0 };
 
-    let sk = [7u8; 32];
     let addr_miner = h20(0xA1);
-    let addr_user = h20(0xB2);
+    let addr_user = signer;
 
     let parent_hi = get_hidx(&db, &tip0)?.expect("missing parent hidx");
     let height = parent_hi.height + 1;
@@ -309,8 +372,14 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
             },
         );
 
+        let fee = csd::params::MIN_FEE_PROPOSE;
         let txs = vec![
-            csd::chain::mine::coinbase(addr_miner, csd::params::block_reward(height), height, None),
+            csd::chain::mine::coinbase(
+                addr_miner,
+                csd::params::block_reward(height) + fee,
+                height,
+                None,
+            ),
             bad,
         ];
         let hdr = make_test_header(&db, tip0, &txs, height)?;
@@ -326,10 +395,12 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
 
     // 2) ATTEST referencing unknown proposal must reject
     {
-        // Need another funding UTXO: use another coinbase
         let b2 = load_block(&db, &base[6])?;
         let cb2 = &b2.txs[0];
-        let op2 = OutPoint { txid: csd::crypto::txid(cb2), vout: 0 };
+        let op2 = OutPoint {
+            txid: csd::crypto::txid(cb2),
+            vout: 0,
+        };
         let v2 = cb2.outputs[0].value;
 
         let unknown_pid: Hash32 = [1u8; 32];
@@ -350,9 +421,15 @@ fn propose_and_attest_edge_cases_reject_correctly() -> Result<()> {
 
         let h2 = height + 1;
         let ep2 = epoch_of(h2);
+        let fee2 = csd::params::MIN_FEE_ATTEST;
 
         let txs = vec![
-            csd::chain::mine::coinbase(addr_miner, csd::params::block_reward(h2), h2, None),
+            csd::chain::mine::coinbase(
+                addr_miner,
+                csd::params::block_reward(h2) + fee2,
+                h2,
+                None,
+            ),
             att,
         ];
         let hdr = make_test_header(&db, tip0, &txs, h2)?;
@@ -374,12 +451,14 @@ fn app_undo_rolls_back_spam_block_correctly() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
+    let sk = [7u8; 32];
+    let signer = signer_addr(sk);
+
     let start_time = 1_700_100_000u64;
-    let base = build_base_chain(&db, 30, start_time).context("build_base_chain")?;
+    let base = build_owned_base_chain(&db, 30, start_time, signer).context("build_owned_base_chain")?;
     let tip0 = *base.last().unwrap();
     set_tip(&db, &tip0)?;
 
-    // Funding: take a handful of coinbases
     let mut fund: Vec<(OutPoint, u64)> = Vec::new();
     for bh in base.iter().take(20).skip(2) {
         let b = load_block(&db, bh)?;
@@ -388,23 +467,16 @@ fn app_undo_rolls_back_spam_block_correctly() -> Result<()> {
         fund.push((OutPoint { txid: cbid, vout: 0 }, cb.outputs[0].value));
     }
 
-    let sk = [7u8; 32];
     let addr_miner = h20(0xA1);
-    let addr_user = h20(0xB2);
+    let addr_user = signer;
     let domain = "science".to_string();
 
     let parent_hi = get_hidx(&db, &tip0)?.expect("missing parent hidx");
     let height = parent_hi.height + 1;
     let epoch = epoch_of(height);
 
-    // Build one "spam" block with several proposes + attests
     let mut txs: Vec<Transaction> = Vec::new();
-    txs.push(csd::chain::mine::coinbase(
-        addr_miner,
-        csd::params::block_reward(height),
-        height,
-        None,
-    ));
+    let mut total_fees: u64 = 0;
 
     // 5 proposals
     let mut pids: Vec<Hash32> = Vec::new();
@@ -430,10 +502,11 @@ fn app_undo_rolls_back_spam_block_correctly() -> Result<()> {
         );
         let pid = csd::crypto::txid(&tx);
         pids.push(pid);
+        total_fees += fee;
         txs.push(tx);
     }
 
-    // 10 attestations to random proposals; weight = fee
+    // 10 attestations
     for j in 0..10usize {
         let (op, v) = fund[5 + j];
         let fee = csd::params::MIN_FEE_ATTEST + (j as u64) * 100;
@@ -453,22 +526,32 @@ fn app_undo_rolls_back_spam_block_correctly() -> Result<()> {
                 confidence: 0,
             },
         );
+        total_fees += fee;
         txs.push(tx);
     }
 
-    let hdr = make_test_header(&db, tip0, &txs, height)?;
-    let blk = Block { header: hdr, txs };
+    let mut all_txs = Vec::with_capacity(1 + txs.len());
+    all_txs.push(csd::chain::mine::coinbase(
+        addr_miner,
+        csd::params::block_reward(height) + total_fees,
+        height,
+        None,
+    ));
+    all_txs.extend(txs);
+
+    let hdr = make_test_header(&db, tip0, &all_txs, height)?;
+    let blk = Block {
+        header: hdr,
+        txs: all_txs,
+    };
     let bh = apply_block(&db, &blk, height).context("apply spam block")?;
 
-    // TopK should now be non-empty
     let got_before = get_topk(&db, epoch, &domain)?;
     assert!(!got_before.is_empty(), "expected non-empty TopK after spam block");
 
-    // Undo the block and set tip back to parent
     undo_block(&db, &bh).context("undo_block")?;
     set_tip(&db, &tip0).context("set_tip parent")?;
 
-    // TopK should roll back (likely empty for this epoch/domain in this test)
     let got_after = get_topk(&db, epoch, &domain)?;
     assert!(
         got_after.is_empty(),
