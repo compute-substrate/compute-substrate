@@ -8,10 +8,28 @@ use csd::state::utxo::validate_and_apply_block;
 use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
 mod testutil_chain;
-use testutil_chain::{build_base_chain, build_fork_index_only, open_db};
+use testutil_chain::{build_base_chain_with_miner, make_test_header, open_db};
 
-fn h20(n: u8) -> Hash20 {
-    [n; 20]
+fn addr_from_sk(sk32: [u8; 32]) -> Hash20 {
+    let dummy = Transaction {
+        version: 1,
+        inputs: vec![TxIn {
+            prevout: OutPoint {
+                txid: [0u8; 32],
+                vout: 0,
+            },
+            script_sig: vec![],
+        }],
+        outputs: vec![TxOut {
+            value: 0,
+            script_pubkey: [0u8; 20],
+        }],
+        locktime: 0,
+        app: AppPayload::None,
+    };
+
+    let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, sk32);
+    csd::crypto::hash160(&pub33)
 }
 
 fn make_spend_tx(
@@ -23,8 +41,6 @@ fn make_spend_tx(
     sk32: [u8; 32],
     app: AppPayload,
 ) -> Transaction {
-    // One-input, one-output spend.
-    // fee = prev_value - send_value
     assert_eq!(prev_value, send_value + fee);
 
     let mut tx = Transaction {
@@ -55,7 +71,6 @@ fn make_spend_tx(
 }
 
 fn apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
-    // Validate/apply and set tip exactly like consensus.
     validate_and_apply_block(db, blk, epoch_of(height), height)
         .with_context(|| format!("apply h={height}"))?;
 
@@ -73,29 +88,26 @@ fn load_block(db: &Stores, bh: &Hash32) -> Result<Block> {
 
 #[test]
 fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
-    // This is a “real path” test:
-    // - spends coinbase UTXOs
-    // - pays fees that become attestation weight
-    // - validate_and_apply_block updates app + utxo
-    // - a reorg switches which attestations are canonical
-    // - TopK must follow the canonical chain only
-
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
 
-    // Build a small base chain so we have spendable coinbase UTXOs.
-    // testutil_chain::build_base_chain should create blocks + index headers + apply them.
-    // If it only indexes, swap it for your “apply” builder.
+    // Keys + actual owning addresses
+    let sk_a = [7u8; 32];
+    let sk_f = [11u8; 32];
+
+    let addr_a = addr_from_sk(sk_a);
+    let addr_f = addr_from_sk(sk_f);
+
+    let domain = "science";
+
+    // Build base chain so coinbases belong to sk_a-derived address.
     let start_time = 1_700_100_000u64;
-    let base = build_base_chain(&db, 20, start_time).context("build_base_chain")?;
+    let base = build_base_chain_with_miner(&db, 20, start_time, addr_a)
+        .context("build_base_chain_with_miner")?;
     let tip_a = *base.last().unwrap();
     set_tip(&db, &tip_a)?;
 
-    // We’re going to spend 3 different coinbase outputs (from earlier blocks)
-    // to create 3 proposals, and then attest with different fee weights.
-
-    // --- pick three coinbase txids from early blocks ---
-    // We’ll load block bodies and use tx0 (coinbase) outpoint as input.
+    // Pick three spendable coinbases from early blocks
     let b1 = load_block(&db, &base[5])?;
     let b2 = load_block(&db, &base[6])?;
     let b3 = load_block(&db, &base[7])?;
@@ -108,24 +120,17 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     let op2 = OutPoint { txid: cb2, vout: 0 };
     let op3 = OutPoint { txid: cb3, vout: 0 };
 
-    // coinbase value at those heights:
     let v1 = b1.txs[0].outputs[0].value;
     let v2 = b2.txs[0].outputs[0].value;
     let v3 = b3.txs[0].outputs[0].value;
 
-    // Deterministic key (matches hash160(pub33) used by utxo validation)
-    // NOTE: if you already have a wallet/test key helper, use it. This is just a fixed sk.
-    let sk_a = [7u8; 32];
-    let sk_b = [9u8; 32];
-
-    let addr_a = h20(0xA1);
-    let domain = "science";
-
-    // Build 3 proposal txs in a single new block:
-    // fees are small but nonzero; proposer output goes back to addr_a.
+    // Proposal txs
     let propose1 = make_spend_tx(
-        op1, v1, addr_a,
-        v1 - 10_000, 10_000,
+        op1,
+        v1,
+        addr_a,
+        v1 - 10_000,
+        10_000,
         sk_a,
         AppPayload::Propose {
             domain: domain.to_string(),
@@ -136,8 +141,11 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     );
 
     let propose2 = make_spend_tx(
-        op2, v2, addr_a,
-        v2 - 10_000, 10_000,
+        op2,
+        v2,
+        addr_a,
+        v2 - 10_000,
+        10_000,
         sk_a,
         AppPayload::Propose {
             domain: domain.to_string(),
@@ -148,8 +156,11 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
     );
 
     let propose3 = make_spend_tx(
-        op3, v3, addr_a,
-        v3 - 10_000, 10_000,
+        op3,
+        v3,
+        addr_a,
+        v3 - 10_000,
+        10_000,
         sk_a,
         AppPayload::Propose {
             domain: domain.to_string(),
@@ -159,167 +170,243 @@ fn topk_full_stack_reorg_updates_and_rolls_back() -> Result<()> {
         },
     );
 
-    // Now we need a block that includes these txs (plus coinbase).
-    // We’ll reuse your stored block builder from testutil_chain by creating a fork “index-only”
-    // and then applying blocks by hash. But easiest: just create a manual block body and apply it.
-    //
-    // To keep this test independent from mining, we’ll load the tip block header and make a new header.
-    // NOTE: this assumes you have a helper in testutil_chain for constructing a valid header for tests.
-    // If you already have one, use it. Otherwise, you can copy your test header builder from other tests.
-
+    // Proposals block
     let tip_hi = csd::chain::index::get_hidx(&db, &tip_a)?.expect("tip hidx");
     let height_p = tip_hi.height + 1;
 
-    let mut txs_p = vec![
-        // coinbase will be validated to be height.to_le_bytes() etc.
+    let txs_p = vec![
         csd::chain::mine::coinbase(addr_a, csd::params::block_reward(height_p), height_p, None),
         propose1.clone(),
         propose2.clone(),
         propose3.clone(),
     ];
 
-    let hdr_p = testutil_chain::make_test_header(&db, tip_a, &txs_p, height_p)?;
+    let hdr_p = make_test_header(&db, tip_a, &txs_p, height_p)?;
     let blk_p = Block { header: hdr_p, txs: txs_p };
-
     let bh_p = apply_block(&db, &blk_p, height_p).context("apply proposals block")?;
 
-    // Proposal IDs (txids) used by attestations
     let pid1 = csd::crypto::txid(&propose1);
     let pid2 = csd::crypto::txid(&propose2);
     let pid3 = csd::crypto::txid(&propose3);
 
-    // Now create attestations with fee weights:
-    // - chain A will favor pid2 (highest fee)
-    // - chain B (fork) will favor pid3 (highest fee)
-    //
-    // We need spendable UTXOs to fund these attests; we’ll spend the proposer outputs we just made.
-    // Those outputs are at (txid(proposeX), vout=0) and have value (vX - 10_000).
-
+    // Spend proposal outputs for canonical chain A attests
     let op_p1 = OutPoint { txid: pid1, vout: 0 };
     let op_p2 = OutPoint { txid: pid2, vout: 0 };
     let op_p3 = OutPoint { txid: pid3, vout: 0 };
 
-    let pv1 = (v1 - 10_000);
-    let pv2 = (v2 - 10_000);
-    let pv3 = (v3 - 10_000);
+    let pv1 = v1 - 10_000;
+    let pv2 = v2 - 10_000;
+    let pv3 = v3 - 10_000;
 
-    // Chain A attests: pid2 weight 50k, pid1 weight 30k, pid3 weight 10k
+    // Chain A: pid2 wins
     let a_att1 = make_spend_tx(
-        op_p1, pv1, addr_a,
-        pv1 - 30_000, 30_000,
+        op_p1,
+        pv1,
+        addr_a,
+        pv1 - 30_000,
+        30_000,
         sk_a,
-        AppPayload::Attest { proposal_id: pid1, score: 0, confidence: 0 },
+        AppPayload::Attest {
+            proposal_id: pid1,
+            score: 0,
+            confidence: 0,
+        },
     );
     let a_att2 = make_spend_tx(
-        op_p2, pv2, addr_a,
-        pv2 - 50_000, 50_000,
+        op_p2,
+        pv2,
+        addr_a,
+        pv2 - 50_000,
+        50_000,
         sk_a,
-        AppPayload::Attest { proposal_id: pid2, score: 0, confidence: 0 },
+        AppPayload::Attest {
+            proposal_id: pid2,
+            score: 0,
+            confidence: 0,
+        },
     );
     let a_att3 = make_spend_tx(
-        op_p3, pv3, addr_a,
-        pv3 - 10_000, 10_000,
+        op_p3,
+        pv3,
+        addr_a,
+        pv3 - 10_000,
+        10_000,
         sk_a,
-        AppPayload::Attest { proposal_id: pid3, score: 0, confidence: 0 },
+        AppPayload::Attest {
+            proposal_id: pid3,
+            score: 0,
+            confidence: 0,
+        },
     );
 
     let tip_hi2 = csd::chain::index::get_hidx(&db, &bh_p)?.expect("hidx p");
     let height_a = tip_hi2.height + 1;
 
-    let mut txs_a = vec![
+    let txs_a = vec![
         csd::chain::mine::coinbase(addr_a, csd::params::block_reward(height_a), height_a, None),
         a_att1.clone(),
         a_att2.clone(),
         a_att3.clone(),
     ];
-    let hdr_a = testutil_chain::make_test_header(&db, bh_p, &txs_a, height_a)?;
+    let hdr_a = make_test_header(&db, bh_p, &txs_a, height_a)?;
     let blk_a = Block { header: hdr_a, txs: txs_a };
-    let bh_a = apply_block(&db, &blk_a, height_a).context("apply attests A")?;
+    let _bh_a = apply_block(&db, &blk_a, height_a).context("apply attests A")?;
 
-    // Assert TopK on canonical chain A
     let ep = epoch_of(height_a);
     let topk_a = get_topk(&db, ep, domain).context("get_topk A")?;
     assert!(!topk_a.is_empty(), "TopK should not be empty");
     assert_eq!(topk_a[0].0, pid2, "expected pid2 top on chain A");
 
-    // ---- Now build a competing fork B off bh_p with different attestation weights ----
+    // Fork-B funding coinbases must also belong to the signer used for fork-B.
+    // Build them by hand as stored+applied blocks on the existing canonical base
+    // so their outputs belong to addr_f.
     //
-    // We’ll create a fork chain in headers+blocks and then call maybe_reorg_to().
-    // Easiest path: use build_fork_index_only to extend from base chain, but here we just need
-    // to create an alternative block at height_a that spends DIFFERENT UTXOs.
-    //
-    // For that, we must fund fork-B attests from *different* UTXOs than chain A used.
-    // We’ll use a different proposer key/address and spend the same proposal outputs is NOT possible
-    // because those were spent in chain A. So instead: create fork-B attests that spend the *coinbase*
-    // of the proposals block (blk_p) by sending to addr_b first in fork-B, then attesting.
-    //
-    // Simpler: create fork-B as: at height_a, include NO spends of proposal outputs; instead attest
-    // using new funds coming from different UTXOs by re-spending different coinbases from earlier blocks.
-    //
-    // We already used cb1/cb2/cb3. Pick later coinbases for fork-B.
-
-    let sk_f = [11u8; 32];
-    let addr_f = h20(0xB2);
+    // We place them earlier than the fork point in terms of spendability source,
+    // but they are distinct UTXOs from chain A’s proposal-output spends.
 
     let b4 = load_block(&db, &base[8])?;
     let b5 = load_block(&db, &base[9])?;
     let b6 = load_block(&db, &base[10])?;
 
-    let cb4 = csd::crypto::txid(&b4.txs[0]);
-    let cb5 = csd::crypto::txid(&b5.txs[0]);
-    let cb6 = csd::crypto::txid(&b6.txs[0]);
+    let _ = (b4, b5, b6); // only keeping timeline alignment explicit
 
-    let op4 = OutPoint { txid: cb4, vout: 0 };
-    let op5 = OutPoint { txid: cb5, vout: 0 };
-    let op6 = OutPoint { txid: cb6, vout: 0 };
+    // Instead of reusing base-chain coinbases mined to addr_a, create three new
+    // canonical funding blocks to addr_f after chain A, then fork from bh_p using their outputs
+    // would not work because those funding blocks would not exist on fork B.
+    //
+    // So for this test we use three distinct earlier base-chain coinbases mined to addr_a? No:
+    // fork-B signer is sk_f, so ownership must match.
+    //
+    // Therefore we derive fork-B attests from fresh coinbases INSIDE fork-B's own block ancestry
+    // by first creating a heavier fork from bh_p:
+    //   B1: funding block to addr_f
+    //   B2: attestation block using B1 coinbase and two more earlier funding coinbases from B1/B2 chain
+    //
+    // To keep this simple and deterministic, we build a 3-block fork:
+    //   fork_fund1 off bh_p
+    //   fork_fund2 off fork_fund1
+    //   fork_att   off fork_fund2
+    //
+    // Then maybe_reorg_to(fork_att).
 
-    let v4 = b4.txs[0].outputs[0].value;
-    let v5 = b5.txs[0].outputs[0].value;
-    let v6 = b6.txs[0].outputs[0].value;
+    let height_b1 = height_a;
+    let txs_b1 = vec![
+        csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_b1), height_b1, None),
+    ];
+    let hdr_b1 = make_test_header(&db, bh_p, &txs_b1, height_b1)?;
+    let blk_b1 = Block { header: hdr_b1, txs: txs_b1 };
+    let bh_b1 = csd::chain::index::header_hash(&blk_b1.header);
+    db.blocks.insert(
+        csd::state::db::k_block(&bh_b1),
+        csd::codec::consensus_bincode().serialize(&blk_b1)?,
+    )?;
+    csd::chain::index::index_header(&db, &blk_b1.header, Some(&tip_hi2))?;
 
-    // Fork B attests: pid3 weight 70k, pid1 weight 20k, pid2 weight 10k
+    let hi_b1 = csd::chain::index::get_hidx(&db, &bh_b1)?.expect("hidx b1");
+    let height_b2 = hi_b1.height + 1;
+    let txs_b2 = vec![
+        csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_b2), height_b2, None),
+    ];
+    let hdr_b2 = make_test_header(&db, bh_b1, &txs_b2, height_b2)?;
+    let blk_b2 = Block { header: hdr_b2, txs: txs_b2 };
+    let bh_b2 = csd::chain::index::header_hash(&blk_b2.header);
+    db.blocks.insert(
+        csd::state::db::k_block(&bh_b2),
+        csd::codec::consensus_bincode().serialize(&blk_b2)?,
+    )?;
+    csd::chain::index::index_header(&db, &blk_b2.header, Some(&hi_b1))?;
+
+    // Need a third funding coinbase too, so create one more fork block.
+    let hi_b2 = csd::chain::index::get_hidx(&db, &bh_b2)?.expect("hidx b2");
+    let height_b3 = hi_b2.height + 1;
+    let txs_b3 = vec![
+        csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_b3), height_b3, None),
+    ];
+    let hdr_b3 = make_test_header(&db, bh_b2, &txs_b3, height_b3)?;
+    let blk_b3 = Block { header: hdr_b3, txs: txs_b3 };
+    let bh_b3 = csd::chain::index::header_hash(&blk_b3.header);
+    db.blocks.insert(
+        csd::state::db::k_block(&bh_b3),
+        csd::codec::consensus_bincode().serialize(&blk_b3)?,
+    )?;
+    csd::chain::index::index_header(&db, &blk_b3.header, Some(&hi_b2))?;
+
+    // Spend the three fork funding coinbases in the next block.
+    let fund1_cb = csd::crypto::txid(&blk_b1.txs[0]);
+    let fund2_cb = csd::crypto::txid(&blk_b2.txs[0]);
+    let fund3_cb = csd::crypto::txid(&blk_b3.txs[0]);
+
+    let fv1 = blk_b1.txs[0].outputs[0].value;
+    let fv2 = blk_b2.txs[0].outputs[0].value;
+    let fv3 = blk_b3.txs[0].outputs[0].value;
+
     let b_att1 = make_spend_tx(
-        op4, v4, addr_f,
-        v4 - 20_000, 20_000,
+        OutPoint { txid: fund1_cb, vout: 0 },
+        fv1,
+        addr_f,
+        fv1 - 20_000,
+        20_000,
         sk_f,
-        AppPayload::Attest { proposal_id: pid1, score: 0, confidence: 0 },
+        AppPayload::Attest {
+            proposal_id: pid1,
+            score: 0,
+            confidence: 0,
+        },
     );
     let b_att2 = make_spend_tx(
-        op5, v5, addr_f,
-        v5 - 10_000, 10_000,
+        OutPoint { txid: fund2_cb, vout: 0 },
+        fv2,
+        addr_f,
+        fv2 - 10_000,
+        10_000,
         sk_f,
-        AppPayload::Attest { proposal_id: pid2, score: 0, confidence: 0 },
+        AppPayload::Attest {
+            proposal_id: pid2,
+            score: 0,
+            confidence: 0,
+        },
     );
     let b_att3 = make_spend_tx(
-        op6, v6, addr_f,
-        v6 - 70_000, 70_000,
+        OutPoint { txid: fund3_cb, vout: 0 },
+        fv3,
+        addr_f,
+        fv3 - 70_000,
+        70_000,
         sk_f,
-        AppPayload::Attest { proposal_id: pid3, score: 0, confidence: 0 },
+        AppPayload::Attest {
+            proposal_id: pid3,
+            score: 0,
+            confidence: 0,
+        },
     );
 
-    // Create fork-B block at same height_a but different body, parent=bh_p
-    let mut txs_b = vec![
-        csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_a), height_a, None),
-        b_att1, b_att2, b_att3,
-    ];
-    let hdr_b = testutil_chain::make_test_header(&db, bh_p, &txs_b, height_a)?;
-    let blk_b = Block { header: hdr_b, txs: txs_b };
-    let bh_b = csd::chain::index::header_hash(&blk_b.header);
+    let hi_b3 = csd::chain::index::get_hidx(&db, &bh_b3)?.expect("hidx b3");
+    let height_b4 = hi_b3.height + 1;
 
-    // Persist fork-B block bytes + index header so maybe_reorg_to can choose it.
-    db.blocks.insert(csd::state::db::k_block(&bh_b), csd::codec::consensus_bincode().serialize(&blk_b)?)?;
-    csd::chain::index::index_header(&db, &blk_b.header, Some(&tip_hi2))?;
+    let txs_b4 = vec![
+        csd::chain::mine::coinbase(addr_f, csd::params::block_reward(height_b4), height_b4, None),
+        b_att1,
+        b_att2,
+        b_att3,
+    ];
+    let hdr_b4 = make_test_header(&db, bh_b3, &txs_b4, height_b4)?;
+    let blk_b4 = Block { header: hdr_b4, txs: txs_b4 };
+    let bh_b4 = csd::chain::index::header_hash(&blk_b4.header);
+
+    db.blocks.insert(
+        csd::state::db::k_block(&bh_b4),
+        csd::codec::consensus_bincode().serialize(&blk_b4)?,
+    )?;
+    csd::chain::index::index_header(&db, &blk_b4.header, Some(&hi_b3))?;
     db.db.flush()?;
 
-    // Now force reorg choice to bh_b (if your maybe_reorg_to requires higher chainwork,
-    // you can also add 1-2 extra blocks on top of B to make it heavier).
-    maybe_reorg_to(&db, &bh_b, None).context("maybe_reorg_to fork B")?;
+    maybe_reorg_to(&db, &bh_b4, None).context("maybe_reorg_to fork B")?;
 
     let tip_after = get_tip(&db)?.unwrap();
-    assert_eq!(tip_after, bh_b, "fork B should become canonical for this test");
+    assert_eq!(tip_after, bh_b4, "fork B should become canonical for this test");
 
-    // TopK must now reflect fork B: pid3 should be top
-    let topk_b = get_topk(&db, ep, domain).context("get_topk B")?;
+    let ep_b = epoch_of(height_b4);
+    let topk_b = get_topk(&db, ep_b, domain).context("get_topk B")?;
     assert!(!topk_b.is_empty(), "TopK should not be empty after reorg");
     assert_eq!(topk_b[0].0, pid3, "expected pid3 top on chain B after reorg");
 
