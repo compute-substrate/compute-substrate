@@ -287,16 +287,31 @@ impl Mempool {
     /// PRODUCTION UPGRADE:
     /// - Use eviction index directly (reverse iteration) so we avoid O(n log n) sorting every call.
     pub fn sample(&self, max_txs: usize) -> Vec<Transaction> {
-        let r = self.inner.read().unwrap();
+    let r = self.inner.read().unwrap();
 
-        let mut out = Vec::with_capacity(max_txs.min(r.txs.len()));
-        for (_fr, id) in r.eviction.iter().rev().take(max_txs) {
-            if let Some(tx) = r.txs.get(id) {
-                out.push(tx.clone());
-            }
+    // Collect first so we can fix tie-break ordering
+    let mut entries: Vec<(u64, Hash32)> =
+        r.eviction.iter().cloned().collect();
+
+    // Sort by:
+    // 1) feerate DESC
+    // 2) txid ASC
+    entries.sort_by(|a, b| {
+        match b.0.cmp(&a.0) {
+            std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
         }
-        out
+    });
+
+    let mut out = Vec::with_capacity(max_txs.min(entries.len()));
+    for (_fr, id) in entries.into_iter().take(max_txs) {
+        if let Some(tx) = r.txs.get(&id) {
+            out.push(tx.clone());
+        }
     }
+
+    out
+}
 
     /// Revalidate mempool txs against *current* canonical UTXO set and policy caps.
     ///
