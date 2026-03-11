@@ -112,7 +112,7 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
         cfg_b,
         mined_rx_b,
         gossip_rx_b,
-        csd::chain::lock::ChainLock::new(),
+        csd::chain::lock::new_chain_lock(),
     ).await?;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -135,7 +135,7 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
         cfg_a,
         mined_rx_a,
         gossip_rx_a,
-        csd::chain::lock::ChainLock::new(),
+        csd::chain::lock::new_chain_lock(),
     ).await?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
