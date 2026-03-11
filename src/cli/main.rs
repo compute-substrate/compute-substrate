@@ -474,6 +474,7 @@ pub async fn run() -> Result<()> {
                 bootnodes: boots,
                 genesis_hash,
                 is_bootnode: !mine,
+                test_mode: crate::net::node::TestPeerMode::Normal,
             };
 
             // Start P2P and keep a handle for miner gating
