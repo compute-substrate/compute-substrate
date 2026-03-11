@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+luse anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -130,18 +130,26 @@ async fn live_p2p_header_block_sync_advances_remote_tip() -> Result<()> {
     .await
     .context("spawn_p2p A")?;
 
-    tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
 
-    // Important: use the actual listen port from A, not tcp/0.
-    let listen_addr_a = format!("/ip4/127.0.0.1/tcp/{}/p2p/{}", 40439, handle_a.peer_id);
-    let bootnode_a = if let Ok(addr) = listen_addr_a.parse::<Multiaddr>() {
-        addr
-    } else {
-        // Fallback if the runtime chose a different port and your logs differ:
-        // scan db-independent handle only gives peer_id, so in this test we rely on the first
-        // NewListenAddr log line. If you want, we can next wire the actual listen addr into NetHandle.
-        anyhow::bail!("failed to parse bootnode multiaddr for node A");
+    // Use the actual bound listen address from node A.
+    let listen_base_a = {
+        let mut got: Option<Multiaddr> = None;
+
+        for _ in 0..40 {
+            if let Some(addr) = handle_a.listen_addr().await {
+                got = Some(addr);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        got.context("node A did not expose listen_addr in time")?
     };
+
+    let bootnode_a: Multiaddr = format!("{}/p2p/{}", listen_base_a, handle_a.peer_id)
+        .parse()
+        .context("parse bootnode_a from handle_a.listen_addr")?;
 
     let cfg_b = NetConfig {
         datadir: tmp_b.path().to_string_lossy().to_string(),
