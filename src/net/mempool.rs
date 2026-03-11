@@ -38,9 +38,11 @@ const MAX_MEMPOOL_SPENT: usize = 200_000; // cap spent-outpoint index growth (Do
 /// This is the same idea but more granular and future-proof.
 const MIN_FEERATE_PPM: u64 = 1;
 
-#[derive(Default)]
 pub struct Mempool {
     inner: RwLock<Inner>,
+    max_txs: usize,
+    max_bytes: usize,
+    max_spent: usize,
 }
 
 #[derive(Default)]
@@ -71,7 +73,21 @@ struct FeeInfo {
 
 impl Mempool {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: RwLock::new(Inner::default()),
+            max_txs: MAX_MEMPOOL_TXS,
+            max_bytes: MAX_MEMPOOL_BYTES,
+            max_spent: MAX_MEMPOOL_SPENT,
+        }
+    }
+
+    pub fn new_with_limits(max_txs: usize, max_bytes: usize, max_spent: usize) -> Self {
+        Self {
+            inner: RwLock::new(Inner::default()),
+            max_txs,
+            max_bytes,
+            max_spent,
+        }
     }
 
     pub fn contains(&self, id: &Hash32) -> bool {
@@ -212,19 +228,21 @@ impl Mempool {
         }
 
         // spent index growth DoS guard
-        if w.spent.len().saturating_add(tx.inputs.len()) > MAX_MEMPOOL_SPENT {
+
+        if w.spent.len().saturating_add(tx.inputs.len()) > self.max_spent {
             bail!(
-                "mempool spent index full (spent_len={} + new_inputs={} > MAX_MEMPOOL_SPENT={})",
+                "mempool spent index full (spent_len={} + new_inputs={} > max_spent={})",
                 w.spent.len(),
                 tx.inputs.len(),
-                MAX_MEMPOOL_SPENT
+                self.max_spent
             );
         }
 
         // If we're full (by count or bytes), require incoming tx to be competitive.
         // This prevents churn attacks where low-fee txs cause repeated evictions.
-        let would_exceed_count = w.txs.len() >= MAX_MEMPOOL_TXS;
-        let would_exceed_bytes = w.total_bytes.saturating_add(tx_bytes) > MAX_MEMPOOL_BYTES;
+        let would_exceed_count = w.txs.len() >= self.max_txs;
+        let would_exceed_bytes = w.total_bytes.saturating_add(tx_bytes) > self.max_bytes;
+
         if would_exceed_count || would_exceed_bytes {
             if let Some(min_fr) = w.eviction.iter().next().map(|x| x.0) {
                 if feerate_ppm <= min_fr {
@@ -240,12 +258,16 @@ impl Mempool {
         }
 
         // Ensure global caps by evicting lowest-fee-rate txs deterministically.
-        while w.txs.len() >= MAX_MEMPOOL_TXS {
+
+        while w.txs.len() >= self.max_txs {
+
             if !evict_one_lowest_feerate(&mut w) {
                 bail!("mempool full (cannot evict)");
             }
         }
-        while w.total_bytes.saturating_add(tx_bytes) > MAX_MEMPOOL_BYTES {
+
+        while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
+
             if !evict_one_lowest_feerate(&mut w) {
                 bail!("mempool bytes full (cannot evict)");
             }
