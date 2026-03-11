@@ -305,6 +305,13 @@ fn allow_gossip(
 
 // ----------------- libp2p behaviour -----------------
 
+#[derive(Clone, Debug)]
+pub enum TestPeerMode {
+    Normal,
+    StallBlockResponses,
+}
+
+
 #[derive(Clone)]
 pub struct NetConfig {
     pub datadir: String,
@@ -312,6 +319,8 @@ pub struct NetConfig {
     pub bootnodes: Vec<Multiaddr>,
     pub genesis_hash: Hash32,
     pub is_bootnode: bool,
+    #[cfg(test)]
+    pub test_mode: TestPeerMode,
 }
 
 #[derive(Clone)]
@@ -1159,16 +1168,26 @@ SwarmEvent::NewListenAddr { address, .. } => {
                                                 continue;
                                             }
 
-                                            let db2 = db.clone();
-                                            let req2 = request;
+                                            #[cfg(test)]
+{
+    if matches!(cfg.test_mode, TestPeerMode::StallBlockResponses)
+        && matches!(request, SyncRequest::GetBlock { .. })
+    {
+        println!("[p2p-test] intentionally stalling GetBlock response from {peer}");
+        continue;
+    }
+}
 
-                                            let resp = tokio::task::spawn_blocking(move || {
-                                                handle_request_blocking(&db2, req2)
-                                            })
-                                            .await
-                                            .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?;
+let db2 = db.clone();
+let req2 = request;
 
-                                            let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() });
+let resp = tokio::task::spawn_blocking(move || {
+    handle_request_blocking(&db2, req2)
+})
+.await
+.map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?;
+
+let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() });
 
                                             if let SyncResponse::Block { block } = &resp {
                                                 let bh = header_hash(&block.header);
