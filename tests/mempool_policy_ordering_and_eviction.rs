@@ -3,7 +3,7 @@ use tempfile::TempDir;
 
 use csd::crypto::txid;
 use csd::net::mempool::Mempool;
-use csd::state::db::{k_utxo, Stores, Utxo};
+use csd::state::db::{k_utxo, Stores};
 use csd::types::{AppPayload, OutPoint, Transaction, TxIn, TxOut};
 
 mod testutil_chain;
@@ -23,13 +23,16 @@ fn dummy_prev(n: u8) -> OutPoint {
 }
 
 fn insert_utxo(db: &Stores, op: OutPoint, value: u64, owner: [u8; 20]) -> Result<()> {
-    let u = Utxo {
+    let out = TxOut {
         value,
         script_pubkey: owner,
-        height: 1,
-        coinbase: false,
     };
-    db.utxo.insert(k_utxo(&op), csd::codec::consensus_bincode().serialize(&u)?)?;
+
+    db.utxo.insert(
+        k_utxo(&op),
+        csd::codec::consensus_bincode().serialize(&out)?,
+    )?;
+
     Ok(())
 }
 
@@ -75,8 +78,8 @@ fn mempool_policy_ordering_and_basic_admission() -> Result<()> {
 
     let v = 1_000_000u64;
 
-    // Seed backing UTXOs so insert_checked() can validate against canonical UTXO set.
-    for tag in 1u8..=7u8 {
+    // Seed UTXOs so insert_checked can validate
+    for tag in 1u8..=8u8 {
         insert_utxo(&db, dummy_prev(tag), v, h20(tag))?;
     }
 
@@ -94,28 +97,28 @@ fn mempool_policy_ordering_and_basic_admission() -> Result<()> {
 
     assert_eq!(mp.len(), 5);
 
-    // Deterministic high-feerate-first ordering via sample()
+    // Highest feerate first
     let order = txids_in_sample_order(&mp);
     assert_eq!(
         order,
         vec![txid(&t5), txid(&t4), txid(&t3), txid(&t2), txid(&t1)],
-        "mempool sample ordering should be highest feerate first"
+        "mempool ordering should be highest feerate first"
     );
 
-    // Duplicate insert should return Ok(false), not mutate state.
+    // Duplicate insert: Ok(false), no mutation
     let before = txids_in_sample_order(&mp);
     assert_eq!(mp.insert_checked(&db, t3.clone())?, false);
     let after = txids_in_sample_order(&mp);
-    assert_eq!(before, after, "duplicate insert mutated mempool");
+    assert_eq!(before, after);
 
-    // Conflict insert should return Ok(false), not mutate state.
-    let conflicting = make_tx(5, v, 6_000); // spends same prevout as t5
+    // Conflict insert: Ok(false), no mutation
+    let conflicting = make_tx(5, v, 6_000);
     let before_conflict = txids_in_sample_order(&mp);
     assert_eq!(mp.insert_checked(&db, conflicting)?, false);
     let after_conflict = txids_in_sample_order(&mp);
-    assert_eq!(before_conflict, after_conflict, "conflict insert mutated mempool");
+    assert_eq!(before_conflict, after_conflict);
 
-    // Low-fee but valid tx should still be admitted if above policy floor.
+    // Low fee but valid
     let t6 = make_tx(6, v, 10);
     assert_eq!(mp.insert_checked(&db, t6.clone())?, true);
 
@@ -123,9 +126,8 @@ fn mempool_policy_ordering_and_basic_admission() -> Result<()> {
     assert_eq!(order2.first().copied(), Some(txid(&t5)));
     assert_eq!(order2.last().copied(), Some(txid(&t6)));
 
-    // Tie-break determinism: equal fee/value => equal feerate, ordered by txid.
+    // Tie-break determinism
     let tie_a = make_tx(7, v, 6_000);
-    insert_utxo(&db, dummy_prev(8), v, h20(8))?;
     let tie_b = make_tx(8, v, 6_000);
 
     assert_eq!(mp.insert_checked(&db, tie_a.clone())?, true);
