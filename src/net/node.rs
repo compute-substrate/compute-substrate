@@ -319,7 +319,6 @@ pub struct NetConfig {
     pub bootnodes: Vec<Multiaddr>,
     pub genesis_hash: Hash32,
     pub is_bootnode: bool,
-    #[cfg(test)]
     pub test_mode: TestPeerMode,
 }
 
@@ -1168,7 +1167,6 @@ SwarmEvent::NewListenAddr { address, .. } => {
                                                 continue;
                                             }
 
-                                            #[cfg(test)]
 {
     if matches!(cfg.test_mode, TestPeerMode::StallBlockResponses)
         && matches!(request, SyncRequest::GetBlock { .. })
