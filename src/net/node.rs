@@ -56,6 +56,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::interval;
+use tokio::sync::RwLock;
 
 use crate::{
     chain::index::{get_hidx, header_hash, index_header},
@@ -319,11 +320,16 @@ pub struct NetHandle {
     connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
+    listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 }
 
 impl NetHandle {
     pub fn connected_peers(&self) -> usize {
         self.connected_peers.load(Ordering::Relaxed)
+    }
+
+    pub async fn listen_addr(&self) -> Option<Multiaddr> {
+        self.listen_addr.read().await.clone()
     }
 
     pub fn last_tip_seen_unix(&self) -> u64 {
@@ -598,27 +604,32 @@ pub async fn spawn_p2p(
     let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
     let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 
-    let handle = NetHandle {
-        peer_id,
-        connected_peers: connected_peers.clone(),
-        last_tip_seen_unix: last_tip_seen_unix.clone(),
-        last_peer_change_unix: last_peer_change_unix.clone(),
-    };
+let listen_addr = Arc::new(RwLock::new(None));
+
+
+let handle = NetHandle {
+    peer_id,
+    connected_peers: connected_peers.clone(),
+    last_tip_seen_unix: last_tip_seen_unix.clone(),
+    last_peer_change_unix: last_peer_change_unix.clone(),
+    listen_addr: listen_addr.clone(),
+};
 
     tokio::spawn(async move {
         if let Err(e) = run_p2p_loop(
-            db,
-            mempool,
-            cfg,
-            local_key,
-            peer_id,
-            connected_peers,
-            last_tip_seen_unix,
-            last_peer_change_unix,
-            mined_rx,
-            tx_gossip_rx,
-            chain_lock,
-        )
+    db,
+    mempool,
+    cfg,
+    local_key,
+    peer_id,
+    connected_peers,
+    last_tip_seen_unix,
+    last_peer_change_unix,
+    listen_addr,
+    mined_rx,
+    tx_gossip_rx,
+    chain_lock,
+)
         .await
         {
             eprintln!("[p2p] fatal: {e}");
@@ -650,6 +661,8 @@ async fn run_p2p_loop(
     connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
+    listen_addr: Arc<RwLock<Option<Multiaddr>>>,
+
     mut mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
     mut tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
     chain_lock: ChainLock,
@@ -949,9 +962,16 @@ async fn run_p2p_loop(
 
             swarm_ev = swarm.select_next_some() => {
                 match swarm_ev {
-                    SwarmEvent::NewListenAddr { address, .. } => {
-                        println!("[p2p] NewListenAddr: {}", address);
-                    }
+
+SwarmEvent::NewListenAddr { address, .. } => {
+    println!("[p2p] NewListenAddr: {}", address);
+
+    // store first usable listen addr
+    let mut g = listen_addr.write().await;
+    if g.is_none() {
+        *g = Some(address.clone());
+    }
+}
 
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         if is_banned(&bans, &peer_id) {
