@@ -133,7 +133,7 @@ fn mempool_remove_mined_block_and_conflicts() -> Result<()> {
         header: BlockHeader {
             version: 1,
             prev: [0u8; 32],
-            merkle_root: [0u8; 32],
+            merkle: [0u8; 32],
             time: 1_700_000_000,
             bits: 0,
             nonce: 0,
@@ -154,7 +154,7 @@ fn mempool_remove_mined_block_and_conflicts() -> Result<()> {
         header: BlockHeader {
             version: 1,
             prev: [1u8; 32],
-            merkle_root: [0u8; 32],
+            merkle: [0u8; 32],
             time: 1_700_000_001,
             bits: 0,
             nonce: 0,
