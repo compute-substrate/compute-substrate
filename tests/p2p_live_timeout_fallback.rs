@@ -257,6 +257,7 @@ async fn live_timeout_provider_falls_back_to_good_peer() -> Result<()> {
         bootnodes: vec![bootnode_silent, bootnode_good],
         genesis_hash,
         is_bootnode: false,
+        test_mode: TestPeerMode::Normal,
     };
 
     let _handle_sync = spawn_p2p(
