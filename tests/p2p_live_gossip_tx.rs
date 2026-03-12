@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use libp2p::Multiaddr;
 
 use csd::net::mempool::Mempool;
-use csd::net::node::{spawn_p2p, NetConfig};
+use csd::net::node::{spawn_p2p, NetConfig, TestPeerMode};
 use csd::state::db::{k_utxo, Stores};
 use csd::types::{AppPayload, OutPoint, Transaction, TxIn, TxOut};
 
