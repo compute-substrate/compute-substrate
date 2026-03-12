@@ -264,16 +264,34 @@ async fn live_invalid_provider_falls_back_to_good_peer() -> Result<()> {
 
     // Allow enough time for:
     // connect -> tip -> headers -> block fetch from bad peer -> unknown block -> provider fallback -> success from good peer
-    tokio::time::sleep(Duration::from_secs(10)).await;
+let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+let mut last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
 
-    let final_tip_sync = get_tip(&db_sync)?
-        .expect("sync node should have a tip after fallback");
+loop {
+    last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
+    if last_tip == good_tip {
+        break;
+    }
 
-    assert_eq!(
-        final_tip_sync, tip_good,
-        "sync node must fall back from invalid provider and converge to the good peer's heaviest tip"
-    );
+    if tokio::time::Instant::now() >= deadline {
+        break;
+    }
 
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+let sync_hi = get_hidx(&db_sync, &last_tip)?;
+let good_hi = get_hidx(&db_good, &good_tip)?;
+
+assert_eq!(
+    last_tip,
+    good_tip,
+    "sync node must fall back from invalid provider and converge to the good peer's heaviest tip (sync_tip=0x{}, good_tip=0x{}, sync_h={:?}, good_h={:?})",
+    hex::encode(last_tip),
+    hex::encode(good_tip),
+    sync_hi.as_ref().map(|x| x.height),
+    good_hi.as_ref().map(|x| x.height),
+);
     let hi_sync = get_hidx(&db_sync, &final_tip_sync)?.expect("missing hidx sync");
     assert_eq!(hi_sync.height, hi_good.height, "sync height should match good peer");
     assert_eq!(hi_sync.chainwork, hi_good.chainwork, "sync chainwork should match good peer");
