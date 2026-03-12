@@ -243,23 +243,40 @@ async fn live_multi_peer_sync_converges_to_heaviest_branch() -> Result<()> {
     .await
     .context("spawn_p2p B")?;
 
-    // Give live sync enough time:
-    // connect -> request tips -> choose better peer -> fetch headers -> fetch blocks -> reorg
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    // Poll instead of sleeping a fixed amount.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
 
-    let final_tip_b = get_tip(&db_b)?
-        .expect("node B should have a tip after multi-peer sync");
+    loop {
+        last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
 
+        if last_tip_b == tip_c {
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let hi_b = get_hidx(&db_b, &last_tip_b)?;
     assert_eq!(
-        final_tip_b, tip_c,
-        "node B must converge to the heaviest branch (node C), not merely the first peer heard"
+        last_tip_b,
+        tip_c,
+        "node B must converge to the heaviest branch (node C), not merely the first peer heard (tip_b=0x{}, tip_c=0x{}, b_h={:?}, c_h={})",
+        hex::encode(last_tip_b),
+        hex::encode(tip_c),
+        hi_b.as_ref().map(|x| x.height),
+        hi_c.height,
     );
 
-    let hi_b = get_hidx(&db_b, &final_tip_b)?.expect("missing hidx B final");
+    let hi_b = hi_b.expect("missing hidx B final");
     assert_eq!(hi_b.height, hi_c.height, "node B height should match heaviest peer");
     assert_eq!(hi_b.chainwork, hi_c.chainwork, "node B chainwork should match heaviest peer");
 
-    let blk_b = load_block(&db_b, &final_tip_b)?;
+    let blk_b = load_block(&db_b, &last_tip_b)?;
     let blk_c = load_block(&db_c, &tip_c)?;
     assert_eq!(
         header_hash(&blk_b.header),
