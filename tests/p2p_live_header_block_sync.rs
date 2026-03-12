@@ -172,20 +172,41 @@ async fn live_p2p_header_block_sync_advances_remote_tip() -> Result<()> {
     .await
     .context("spawn_p2p B")?;
 
-    // Give the periodic sync loop time to:
-    // connect -> GetTip -> GetHeadersByLocator -> GetBlock(s) -> maybe_reorg_to
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // Poll instead of sleeping a fixed amount.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let mut last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
 
-    let tip_b = get_tip(&db_b)?
-        .expect("node B should have a tip after sync");
-    assert_eq!(tip_b, tip_a, "node B tip should advance to node A tip");
+    loop {
+        last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
 
-    let hi_b = get_hidx(&db_b, &tip_b)?.expect("missing hidx for node B tip");
+        if last_tip_b == tip_a {
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let hi_b = get_hidx(&db_b, &last_tip_b)?;
+    assert_eq!(
+        last_tip_b,
+        tip_a,
+        "node B tip should advance to node A tip (tip_b=0x{}, tip_a=0x{}, b_h={:?}, a_h={})",
+        hex::encode(last_tip_b),
+        hex::encode(tip_a),
+        hi_b.as_ref().map(|x| x.height),
+        hi_a.height,
+    );
+
+    let hi_b = hi_b.expect("missing hidx for node B tip");
     assert_eq!(hi_b.height, hi_a.height, "node B height should match node A height");
 
     // Also verify the winning tip block is physically present on node B.
     let blk_a = load_block(&db_a, &tip_a)?;
-    let blk_b = load_block(&db_b, &tip_b)?;
+    let blk_b = load_block(&db_b, &last_tip_b)?;
     assert_eq!(
         header_hash(&blk_a.header),
         header_hash(&blk_b.header),
