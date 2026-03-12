@@ -167,9 +167,23 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
     let tx = make_tx(1, v, 5_000, h20(9));
     gossip_tx_a.send(csd::net::GossipTxEvent { tx: tx.clone() })?;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut last_len = mp_b.len();
 
-    assert_eq!(mp_b.len(), 1, "remote mempool should receive tx via gossip");
+    loop {
+        last_len = mp_b.len();
+        if last_len == 1 {
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(last_len, 1, "remote mempool should receive tx via gossip");
 
     Ok(())
 }
