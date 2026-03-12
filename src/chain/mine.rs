@@ -165,6 +165,7 @@ fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&Header
 /// - Skips anything that fails validate_tx_for_mempool or has missing inputs
 /// - Sorts by fee (desc) so miners converge under load
 /// - NEW: also respects MAX_BLOCK_BYTES (consensus) so we never build an unmineable block
+
 fn build_template(
     db: &Stores,
     mempool: &Mempool,
@@ -172,10 +173,27 @@ fn build_template(
     height: u64,
     max_mempool_txs: usize,
 ) -> Result<(Vec<Transaction>, Vec<Hash32>, u64)> {
+    build_template_with_byte_cap(
+        db,
+        mempool,
+        miner_h160,
+        height,
+        max_mempool_txs,
+        MAX_BLOCK_BYTES,
+    )
+}
+
+fn build_template_with_byte_cap(
+    db: &Stores,
+    mempool: &Mempool,
+    miner_h160: Hash20,
+    height: u64,
+    max_mempool_txs: usize,
+    byte_cap: usize,
+) -> Result<(Vec<Transaction>, Vec<Hash32>, u64)> {
     let c = crate::codec::consensus_bincode();
     let reward = block_reward(height);
 
-    // Sample more than we include so we can pack under byte limits deterministically.
     const CANDIDATE_MULT: usize = 8;
     let want_candidates = max_mempool_txs
         .saturating_mul(CANDIDATE_MULT)
@@ -183,13 +201,12 @@ fn build_template(
 
     let sampled = mempool.sample(want_candidates);
 
-        // (feerate_ppm, txid, tx, fee, tx_bytes)
+    // (feerate_ppm, txid, tx, fee, tx_bytes)
     let mut candidates: Vec<(u64, Hash32, Transaction, u64, u64)> = Vec::new();
 
     for tx in sampled {
         let id = txid(&tx);
 
-        // fast-ish validity gate (connectable + sane)
         if validate_tx_for_mempool(db, &tx).is_err() {
             continue;
         }
@@ -211,21 +228,16 @@ fn build_template(
         candidates.push((feerate_ppm, id, tx, fee, tx_bytes));
     }
 
-    // feerate desc; tie-break by txid ASC (deterministic)
+    // feerate desc; tie-break by txid ASC
     candidates.sort_by(|a, b| match b.0.cmp(&a.0) {
         std::cmp::Ordering::Equal => a.1.cmp(&b.1),
         o => o,
     });
 
-    // Build coinbase *after* we know fees, but we must reserve bytes for it.
-    // We'll create a placeholder coinbase first to estimate size deterministically (height is committed).
     let cb_placeholder = coinbase(miner_h160, reward, height, None);
     let cb_bytes = c.serialized_size(&cb_placeholder)? as usize;
 
-    // We must be able to fit coinbase + header structure in MAX_BLOCK_BYTES (practically always true).
-    // We only enforce tx byte sum <= MAX_BLOCK_BYTES; header is not stored separately in your block bytes,
-    // it's included in serialized Block, but tx bytes dominate. This is still the correct safety cap.
-    let mut remaining = MAX_BLOCK_BYTES.saturating_sub(cb_bytes);
+    let mut remaining = byte_cap.saturating_sub(cb_bytes);
 
     let mut total_fees: u64 = 0;
     let mut included: Vec<Transaction> = Vec::with_capacity(max_mempool_txs);
@@ -239,7 +251,6 @@ fn build_template(
 
         let tx_bytes = tx_bytes_u64 as usize;
 
-        // MAX_BLOCK_BYTES packing: first-fit by fee order (deterministic)
         if tx_bytes > remaining {
             continue;
         }
@@ -255,7 +266,7 @@ fn build_template(
         included_bytes = included_bytes.saturating_add(tx_bytes);
     }
 
-        println!(
+    println!(
         "[mine] template: height={} mempool_len={} sampled={} included={} total_fees={} block_bytes≈{} (cb_bytes={}, tx_bytes={})",
         height,
         mempool.len(),
@@ -277,6 +288,25 @@ fn build_template(
     final_txs.extend(included);
 
     Ok((final_txs, included_ids, total_fees))
+}
+
+#[doc(hidden)]
+pub fn build_template_for_tests(
+    db: &Stores,
+    mempool: &Mempool,
+    miner_h160: Hash20,
+    height: u64,
+    max_mempool_txs: usize,
+    byte_cap: usize,
+) -> Result<(Vec<Transaction>, Vec<Hash32>, u64)> {
+    build_template_with_byte_cap(
+        db,
+        mempool,
+        miner_h160,
+        height,
+        max_mempool_txs,
+        byte_cap,
+    )
 }
 
 /// Mine exactly one block.
