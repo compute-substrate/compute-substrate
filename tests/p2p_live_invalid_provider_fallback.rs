@@ -262,14 +262,14 @@ async fn live_invalid_provider_falls_back_to_good_peer() -> Result<()> {
     .await
     .context("spawn_p2p sync")?;
 
-    // Allow enough time for:
-    // connect -> tip -> headers -> block fetch from bad peer -> unknown block -> provider fallback -> success from good peer
+// Allow enough time for:
+// connect -> tip -> headers -> block fetch from bad peer -> unknown block -> provider fallback -> success from good peer
 let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 let mut last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
 
 loop {
     last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
-    if last_tip == good_tip {
+    if last_tip == tip_good {
         break;
     }
 
@@ -280,29 +280,28 @@ loop {
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
-let sync_hi = get_hidx(&db_sync, &last_tip)?;
-let good_hi = get_hidx(&db_good, &good_tip)?;
+let hi_sync = get_hidx(&db_sync, &last_tip)?.expect("missing hidx sync");
+let hi_good = get_hidx(&db_good, &tip_good)?.expect("missing hidx good");
 
 assert_eq!(
     last_tip,
-    good_tip,
-    "sync node must fall back from invalid provider and converge to the good peer's heaviest tip (sync_tip=0x{}, good_tip=0x{}, sync_h={:?}, good_h={:?})",
+    tip_good,
+    "sync node must fall back from invalid provider and converge to the good peer's heaviest tip (sync_tip=0x{}, good_tip=0x{}, sync_h={}, good_h={})",
     hex::encode(last_tip),
-    hex::encode(good_tip),
-    sync_hi.as_ref().map(|x| x.height),
-    good_hi.as_ref().map(|x| x.height),
+    hex::encode(tip_good),
+    hi_sync.height,
+    hi_good.height,
 );
-    let hi_sync = get_hidx(&db_sync, &final_tip_sync)?.expect("missing hidx sync");
-    assert_eq!(hi_sync.height, hi_good.height, "sync height should match good peer");
-    assert_eq!(hi_sync.chainwork, hi_good.chainwork, "sync chainwork should match good peer");
 
-    let blk_sync = load_block(&db_sync, &final_tip_sync)?;
-    let blk_good = load_block(&db_good, &tip_good)?;
-    assert_eq!(
-        header_hash(&blk_sync.header),
-        header_hash(&blk_good.header),
-        "final synced tip block must match good peer exactly"
-    );
+assert_eq!(hi_sync.height, hi_good.height, "sync height should match good peer");
+assert_eq!(hi_sync.chainwork, hi_good.chainwork, "sync chainwork should match good peer");
 
+let blk_sync = load_block(&db_sync, &last_tip)?;
+let blk_good = load_block(&db_good, &tip_good)?;
+assert_eq!(
+    header_hash(&blk_sync.header),
+    header_hash(&blk_good.header),
+    "final synced tip block must match good peer exactly"
+);
     Ok(())
 }
