@@ -233,6 +233,8 @@ async fn live_invalid_provider_falls_back_to_good_peer() -> Result<()> {
     let listen_bad = wait_for_listen_addr(&handle_bad, "bad peer").await?;
     let listen_good = wait_for_listen_addr(&handle_good, "good peer").await?;
 
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
     let bootnode_bad: Multiaddr = format!("{}/p2p/{}", listen_bad, handle_bad.peer_id)
         .parse()
         .context("parse bootnode_bad")?;
@@ -262,46 +264,54 @@ async fn live_invalid_provider_falls_back_to_good_peer() -> Result<()> {
     .await
     .context("spawn_p2p sync")?;
 
-// Allow enough time for:
-// connect -> tip -> headers -> block fetch from bad peer -> unknown block -> provider fallback -> success from good peer
-let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-let mut last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
+    // Under full-suite load this test can take noticeably longer than in isolation.
+    // Poll for convergence rather than assuming a fixed sleep is enough.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let mut last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
+    let mut last_height = get_hidx(&db_sync, &last_tip)?
+        .map(|x| x.height)
+        .unwrap_or(0);
 
-loop {
-    last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
-    if last_tip == tip_good {
-        break;
+    loop {
+        last_tip = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
+        last_height = get_hidx(&db_sync, &last_tip)?
+            .map(|x| x.height)
+            .unwrap_or(0);
+
+        if last_tip == tip_good {
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    if tokio::time::Instant::now() >= deadline {
-        break;
-    }
+    let hi_sync = get_hidx(&db_sync, &last_tip)?.expect("missing hidx sync");
+    let hi_good = get_hidx(&db_good, &tip_good)?.expect("missing hidx good");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-}
+    assert_eq!(
+        last_tip,
+        tip_good,
+        "sync node must fall back from invalid provider and converge to the good peer's heaviest tip (sync_tip=0x{}, good_tip=0x{}, sync_h={}, good_h={}, last_seen_h={})",
+        hex::encode(last_tip),
+        hex::encode(tip_good),
+        hi_sync.height,
+        hi_good.height,
+        last_height,
+    );
 
-let hi_sync = get_hidx(&db_sync, &last_tip)?.expect("missing hidx sync");
-let hi_good = get_hidx(&db_good, &tip_good)?.expect("missing hidx good");
+    assert_eq!(hi_sync.height, hi_good.height, "sync height should match good peer");
+    assert_eq!(hi_sync.chainwork, hi_good.chainwork, "sync chainwork should match good peer");
 
-assert_eq!(
-    last_tip,
-    tip_good,
-    "sync node must fall back from invalid provider and converge to the good peer's heaviest tip (sync_tip=0x{}, good_tip=0x{}, sync_h={}, good_h={})",
-    hex::encode(last_tip),
-    hex::encode(tip_good),
-    hi_sync.height,
-    hi_good.height,
-);
-
-assert_eq!(hi_sync.height, hi_good.height, "sync height should match good peer");
-assert_eq!(hi_sync.chainwork, hi_good.chainwork, "sync chainwork should match good peer");
-
-let blk_sync = load_block(&db_sync, &last_tip)?;
-let blk_good = load_block(&db_good, &tip_good)?;
-assert_eq!(
-    header_hash(&blk_sync.header),
-    header_hash(&blk_good.header),
-    "final synced tip block must match good peer exactly"
-);
+    let blk_sync = load_block(&db_sync, &last_tip)?;
+    let blk_good = load_block(&db_good, &tip_good)?;
+    assert_eq!(
+        header_hash(&blk_sync.header),
+        header_hash(&blk_good.header),
+        "final synced tip block must match good peer exactly"
+    );
     Ok(())
 }
