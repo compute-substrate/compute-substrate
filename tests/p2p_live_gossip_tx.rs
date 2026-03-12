@@ -126,6 +126,7 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
         bootnodes: vec![],
         genesis_hash: genesis,
         is_bootnode: true,
+        test_mode: TestPeerMode::Normal,
     };
 
     let handle_b = spawn_p2p(
@@ -148,6 +149,7 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
         bootnodes: vec![addr_b],
         genesis_hash: genesis,
         is_bootnode: false,
+        test_mode: TestPeerMode::Normal,
     };
 
     let _handle_a = spawn_p2p(
