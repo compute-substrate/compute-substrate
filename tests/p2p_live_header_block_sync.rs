@@ -8,7 +8,7 @@ use libp2p::Multiaddr;
 
 use csd::chain::index::{get_hidx, header_hash, index_header};
 use csd::net::mempool::Mempool;
-use csd::net::node::{spawn_p2p, NetConfig};
+use csd::net::node::{spawn_p2p, NetConfig, TestPeerMode};
 use csd::state::app_state::epoch_of;
 use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
@@ -117,6 +117,7 @@ async fn live_p2p_header_block_sync_advances_remote_tip() -> Result<()> {
         bootnodes: vec![],
         genesis_hash,
         is_bootnode: true,
+        test_mode: TestPeerMode::Normal,
     };
 
     let handle_a = spawn_p2p(
@@ -157,6 +158,7 @@ async fn live_p2p_header_block_sync_advances_remote_tip() -> Result<()> {
         bootnodes: vec![bootnode_a],
         genesis_hash,
         is_bootnode: false,
+        test_mode: TestPeerMode::Normal,
     };
 
     let _handle_b = spawn_p2p(
