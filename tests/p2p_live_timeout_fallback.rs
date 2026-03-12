@@ -271,23 +271,40 @@ async fn live_timeout_provider_falls_back_to_good_peer() -> Result<()> {
     .await
     .context("spawn_p2p sync")?;
 
-    // Need enough time for:
-    // connect -> choose peer -> fetch headers -> fail block fetch from silent peer
-    // -> mark bad provider / requeue -> fetch from good peer -> reorg/apply
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Poll instead of sleeping a fixed amount.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut last_tip_sync = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
 
-    let tip_sync = get_tip(&db_sync)?
-        .expect("sync node should have a tip");
+    loop {
+        last_tip_sync = get_tip(&db_sync)?.unwrap_or([0u8; 32]);
+
+        if last_tip_sync == tip_good {
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let hi_sync = get_hidx(&db_sync, &last_tip_sync)?;
     assert_eq!(
-        tip_sync, tip_good,
-        "sync node should converge to the good provider's heaviest tip after silent-provider fallback"
+        last_tip_sync,
+        tip_good,
+        "sync node should converge to the good provider's heaviest tip after silent-provider fallback (sync_tip=0x{}, good_tip=0x{}, sync_h={:?}, good_h={})",
+        hex::encode(last_tip_sync),
+        hex::encode(tip_good),
+        hi_sync.as_ref().map(|x| x.height),
+        hi_good.height,
     );
 
-    let hi_sync = get_hidx(&db_sync, &tip_sync)?.expect("missing hidx sync tip");
+    let hi_sync = hi_sync.expect("missing hidx sync tip");
     assert_eq!(hi_sync.height, hi_good.height, "sync node height should match good provider");
 
     let blk_good = load_block(&db_good, &tip_good)?;
-    let blk_sync = load_block(&db_sync, &tip_sync)?;
+    let blk_sync = load_block(&db_sync, &last_tip_sync)?;
     assert_eq!(
         header_hash(&blk_good.header),
         header_hash(&blk_sync.header),
