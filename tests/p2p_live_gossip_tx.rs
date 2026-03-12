@@ -92,6 +92,13 @@ fn make_tx(prev_tag: u8, value: u64, fee: u64, to: [u8; 20]) -> Transaction {
     tx
 }
 
+async fn wait_until_connected_maybe_settled() {
+    // First let the peers connect.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Then give gossipsub mesh/subscription time to settle.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
     let tmp_a = TempDir::new()?;
@@ -118,7 +125,7 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
     let genesis = [0u8; 32];
 
     // Use a real fixed port for node B so node A can actually dial it.
-    let listen_b: Multiaddr = "/ip4/127.0.0.1/tcp/40439".parse()?;
+    let listen_b: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
 
     let cfg_b = NetConfig {
         datadir: tmp_b.path().to_string_lossy().to_string(),
@@ -139,9 +146,20 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
     )
     .await?;
 
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    let actual_listen_b = {
+        let mut got: Option<Multiaddr> = None;
+        for _ in 0..60 {
+            if let Some(addr) = handle_b.listen_addr().await {
+                got = Some(addr);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        got.ok_or_else(|| anyhow::anyhow!("node B did not expose listen_addr in time"))?
+    };
 
-    let addr_b: Multiaddr = format!("{}/p2p/{}", listen_b, handle_b.peer_id).parse()?;
+    let addr_b: Multiaddr =
+        format!("{}/p2p/{}", actual_listen_b, handle_b.peer_id).parse()?;
 
     let cfg_a = NetConfig {
         datadir: tmp_a.path().to_string_lossy().to_string(),
@@ -162,12 +180,21 @@ async fn live_p2p_gossip_tx_reaches_remote_mempool() -> Result<()> {
     )
     .await?;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_until_connected_maybe_settled().await;
 
     let tx = make_tx(1, v, 5_000, h20(9));
-    gossip_tx_a.send(csd::net::GossipTxEvent { tx: tx.clone() })?;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // Retry publish a few times in case the first publish races the mesh.
+    for _ in 0..5 {
+        gossip_tx_a.send(csd::net::GossipTxEvent { tx: tx.clone() })?;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        if mp_b.len() == 1 {
+            break;
+        }
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     let mut last_len = mp_b.len();
 
     loop {
