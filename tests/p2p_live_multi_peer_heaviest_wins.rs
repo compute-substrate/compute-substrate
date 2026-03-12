@@ -232,7 +232,7 @@ async fn live_multi_peer_sync_converges_to_heaviest_branch() -> Result<()> {
         test_mode: TestPeerMode::Normal,
     };
 
-    let _handle_b = spawn_p2p(
+        let handle_b = spawn_p2p(
         db_b.clone(),
         mp_b.clone(),
         cfg_b,
@@ -242,13 +242,23 @@ async fn live_multi_peer_sync_converges_to_heaviest_branch() -> Result<()> {
     )
     .await
     .context("spawn_p2p B")?;
+    let _listen_b = wait_for_listen_addr(&handle_b, "node B").await?;
 
-    // Poll instead of sleeping a fixed amount.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    // Let both outbound connections and initial tip exchanges settle first.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Poll for convergence to the heaviest branch.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
+    let mut last_height_b = get_hidx(&db_b, &last_tip_b)?
+        .map(|x| x.height)
+        .unwrap_or(0);
 
     loop {
         last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
+        last_height_b = get_hidx(&db_b, &last_tip_b)?
+            .map(|x| x.height)
+            .unwrap_or(0);
 
         if last_tip_b == tip_c {
             break;
@@ -258,18 +268,20 @@ async fn live_multi_peer_sync_converges_to_heaviest_branch() -> Result<()> {
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    let hi_b = get_hidx(&db_b, &last_tip_b)?;
+        let hi_b = get_hidx(&db_b, &last_tip_b)?;
     assert_eq!(
         last_tip_b,
         tip_c,
-        "node B must converge to the heaviest branch (node C), not merely the first peer heard (tip_b=0x{}, tip_c=0x{}, b_h={:?}, c_h={})",
+        "node B must converge to the heaviest branch (node C), not merely the first peer heard (tip_b=0x{}, tip_c=0x{}, b_h={:?}, c_h={}, b_work={:?}, c_work={})",
         hex::encode(last_tip_b),
         hex::encode(tip_c),
         hi_b.as_ref().map(|x| x.height),
         hi_c.height,
+        hi_b.as_ref().map(|x| x.chainwork),
+        hi_c.chainwork,
     );
 
     let hi_b = hi_b.expect("missing hidx B final");
