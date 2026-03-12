@@ -183,7 +183,8 @@ fn build_template(
 
     let sampled = mempool.sample(want_candidates);
 
-    let mut candidates: Vec<(u64, Hash32, Transaction, u64)> = Vec::new();
+        // (feerate_ppm, txid, tx, fee, tx_bytes)
+    let mut candidates: Vec<(u64, Hash32, Transaction, u64, u64)> = Vec::new();
 
     for tx in sampled {
         let id = txid(&tx);
@@ -199,14 +200,18 @@ fn build_template(
         };
 
         let tx_bytes = match c.serialized_size(&tx) {
-            Ok(n) => n,
-            Err(_) => continue,
+            Ok(n) if n > 0 => n,
+            _ => continue,
         };
 
-        candidates.push((fee, id, tx, tx_bytes));
+        let feerate_ppm = ((fee as u128)
+            .saturating_mul(1_000_000u128)
+            / (tx_bytes as u128)) as u64;
+
+        candidates.push((feerate_ppm, id, tx, fee, tx_bytes));
     }
 
-    // fee desc; tie-break by txid ASC (deterministic)
+    // feerate desc; tie-break by txid ASC (deterministic)
     candidates.sort_by(|a, b| match b.0.cmp(&a.0) {
         std::cmp::Ordering::Equal => a.1.cmp(&b.1),
         o => o,
@@ -227,7 +232,7 @@ fn build_template(
     let mut included_ids: Vec<Hash32> = Vec::with_capacity(max_mempool_txs);
     let mut included_bytes: usize = 0;
 
-    for (fee, id, tx, tx_bytes_u64) in candidates.into_iter() {
+    for (_feerate_ppm, id, tx, fee, tx_bytes_u64) in candidates.into_iter() {
         if included.len() >= max_mempool_txs {
             break;
         }
@@ -250,8 +255,8 @@ fn build_template(
         included_bytes = included_bytes.saturating_add(tx_bytes);
     }
 
-    println!(
-        "[mine] template: height={} mempool_len={} sampled={} included={} fees={} block_bytes≈{} (cb_bytes={}, tx_bytes={})",
+        println!(
+        "[mine] template: height={} mempool_len={} sampled={} included={} total_fees={} block_bytes≈{} (cb_bytes={}, tx_bytes={})",
         height,
         mempool.len(),
         want_candidates.min(mempool.len()),
