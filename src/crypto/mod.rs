@@ -122,7 +122,7 @@ pub fn verify_sig(tx: &Transaction, sig64: &[u8; 64], pub33: &[u8]) -> Result<()
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-bypass"))]
+
 pub fn sign_tx_compact_secp256k1(
     tx: &crate::types::Transaction,
     sk32: [u8; 32],
