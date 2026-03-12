@@ -218,7 +218,7 @@ fn mine_one_rebases_on_tip_change_and_rebuilds_template() -> Result<()> {
     let mined_hash = miner_thread
         .join()
         .expect("miner thread panicked")?;
-    let mined_hash = mined_hash?;
+
 
     let mined_block = load_block(&db, &mined_hash).context("load mined block")?;
     let final_tip = get_tip(&db)?.expect("missing final tip");
