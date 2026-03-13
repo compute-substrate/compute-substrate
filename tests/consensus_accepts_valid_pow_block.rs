@@ -2,9 +2,12 @@
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use csd::chain::genesis::make_genesis_block;
 use csd::chain::index::{get_hidx, header_hash, index_header};
-use csd::chain::pow::pow_ok;
-use csd::state::app_state::epoch_of;
+use csd::chain::pow::{expected_bits, pow_ok};
+use csd::chain::time::median_time_past;
+use csd::params::{MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
+use csd::state::app::current_epoch;
 use csd::state::db::{get_tip, k_block, set_tip};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{Block, BlockHeader, Hash20, Hash32};
@@ -32,12 +35,13 @@ fn accepts_valid_pow_block_without_bypass() -> Result<()> {
     let db = open_db(&tmp).context("open db")?;
 
     // IMPORTANT:
-    // These two lines must come from your REAL chain genesis implementation,
-    // not from testutil_chain.
-    let genesis = csd::chain::genesis::genesis_block();
+    // Replace this with the exact same burn address your production startup uses.
+    let burn_addr = h20(0x00);
+
+    // Build the real canonical genesis and persist/apply it.
+    let genesis = make_genesis_block(burn_addr).context("make_genesis_block")?;
     let genesis_hash = header_hash(&genesis.header);
 
-    // Persist + index + apply the REAL genesis
     let genesis_bytes = csd::codec::consensus_bincode()
         .serialize(&genesis)
         .context("serialize genesis")?;
@@ -46,19 +50,25 @@ fn accepts_valid_pow_block_without_bypass() -> Result<()> {
         .context("insert genesis bytes")?;
 
     let genesis_hi = index_header(&db, &genesis.header, None)
-        .context("index real genesis")?;
+        .context("index genesis")?;
     assert_eq!(genesis_hi.height, 0, "genesis must be height 0");
 
-    validate_and_apply_block(&db, &genesis, epoch_of(0), 0)
-        .context("apply real genesis")?;
+    validate_and_apply_block(&db, &genesis, current_epoch(0), 0)
+        .context("apply genesis")?;
     set_tip(&db, &genesis_hash).context("set genesis tip")?;
 
-    // Build a valid block on top of the real genesis
-    let miner = h20(0x11);
-    let height = 1u64;
-    let reward = csd::params::block_reward(height);
+    let parent_hi = get_hidx(&db, &genesis_hash)?
+        .context("missing genesis hidx")?;
 
-    let cb = csd::chain::mine::coinbase(miner, reward, height, None);
+    let height = 1u64;
+    let miner = h20(0x11);
+
+    let cb = csd::chain::mine::coinbase(
+        miner,
+        csd::params::block_reward(height),
+        height,
+        None,
+    );
     let txs = vec![cb];
 
     let merkle = {
@@ -66,15 +76,20 @@ fn accepts_valid_pow_block_without_bypass() -> Result<()> {
         csd::chain::mine::merkle_root_txids(&ids)
     };
 
-    let parent_hi = get_hidx(&db, &genesis_hash)?
-        .context("missing genesis hidx")?;
+    let mtp = median_time_past(&db, &parent_hi.hash).unwrap_or(parent_hi.time);
+    let min_time = parent_hi.time.saturating_add(MIN_BLOCK_SPACING_SECS);
+    let mut time = min_time.max(mtp.saturating_add(1));
+    let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+    if time > max_allowed {
+        time = max_allowed;
+    }
 
     let hdr = BlockHeader {
         version: 1,
         prev: genesis_hash,
         merkle,
-        time: parent_hi.time.saturating_add(csd::params::MIN_BLOCK_SPACING_SECS),
-        bits: csd::chain::pow::expected_bits(&db, height, Some(&parent_hi))
+        time,
+        bits: expected_bits(&db, height, Some(&parent_hi))
             .context("expected_bits")?,
         nonce: 0,
     };
@@ -95,16 +110,15 @@ fn accepts_valid_pow_block_without_bypass() -> Result<()> {
         .context("insert block bytes")?;
 
     let hi = index_header(&db, &hdr, Some(&parent_hi))
-        .context("index_header should accept valid PoW block")?;
-    assert_eq!(hi.height, 1, "height should be 1");
+        .context("index valid pow block")?;
+    assert_eq!(hi.height, 1, "new block must be height 1");
 
-    validate_and_apply_block(&db, &blk, epoch_of(1), 1)
-        .context("validate_and_apply_block should accept valid block")?;
+    validate_and_apply_block(&db, &blk, current_epoch(1), 1)
+        .context("apply valid pow block")?;
+    set_tip(&db, &bh).context("set final tip")?;
 
-    set_tip(&db, &bh).context("set tip to mined block")?;
-
-    let tip = get_tip(&db)?.context("missing final tip")?;
-    assert_eq!(tip, bh, "tip should be the valid mined block");
+    let final_tip = get_tip(&db)?.context("missing final tip")?;
+    assert_eq!(final_tip, bh, "tip should equal mined valid block");
 
     Ok(())
 }
