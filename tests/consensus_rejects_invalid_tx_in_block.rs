@@ -207,8 +207,29 @@ fn rejects_block_with_outputs_exceeding_inputs() -> Result<()> {
     let value = 1_000_000u64;
     insert_utxo(&db, prevout, value, owner)?;
 
-    let mut bad_tx = make_signed_tx(prevout, value, 5_000, h20(0x43));
-    bad_tx.outputs[0].value = value + 1; // exceed inputs
+    // Construct the overspend transaction FIRST, then sign that exact tx.
+    let send = value + 1; // outputs exceed inputs
+    let mut bad_tx = Transaction {
+        version: 1,
+        inputs: vec![TxIn {
+            prevout,
+            script_sig: vec![0u8; 99],
+        }],
+        outputs: vec![TxOut {
+            value: send,
+            script_pubkey: h20(0x43),
+        }],
+        locktime: 0,
+        app: AppPayload::None,
+    };
+
+    let (sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&bad_tx, SK);
+    let mut ss = Vec::with_capacity(99);
+    ss.push(64);
+    ss.extend_from_slice(&sig64);
+    ss.push(33);
+    ss.extend_from_slice(&pub33);
+    bad_tx.inputs[0].script_sig = ss;
 
     let cb = csd::chain::mine::coinbase(
         h20(0xAA),
@@ -223,12 +244,15 @@ fn rejects_block_with_outputs_exceeding_inputs() -> Result<()> {
 
     let err = persist_index_apply_block(&db, &blk, next_height).unwrap_err();
     let msg = format!("{err:#}");
+
     assert!(
         msg.contains("exceed")
             || msg.contains("inputs")
             || msg.contains("outputs")
             || msg.contains("fee")
-            || msg.contains("money range"),
+            || msg.contains("money range")
+            || msg.contains("in_sum")
+            || msg.contains("out_sum"),
         "unexpected error: {msg}"
     );
 
