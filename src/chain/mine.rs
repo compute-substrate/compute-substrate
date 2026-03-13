@@ -5,7 +5,7 @@ use crate::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
 use crate::chain::lock::ChainLock;
 use crate::chain::pow::{expected_bits, pow_ok};
 use crate::chain::reorg::maybe_reorg_to;
-use crate::chain::time::median_time_past;
+use crate::chain::time::{median_time_past, now_secs};
 use crate::crypto::{sha256d, txid};
 use crate::net::mempool::Mempool;
 use crate::params::{
@@ -125,12 +125,12 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
     Ok(in_sum - out_sum)
 }
 
-/// Choose a block time that *matches the objective consensus rules* in index_header:
+/// Choose a block time that matches the consensus rules in index_header:
 /// - time >= parent.time + MIN_BLOCK_SPACING_SECS
 /// - time > MTP(parent)
-/// - time <= MTP(parent) + MAX_FUTURE_DRIFT_SECS
+/// - time <= now + MAX_FUTURE_DRIFT_SECS
 ///
-/// IMPORTANT: do not use wall-clock time here, or you'll diverge from objective rules.
+/// This MUST track wall-clock time (clamped), or LWMA will drift the wrong way.
 fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
     // Genesis mining case (should basically never happen here).
     if *parent_tip == [0u8; 32] || parent_hi.is_none() {
@@ -139,23 +139,18 @@ fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&Header
 
     let p = parent_hi.unwrap();
 
-    let min_spacing = p.time.saturating_add(MIN_BLOCK_SPACING_SECS);
-
     let mtp = median_time_past(db, &p.hash).unwrap_or(p.time);
-    let mtp_time = mtp.saturating_add(1);
 
-    let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+    // Lower bound: must satisfy spacing and be > MTP
+    let min_ok = p.time
+        .saturating_add(MIN_BLOCK_SPACING_SECS)
+        .max(mtp.saturating_add(1));
 
-    // pick the earliest valid time; keep deterministic
-    let t = min_spacing.max(mtp_time);
+    // Upper bound: must not be too far in the future vs wall clock
+    let max_ok = now_secs().saturating_add(MAX_FUTURE_DRIFT_SECS);
 
-    // Clamp into allowed window. If clamping would violate >MTP, just use mtp+1.
-    let t = t.min(max_allowed);
-    if t <= mtp {
-        mtp_time
-    } else {
-        t
-    }
+    // Track reality but stay within consensus bounds
+    now_secs().clamp(min_ok, max_ok)
 }
 
 /// Build a fresh block template from the current tip + current UTXO set.
@@ -397,6 +392,18 @@ pub fn mine_one(
                     hdr.time
                 );
             }
+
+// Even if tip didn't change, refresh time so timestamps reflect real solve time.
+// Without this, LWMA thinks blocks are "fast" (small dt) and ramps difficulty upward.
+if let Some(p) = parent_hi_opt.as_ref() {
+    let new_time = choose_block_time(db, &parent_tip, Some(p));
+    if new_time != hdr.time {
+        hdr.time = new_time;
+        // Optional: reset nonce to avoid doing extra work on an old header shape.
+        // hdr.nonce = 0;
+    }
+}
+
         }
 
         let h = header_hash(&hdr);
@@ -483,22 +490,10 @@ pub fn mine_one(
 
         hdr.nonce = hdr.nonce.wrapping_add(1);
 
-        // If nonce wrapped, bump time *within objective bounds* (no wall-clock).
-        if hdr.nonce == 0 {
-            if let Some(p) = parent_hi_opt.as_ref() {
-                let mtp = median_time_past(db, &p.hash).unwrap_or(p.time);
-                let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+// If nonce wrapped, refresh time (wall-clock clamped to consensus window).
+if hdr.nonce == 0 {
+    hdr.time = choose_block_time(db, &parent_tip, parent_hi_opt.as_ref());
+}
 
-                hdr.time = hdr.time.saturating_add(1);
-                if hdr.time > max_allowed {
-                    hdr.time = max_allowed;
-                }
-                if hdr.time <= mtp {
-                    hdr.time = mtp.saturating_add(1);
-                }
-            } else {
-                hdr.time = hdr.time.saturating_add(1);
-            }
-        }
     }
 }
