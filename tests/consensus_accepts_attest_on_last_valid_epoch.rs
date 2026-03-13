@@ -63,6 +63,7 @@ fn accepts_attest_on_last_valid_epoch() -> Result<()> {
     let db = open_db(&tmp).context("open db")?;
 
     let miner = signer_addr(SK);
+    let owner = signer_addr(SK);
 
     // Build chain so we have a spendable parent-tip coinbase and a known epoch.
     let shared_len = 8u64; // heights 0..7
@@ -101,7 +102,7 @@ fn accepts_attest_on_last_valid_epoch() -> Result<()> {
         }],
         outputs: vec![TxOut {
             value: input_value - MIN_FEE_PROPOSE,
-            script_pubkey: h20(0x41),
+            script_pubkey: owner, // MUST be spendable by SK
         }],
         locktime: 0,
         app: AppPayload::Propose {
@@ -125,10 +126,8 @@ fn accepts_attest_on_last_valid_epoch() -> Result<()> {
             script_sig: vec![0u8; 99],
         }],
         outputs: vec![TxOut {
-            value: input_value
-                - MIN_FEE_PROPOSE
-                - MIN_FEE_ATTEST,
-            script_pubkey: h20(0x42),
+            value: input_value - MIN_FEE_PROPOSE - MIN_FEE_ATTEST,
+            script_pubkey: owner,
         }],
         locktime: 0,
         app: AppPayload::Attest {
@@ -158,12 +157,10 @@ fn accepts_attest_on_last_valid_epoch() -> Result<()> {
     validate_and_apply_block(&db, &blk, current_epoch, height)
         .context("validate_and_apply_block should succeed on boundary epoch")?;
 
-    // Proposal should exist
     let prop = get_proposal(&db, &proposal_id)?
         .context("proposal should be persisted")?;
     assert_eq!(prop.expires_epoch, expires_epoch);
 
-    // Attestation should also be persisted
     let attest_key = csd::state::app_state::k_attest(&attest_txid);
     let stored_attest = db.app.get(attest_key)?.is_some();
     assert!(stored_attest, "attestation should be persisted on last valid epoch");
