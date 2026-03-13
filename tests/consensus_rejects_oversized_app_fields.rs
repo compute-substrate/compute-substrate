@@ -3,16 +3,15 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use csd::chain::index::{get_hidx, header_hash, index_header};
-use csd::crypto::hash160;
+use csd::crypto::{hash160, sha256d, txid};
 use csd::params::{MAX_DOMAIN_BYTES, MAX_URI_BYTES, MIN_FEE_PROPOSE};
 use csd::state::app_state::epoch_of;
-use csd::state::db::{get_tip, k_block, k_utxo, put_utxo_meta, set_tip, Stores, UtxoMeta};
+use csd::state::db::{k_utxo, put_utxo_meta, Stores, UtxoMeta};
 use csd::state::utxo::validate_and_apply_block;
-use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
+use csd::types::{AppPayload, Block, BlockHeader, Hash20, OutPoint, Transaction, TxIn, TxOut};
 
 mod testutil_chain;
-use testutil_chain::{make_test_header, open_db};
+use testutil_chain::open_db;
 
 const SK: [u8; 32] = [21u8; 32];
 
@@ -71,28 +70,40 @@ fn insert_spendable_utxo(
     Ok(())
 }
 
-fn persist_index_apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
-    let bh = header_hash(&blk.header);
+fn merkle_root_txids(txids: &[[u8; 32]]) -> [u8; 32] {
+    if txids.is_empty() {
+        return [0u8; 32];
+    }
 
-    let bytes = csd::codec::consensus_bincode()
-        .serialize(blk)
-        .context("serialize block")?;
-    db.blocks
-        .insert(k_block(&bh), bytes)
-        .context("db.blocks.insert")?;
+    let mut layer: Vec<[u8; 32]> = txids.to_vec();
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut i = 0usize;
 
-    let parent_hi = if blk.header.prev == [0u8; 32] {
-        None
-    } else {
-        get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
-    };
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
 
-    index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
-    validate_and_apply_block(db, blk, epoch_of(height), height)
-        .with_context(|| format!("apply h={height}"))?;
-    set_tip(db, &bh).context("set_tip")?;
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&left);
+            buf[32..].copy_from_slice(&right);
+            next.push(sha256d(&buf));
 
-    Ok(bh)
+            i += 2;
+        }
+
+        layer = next;
+    }
+
+    layer[0]
+}
+
+fn merkle_root(txs: &[Transaction]) -> [u8; 32] {
+    let mut ids = Vec::with_capacity(txs.len());
+    for tx in txs {
+        ids.push(txid(tx));
+    }
+    merkle_root_txids(&ids)
 }
 
 fn make_signed_propose_tx(
@@ -136,12 +147,17 @@ fn make_signed_propose_tx(
     tx
 }
 
-fn current_tip_and_next_height(db: &Stores) -> Result<(Hash32, u64)> {
-    let tip = get_tip(db)?
-        .context("missing tip")?;
-    let hi = get_hidx(db, &tip)?
-        .context("missing tip hidx")?;
-    Ok((tip, hi.height + 1))
+fn make_block_with_txs(height: u64, txs: Vec<Transaction>) -> Block {
+    let hdr = BlockHeader {
+        version: 1,
+        prev: [0u8; 32],
+        merkle: merkle_root(&txs),
+        time: 1_700_000_000 + height,
+        bits: 0x1e00ffff,
+        nonce: 0,
+    };
+
+    Block { header: hdr, txs }
 }
 
 #[test]
@@ -151,8 +167,7 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
 
     let owner = signer_addr(SK);
     let miner = h20(0xAA);
-
-    let (tip, height) = current_tip_and_next_height(&db)?;
+    let height = 1u64;
 
     let prevout = OutPoint {
         txid: [0xD1; 32],
@@ -161,7 +176,7 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
     let input_value = 1_000_000u64;
     let fee = MIN_FEE_PROPOSE;
 
-    insert_spendable_utxo(&db, prevout, input_value, owner, height - 1)
+    insert_spendable_utxo(&db, prevout, input_value, owner, 0)
         .context("insert spendable utxo")?;
 
     let bad_tx = make_signed_propose_tx(
@@ -179,11 +194,8 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
         height,
         None,
     );
-    let txs = vec![cb, bad_tx];
 
-    let hdr = make_test_header(&db, tip, &txs, height)
-        .with_context(|| format!("make_test_header h={height}"))?;
-    let blk = Block { header: hdr, txs };
+    let blk = make_block_with_txs(height, vec![cb, bad_tx]);
 
     let err = validate_and_apply_block(&db, &blk, epoch_of(height), height)
         .expect_err("block with oversized propose.domain must be rejected");
@@ -204,8 +216,7 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
 
     let owner = signer_addr(SK);
     let miner = h20(0xBB);
-
-    let (tip, height) = current_tip_and_next_height(&db)?;
+    let height = 1u64;
 
     let prevout = OutPoint {
         txid: [0xD2; 32],
@@ -214,7 +225,7 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
     let input_value = 1_000_000u64;
     let fee = MIN_FEE_PROPOSE;
 
-    insert_spendable_utxo(&db, prevout, input_value, owner, height - 1)
+    insert_spendable_utxo(&db, prevout, input_value, owner, 0)
         .context("insert spendable utxo")?;
 
     let bad_tx = make_signed_propose_tx(
@@ -232,11 +243,8 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
         height,
         None,
     );
-    let txs = vec![cb, bad_tx];
 
-    let hdr = make_test_header(&db, tip, &txs, height)
-        .with_context(|| format!("make_test_header h={height}"))?;
-    let blk = Block { header: hdr, txs };
+    let blk = make_block_with_txs(height, vec![cb, bad_tx]);
 
     let err = validate_and_apply_block(&db, &blk, epoch_of(height), height)
         .expect_err("block with oversized propose.uri must be rejected");
