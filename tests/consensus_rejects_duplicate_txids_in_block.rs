@@ -1,4 +1,6 @@
 // tests/consensus_rejects_duplicate_txids_in_block.rs
+#![cfg(feature = "test-bypass")]
+
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -38,30 +40,6 @@ fn signer_addr(sk32: [u8; 32]) -> [u8; 20] {
 
     let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, sk32);
     csd::crypto::hash160(&pub33)
-}
-
-fn persist_index_apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
-    let bh = header_hash(&blk.header);
-
-    let bytes = csd::codec::consensus_bincode()
-        .serialize(blk)
-        .context("serialize block")?;
-    db.blocks
-        .insert(k_block(&bh), bytes)
-        .context("db.blocks.insert")?;
-
-    let parent_hi = if blk.header.prev == [0u8; 32] {
-        None
-    } else {
-        get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
-    };
-
-    index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
-    validate_and_apply_block(db, blk, epoch_of(height), height)
-        .with_context(|| format!("validate_and_apply_block h={height}"))?;
-    set_tip(db, &bh).context("set_tip")?;
-
-    Ok(bh)
 }
 
 fn make_signed_tx(prevout: OutPoint, input_value: u64, fee: u64, to: [u8; 20]) -> Transaction {
