@@ -15,6 +15,15 @@ use crate::types::Hash32;
 ///
 /// Notes:
 /// - Purely derived from indexed chain data (no wallclock).
+
+/// Current UNIX time in seconds.
+pub fn now_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 pub fn median_time_past(db: &Stores, tip: &Hash32) -> Result<u64> {
     // Be robust to MTP_WINDOW being defined as u64 in params.
     let window: usize = MTP_WINDOW as usize;
