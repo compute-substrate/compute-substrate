@@ -429,6 +429,41 @@ fn mempool_remove_mined(mempool: Option<&Mempool>, blk: &Block) {
     }
 }
 
+fn mempool_restore_disconnected(db: &Stores, mempool: Option<&Mempool>, disconnected: &[Hash32]) {
+    let Some(mp) = mempool else { return };
+
+    let mut restored = 0usize;
+
+    // undo_path is [old_tip .. ancestor-child], so reverse it to restore oldest-first
+    for bh in disconnected.iter().rev() {
+        let Ok(blk) = load_block(db, bh) else {
+            continue;
+        };
+
+        // skip coinbase (index 0); only normal txs may re-enter mempool
+        for tx in blk.txs.iter().skip(1) {
+            match mp.insert_checked(db, tx.clone()) {
+                Ok(true) => restored += 1,
+                Ok(false) => {
+                    // already present or conflicts; fine
+                }
+                Err(_) => {
+                    // no longer valid on the new canonical tip; fine
+                }
+            }
+        }
+    }
+
+    if restored > 0 {
+        println!(
+            "[mempool] restored {} txs from disconnected branch (mempool_len={}, spent_outpoints={})",
+            restored,
+            mp.len(),
+            mp.spent_len()
+        );
+    }
+}
+
 fn mempool_prune_if_present(db: &Stores, mempool: Option<&Mempool>) {
     if let Some(mp) = mempool {
         let removed = mp.prune(db);
@@ -1294,6 +1329,7 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         new_hi.chainwork
     );
 
+    mempool_restore_disconnected(db, mempool, &undo_path);
     mempool_prune_if_present(db, mempool);
     Ok(())
 }
