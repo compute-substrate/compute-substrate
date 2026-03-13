@@ -4,15 +4,15 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use csd::chain::index::{get_hidx, header_hash, index_header};
-use csd::crypto::txid;
+use csd::crypto::hash160;
 use csd::params::{MAX_DOMAIN_BYTES, MAX_URI_BYTES, MIN_FEE_PROPOSE};
 use csd::state::app_state::epoch_of;
-use csd::state::db::{k_block, k_utxo, put_utxo_meta, set_tip, Stores, UtxoMeta};
+use csd::state::db::{get_tip, k_block, k_utxo, put_utxo_meta, set_tip, Stores, UtxoMeta};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
 mod testutil_chain;
-use testutil_chain::{build_base_chain_with_miner, make_test_header, open_db};
+use testutil_chain::{make_test_header, open_db};
 
 const SK: [u8; 32] = [21u8; 32];
 
@@ -39,7 +39,7 @@ fn signer_addr(sk32: [u8; 32]) -> [u8; 20] {
     };
 
     let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, sk32);
-    csd::crypto::hash160(&pub33)
+    hash160(&pub33)
 }
 
 fn insert_spendable_utxo(
@@ -136,26 +136,12 @@ fn make_signed_propose_tx(
     tx
 }
 
-fn build_candidate_block(
-    db: &Stores,
-    parent: Hash32,
-    height: u64,
-    miner: Hash20,
-    spend_tx: Transaction,
-    fee: u64,
-) -> Result<Block> {
-    let cb = csd::chain::mine::coinbase(
-        miner,
-        csd::params::block_reward(height) + fee,
-        height,
-        None,
-    );
-    let txs = vec![cb, spend_tx];
-
-    let hdr = make_test_header(db, parent, &txs, height)
-        .with_context(|| format!("make_test_header h={height}"))?;
-
-    Ok(Block { header: hdr, txs })
+fn current_tip_and_next_height(db: &Stores) -> Result<(Hash32, u64)> {
+    let tip = get_tip(db)?
+        .context("missing tip")?;
+    let hi = get_hidx(db, &tip)?
+        .context("missing tip hidx")?;
+    Ok((tip, hi.height + 1))
 }
 
 #[test]
@@ -163,16 +149,10 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = Arc::new(open_db(&tmp).context("open db")?);
 
-    let miner_shared = h20(0x11);
-    let miner_next = h20(0xAA);
     let owner = signer_addr(SK);
+    let miner = h20(0xAA);
 
-    let shared_len = 7u64;
-    let start_time = 1_701_300_000u64;
-
-    let shared = build_base_chain_with_miner(&db, shared_len, start_time, miner_shared)
-        .context("build shared chain")?;
-    let tip = shared[(shared_len - 1) as usize];
+    let (tip, height) = current_tip_and_next_height(&db)?;
 
     let prevout = OutPoint {
         txid: [0xD1; 32],
@@ -181,7 +161,7 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
     let input_value = 1_000_000u64;
     let fee = MIN_FEE_PROPOSE;
 
-    insert_spendable_utxo(&db, prevout, input_value, owner, shared_len - 1)
+    insert_spendable_utxo(&db, prevout, input_value, owner, height - 1)
         .context("insert spendable utxo")?;
 
     let bad_tx = make_signed_propose_tx(
@@ -193,8 +173,17 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
         "https://example.com/ok".to_string(),
     );
 
-    let height = shared_len;
-    let blk = build_candidate_block(&db, tip, height, miner_next, bad_tx, fee)?;
+    let cb = csd::chain::mine::coinbase(
+        miner,
+        csd::params::block_reward(height) + fee,
+        height,
+        None,
+    );
+    let txs = vec![cb, bad_tx];
+
+    let hdr = make_test_header(&db, tip, &txs, height)
+        .with_context(|| format!("make_test_header h={height}"))?;
+    let blk = Block { header: hdr, txs };
 
     let err = validate_and_apply_block(&db, &blk, epoch_of(height), height)
         .expect_err("block with oversized propose.domain must be rejected");
@@ -213,16 +202,10 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = Arc::new(open_db(&tmp).context("open db")?);
 
-    let miner_shared = h20(0x11);
-    let miner_next = h20(0xBB);
     let owner = signer_addr(SK);
+    let miner = h20(0xBB);
 
-    let shared_len = 7u64;
-    let start_time = 1_701_300_500u64;
-
-    let shared = build_base_chain_with_miner(&db, shared_len, start_time, miner_shared)
-        .context("build shared chain")?;
-    let tip = shared[(shared_len - 1) as usize];
+    let (tip, height) = current_tip_and_next_height(&db)?;
 
     let prevout = OutPoint {
         txid: [0xD2; 32],
@@ -231,7 +214,7 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
     let input_value = 1_000_000u64;
     let fee = MIN_FEE_PROPOSE;
 
-    insert_spendable_utxo(&db, prevout, input_value, owner, shared_len - 1)
+    insert_spendable_utxo(&db, prevout, input_value, owner, height - 1)
         .context("insert spendable utxo")?;
 
     let bad_tx = make_signed_propose_tx(
@@ -243,8 +226,17 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
         "u".repeat(MAX_URI_BYTES + 1),
     );
 
-    let height = shared_len;
-    let blk = build_candidate_block(&db, tip, height, miner_next, bad_tx, fee)?;
+    let cb = csd::chain::mine::coinbase(
+        miner,
+        csd::params::block_reward(height) + fee,
+        height,
+        None,
+    );
+    let txs = vec![cb, bad_tx];
+
+    let hdr = make_test_header(&db, tip, &txs, height)
+        .with_context(|| format!("make_test_header h={height}"))?;
+    let blk = Block { header: hdr, txs };
 
     let err = validate_and_apply_block(&db, &blk, epoch_of(height), height)
         .expect_err("block with oversized propose.uri must be rejected");
