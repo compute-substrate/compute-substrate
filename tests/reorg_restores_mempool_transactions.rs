@@ -174,7 +174,8 @@ fn reorg_restores_transactions_from_old_branch_to_mempool() -> Result<()> {
         header: a1_hdr,
         txs: a1_txs,
     };
-    let tip_a1 = persist_index_apply_block(&db, &a1_blk, height_a1).context("apply a1")?;
+    let tip_a1 = persist_index_block_only(&db, &a1_blk).context("persist a1")?;
+    maybe_reorg_to(&db, &tip_a1, Some(&mp)).context("maybe_reorg_to a1")?;
 
     assert!(!mp.contains(&resurrectable_txid), "tx should be removed from mempool once mined");
     assert_eq!(mp.len(), 0, "mempool should be empty after A1 mines tx");
@@ -193,7 +194,8 @@ fn reorg_restores_transactions_from_old_branch_to_mempool() -> Result<()> {
         header: a2_hdr,
         txs: a2_txs,
     };
-    let tip_a2 = persist_index_apply_block(&db, &a2_blk, height_a2).context("apply a2")?;
+    let tip_a2 = persist_index_block_only(&db, &a2_blk).context("persist a2")?;
+    maybe_reorg_to(&db, &tip_a2, Some(&mp)).context("maybe_reorg_to a2")?;
     assert_tip_eq(&db, tip_a2)?;
 
     // Branch B: heavier competing branch from common_tip, WITHOUT the tx.
