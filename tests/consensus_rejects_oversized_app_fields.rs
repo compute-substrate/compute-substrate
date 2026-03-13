@@ -7,7 +7,7 @@ use csd::chain::index::{get_hidx, header_hash, index_header};
 use csd::crypto::txid;
 use csd::params::{MAX_DOMAIN_BYTES, MAX_URI_BYTES, MIN_FEE_PROPOSE};
 use csd::state::app_state::epoch_of;
-use csd::state::db::{k_block, set_tip, Stores};
+use csd::state::db::{k_block, k_utxo, put_utxo_meta, set_tip, Stores, UtxoMeta};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
@@ -40,6 +40,35 @@ fn signer_addr(sk32: [u8; 32]) -> [u8; 20] {
 
     let (_sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&dummy, sk32);
     csd::crypto::hash160(&pub33)
+}
+
+fn insert_spendable_utxo(
+    db: &Stores,
+    op: OutPoint,
+    value: u64,
+    owner: [u8; 20],
+    height: u64,
+) -> Result<()> {
+    let out = TxOut {
+        value,
+        script_pubkey: owner,
+    };
+
+    db.utxo.insert(
+        k_utxo(&op),
+        csd::codec::consensus_bincode().serialize(&out)?,
+    )?;
+
+    put_utxo_meta(
+        db,
+        &op,
+        &UtxoMeta {
+            height,
+            coinbase: false,
+        },
+    )?;
+
+    Ok(())
 }
 
 fn persist_index_apply_block(db: &Stores, blk: &Block, height: u64) -> Result<Hash32> {
@@ -134,8 +163,9 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = Arc::new(open_db(&tmp).context("open db")?);
 
-    let miner_shared = signer_addr(SK);
+    let miner_shared = h20(0x11);
     let miner_next = h20(0xAA);
+    let owner = signer_addr(SK);
 
     let shared_len = 7u64;
     let start_time = 1_701_300_000u64;
@@ -144,20 +174,15 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
         .context("build shared chain")?;
     let tip = shared[(shared_len - 1) as usize];
 
-    let tip_block_bytes = db
-        .blocks
-        .get(k_block(&tip))?
-        .context("missing tip block bytes")?;
-    let tip_block: Block = csd::codec::consensus_bincode()
-        .deserialize(&tip_block_bytes)
-        .context("deserialize tip block")?;
-
     let prevout = OutPoint {
-        txid: txid(&tip_block.txs[0]),
+        txid: [0xD1; 32],
         vout: 0,
     };
-    let input_value = tip_block.txs[0].outputs[0].value;
+    let input_value = 1_000_000u64;
     let fee = MIN_FEE_PROPOSE;
+
+    insert_spendable_utxo(&db, prevout, input_value, owner, shared_len - 1)
+        .context("insert spendable utxo")?;
 
     let bad_tx = make_signed_propose_tx(
         prevout,
@@ -188,8 +213,9 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = Arc::new(open_db(&tmp).context("open db")?);
 
-    let miner_shared = signer_addr(SK);
+    let miner_shared = h20(0x11);
     let miner_next = h20(0xBB);
+    let owner = signer_addr(SK);
 
     let shared_len = 7u64;
     let start_time = 1_701_300_500u64;
@@ -198,20 +224,15 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
         .context("build shared chain")?;
     let tip = shared[(shared_len - 1) as usize];
 
-    let tip_block_bytes = db
-        .blocks
-        .get(k_block(&tip))?
-        .context("missing tip block bytes")?;
-    let tip_block: Block = csd::codec::consensus_bincode()
-        .deserialize(&tip_block_bytes)
-        .context("deserialize tip block")?;
-
     let prevout = OutPoint {
-        txid: txid(&tip_block.txs[0]),
+        txid: [0xD2; 32],
         vout: 0,
     };
-    let input_value = tip_block.txs[0].outputs[0].value;
+    let input_value = 1_000_000u64;
     let fee = MIN_FEE_PROPOSE;
+
+    insert_spendable_utxo(&db, prevout, input_value, owner, shared_len - 1)
+        .context("insert spendable utxo")?;
 
     let bad_tx = make_signed_propose_tx(
         prevout,
