@@ -173,7 +173,9 @@ fn rejects_propose_with_domain_too_long() -> Result<()> {
         txid: [0xD1; 32],
         vout: 0,
     };
-    let input_value = 1_000_000u64;
+    let input_value = MIN_FEE_PROPOSE
+        .checked_add(1_000_000u64)
+        .expect("input_value overflow");
     let fee = MIN_FEE_PROPOSE;
 
     insert_spendable_utxo(&db, prevout, input_value, owner, 0)
@@ -222,7 +224,9 @@ fn rejects_propose_with_uri_too_long() -> Result<()> {
         txid: [0xD2; 32],
         vout: 0,
     };
-    let input_value = 1_000_000u64;
+    let input_value = MIN_FEE_PROPOSE
+        .checked_add(1_000_000u64)
+        .expect("input_value overflow");
     let fee = MIN_FEE_PROPOSE;
 
     insert_spendable_utxo(&db, prevout, input_value, owner, 0)
