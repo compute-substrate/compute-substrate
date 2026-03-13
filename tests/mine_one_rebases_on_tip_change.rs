@@ -14,6 +14,7 @@ use csd::state::app_state::epoch_of;
 use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut};
+use csd::chain::lock::new_chain_lock;
 
 mod testutil_chain;
 use testutil_chain::{assert_tip_eq, build_base_chain_with_miner, make_test_header, open_db};
@@ -198,26 +199,39 @@ fn mine_one_rebases_on_tip_change_and_rebuilds_template() -> Result<()> {
     };
     let tip_b2 = persist_index_block_only(&db, &b2_blk).context("persist b2")?;
 
-    let db_miner = db.clone();
-    let mp_miner = mp.clone();
+let db_miner = db.clone();
+let mp_miner = mp.clone();
 
-    let miner_thread = thread::spawn(move || -> Result<Hash32> {
-        let chain_lock = csd::chain::lock::new_chain_lock();
+// Shared chain lock
+let chain_lock = new_chain_lock();
+
+// Hold it so miner cannot finalize a block yet
+let held_guard = chain_lock.lock();
+
+let miner_thread = thread::spawn({
+    let db_miner = db_miner.clone();
+    let mp_miner = mp_miner.clone();
+    let chain_lock = chain_lock.clone();
+
+    move || -> Result<Hash32> {
         mine_one(&db_miner, &mp_miner, miner_final, 100, &chain_lock)
             .context("mine_one")
-    });
+    }
+});
 
-    // Give miner a brief chance to enter its loop on A1, then externally switch tip to B2.
-    // Even if the thread starts slightly later, the key invariant still holds:
-    // it must not mine on stale A1, and the invalidated tx must not be included.
-    thread::sleep(Duration::from_millis(10));
+// Give miner time to start hashing
+thread::sleep(Duration::from_millis(25));
 
-    maybe_reorg_to(&db, &tip_b2, Some(&mp)).context("maybe_reorg_to b2")?;
-    assert_tip_eq(&db, tip_b2)?;
+// Switch canonical tip while miner is blocked
+maybe_reorg_to(&db, &tip_b2, Some(&mp)).context("maybe_reorg_to b2")?;
+assert_tip_eq(&db, tip_b2)?;
 
-    let mined_hash = miner_thread
-        .join()
-        .expect("miner thread panicked")?;
+// Release lock so miner proceeds
+drop(held_guard);
+
+let mined_hash = miner_thread
+    .join()
+    .expect("miner thread panicked")?;
 
 
     let mined_block = load_block(&db, &mined_hash).context("load mined block")?;
