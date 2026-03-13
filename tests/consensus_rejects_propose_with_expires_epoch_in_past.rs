@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use tempfile::TempDir;
 
 use csd::crypto::{hash160, txid};
-use csd::params::MIN_FEE_PROPOSE;
+use csd::params::{EPOCH_LEN, MIN_FEE_PROPOSE};
 use csd::state::app_state::epoch_of;
 use csd::state::db::k_block;
 use csd::state::utxo::validate_and_apply_block;
@@ -65,7 +65,8 @@ fn rejects_propose_with_expires_epoch_in_past() -> Result<()> {
     let miner = signer_addr(SK);
     let owner = signer_addr(SK);
 
-    let shared_len = 8u64; // heights 0..7
+    // Critical: force current_epoch >= 1, otherwise "past epoch" cannot exist.
+    let shared_len = EPOCH_LEN + 1;
     let start_time = 1_702_000_000u64;
 
     let shared = build_base_chain_with_miner(&db, shared_len, start_time, miner)
@@ -88,7 +89,9 @@ fn rejects_propose_with_expires_epoch_in_past() -> Result<()> {
 
     let height = shared_len;
     let current_epoch = epoch_of(height);
-    let expired_epoch = current_epoch.saturating_sub(1);
+    assert!(current_epoch > 0, "test requires current_epoch > 0");
+
+    let expired_epoch = current_epoch - 1;
 
     let propose_tx = Transaction {
         version: 1,
