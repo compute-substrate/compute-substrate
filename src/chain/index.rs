@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::chain::pow::{bits_within_pow_limit, expected_bits, pow_ok, work_from_bits};
-use crate::chain::time::median_time_past;
+use crate::chain::time::{median_time_past, now_secs};
 use crate::crypto::sha256d;
 use crate::params::{GENESIS_HASH, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
 use crate::state::db::{k_hdr, Stores};
@@ -130,15 +130,18 @@ pub fn index_header(
             bail!("time <= MTP: {} <= {}", hdr.time, mtp);
         }
 
-        // Objective future bound relative to MTP (not wallclock)
-        let max_allowed = mtp.saturating_add(MAX_FUTURE_DRIFT_SECS);
+        // Future bound relative to local wall clock.
+        // This is required so timestamps can track real elapsed mining time,
+        // which LWMA needs in order to retarget correctly.
+        let max_allowed = now_secs().saturating_add(MAX_FUTURE_DRIFT_SECS);
         if hdr.time > max_allowed {
             bail!(
-                "time too far ahead of chain history: {} > mtp+drift({})",
+                "time too far in future: {} > now+drift({})",
                 hdr.time,
                 max_allowed
             );
         }
+
     }
     // ------------------------------------------------------------------------
 
