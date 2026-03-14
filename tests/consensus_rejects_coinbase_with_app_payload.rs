@@ -1,16 +1,41 @@
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
-use csd::chain::index::header_hash;
+use csd::chain::index::{get_hidx, header_hash, index_header};
 use csd::state::app_state::epoch_of;
+use csd::state::db::{k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
-use csd::types::{AppPayload, Block};
+use csd::types::{AppPayload, Block, Transaction};
 
 mod testutil_chain;
-use testutil_chain::{build_base_chain_with_miner, make_test_block, open_db};
+use testutil_chain::{build_base_chain_with_miner, make_coinbase_to, make_test_header, open_db};
 
 fn h20(n: u8) -> [u8; 20] {
     [n; 20]
+}
+
+fn persist_index_apply_block(db: &Stores, blk: &Block, height: u64) -> Result<[u8; 32]> {
+    let bh = header_hash(&blk.header);
+
+    let bytes = csd::codec::consensus_bincode()
+        .serialize(blk)
+        .context("serialize block")?;
+    db.blocks
+        .insert(k_block(&bh), bytes)
+        .context("db.blocks.insert")?;
+
+    let parent_hi = if blk.header.prev == [0u8; 32] {
+        None
+    } else {
+        get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
+    };
+
+    index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
+    validate_and_apply_block(db, blk, epoch_of(height), height)
+        .with_context(|| format!("validate_and_apply_block h={height}"))?;
+    set_tip(db, &bh).context("set_tip")?;
+
+    Ok(bh)
 }
 
 #[test]
@@ -29,22 +54,20 @@ fn rejects_block_with_coinbase_app_payload() -> Result<()> {
     let parent = shared[(shared_len - 1) as usize];
     let height = shared_len;
 
-    let mut blk: Block =
-        make_test_block(&db, parent, vec![], height).context("make_test_block")?;
-
-    // Corrupt the coinbase by attaching app payload, which consensus must reject.
-    blk.txs[0].app = AppPayload::Propose {
+    let mut cb: Transaction = make_coinbase_to(height, miner);
+    cb.app = AppPayload::Propose {
         domain: "coinbase-bad".to_string(),
         payload_hash: [0xAB; 32],
         uri: "https://example.com/coinbase-bad".to_string(),
         expires_epoch: epoch_of(height) + 5,
     };
 
-    // Recommit merkle after mutation so we test the app-payload rule specifically.
-    let txids: Vec<[u8; 32]> = blk.txs.iter().map(csd::crypto::txid).collect();
-    blk.header.merkle = csd::chain::mine::merkle_root_txids(&txids);
+    let txs = vec![cb];
+    let hdr = make_test_header(&db, parent, &txs, height)
+        .context("make_test_header")?;
+    let blk = Block { header: hdr, txs };
 
-    let err = validate_and_apply_block(&db, &blk, epoch_of(height), height)
+    let err = persist_index_apply_block(&db, &blk, height)
         .expect_err("coinbase with app payload must be rejected");
 
     let msg = format!("{err:#}");
@@ -52,9 +75,6 @@ fn rejects_block_with_coinbase_app_payload() -> Result<()> {
         msg.contains("coinbase must not carry app payload"),
         "unexpected error: {msg}"
     );
-
-    // Touch header hash so the import isn't optimized away in some setups / future edits.
-    let _ = header_hash(&blk.header);
 
     Ok(())
 }
