@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use csd::chain::index::{get_hidx, header_hash, index_header};
 use csd::crypto::{hash160, txid};
 use csd::params::{EPOCH_LEN, MIN_FEE_ATTEST, MIN_FEE_PROPOSE};
 use csd::state::app_state::epoch_of;
-use csd::state::db::k_block;
+use csd::state::db::{k_block, set_tip, Stores};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{AppPayload, Block, OutPoint, Transaction, TxIn, TxOut};
 
@@ -54,6 +55,30 @@ fn sign_tx(mut tx: Transaction, sk: [u8; 32]) -> Transaction {
     }
 
     tx
+}
+
+fn persist_index_apply_block(db: &Stores, blk: &Block, height: u64) -> Result<[u8; 32]> {
+    let bh = header_hash(&blk.header);
+
+    let bytes = csd::codec::consensus_bincode()
+        .serialize(blk)
+        .context("serialize block")?;
+    db.blocks
+        .insert(k_block(&bh), bytes)
+        .context("db.blocks.insert")?;
+
+    let parent_hi = if blk.header.prev == [0u8; 32] {
+        None
+    } else {
+        get_hidx(db, &blk.header.prev).context("get_hidx(parent)")?
+    };
+
+    index_header(db, &blk.header, parent_hi.as_ref()).context("index_header")?;
+    validate_and_apply_block(db, blk, epoch_of(height), height)
+        .with_context(|| format!("validate_and_apply_block h={height}"))?;
+    set_tip(db, &bh).context("set_tip")?;
+
+    Ok(bh)
 }
 
 #[test]
@@ -141,8 +166,8 @@ fn rejects_block_with_duplicate_attest_txids() -> Result<()> {
         txs: txs1,
     };
 
-    validate_and_apply_block(&db, &blk1, current_epoch, height)
-        .context("apply proposal block")?;
+    let prev2 = persist_index_apply_block(&db, &blk1, height)
+        .context("persist_index_apply_block proposal block")?;
 
     let attest_tx = Transaction {
         version: 1,
@@ -166,7 +191,6 @@ fn rejects_block_with_duplicate_attest_txids() -> Result<()> {
 
     let next_height = height + 1;
     let next_epoch = epoch_of(next_height);
-    let prev2 = csd::chain::index::header_hash(&blk1.header);
 
     let cb2 = csd::chain::mine::coinbase(
         h20(0x92),
