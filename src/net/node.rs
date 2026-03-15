@@ -863,26 +863,31 @@ async fn run_p2p_loop(
                     continue;
                 }
 
-                let mut target: Option<PeerId> = None;
 
-                if let Some(p) = providers.get(&h) {
-                    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
-                        target = Some(*p);
-                    }
-                }
-                if target.is_none() {
-                    if let Some(sp) = sync_peer {
-                        if connected.contains(&sp) && !is_bad(bad_providers, &h, &sp) {
-                            target = Some(sp);
-                        }
-                    }
-                }
-                if target.is_none() {
-                    target = connected
-                        .iter()
-                        .find(|p| !is_bad(bad_providers, &h, p))
-                        .cloned();
-                }
+
+
+let mut target: Option<PeerId> = None;
+
+// STRICT provider rule:
+// only ask the peer that advertised the header
+
+if let Some(p) = providers.get(&h) {
+    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
+        target = Some(*p);
+    }
+}
+
+// If no provider known yet, requeue and wait
+if target.is_none() {
+    if want_blocks.len() < MAX_WANT_QUEUE {
+        want_blocks.push_back(h);
+    }
+    continue;
+}
+
+
+
+
 
                 let Some(peer) = target else { break };
 
