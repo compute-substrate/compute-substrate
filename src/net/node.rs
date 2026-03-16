@@ -895,6 +895,7 @@ if target.is_none() {
                     .behaviour_mut()
                     .rr
                     .send_request(&peer, SyncRequest::GetBlock { hash: h });
+                println!("[sync] request block {} from {}", hex32(&h), peer);
 
                 rid_to_hash.insert(rid, h);
                 inflight.insert(h, (rid, Instant::now(), peer));
@@ -1376,24 +1377,29 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                 SyncResponse::Ack => {}
 
                                                 SyncResponse::Err { msg } => {
-                                                    println!("[sync] error response from {peer}: {msg}");
-
-                                                    if msg.contains("unknown block") {
-                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNKNOWN_BLOCK);
-
-                                                        if let Some(h) = rid_to_hash.remove(&rid) {
-                                                            inflight.remove(&h);
-                                                            bad_providers.entry(h).or_default().insert(peer);
-
-                                                            if providers.get(&h) == Some(&peer) {
-                                                                providers.remove(&h);
-                                                            }
-                                                            if want_blocks.len() < MAX_WANT_QUEUE {
-                                                                want_blocks.push_back(h);
-                                                            }
+                                                println!("[sync] error response from {peer}: {msg}");
+                                            
+                                                if msg.contains("unknown block") {
+                                                    if let Some(h) = rid_to_hash.remove(&rid) {
+                                                        println!("[sync] unknown block from {peer} for {}", hex32(&h));
+                                            
+                                                        inflight.remove(&h);
+                                                        bad_providers.entry(h).or_default().insert(peer);
+                                            
+                                                        if providers.get(&h) == Some(&peer) {
+                                                            providers.remove(&h);
                                                         }
+                                                        if want_blocks.len() < MAX_WANT_QUEUE {
+                                                            want_blocks.push_back(h);
+                                                        }
+                                                    } else {
+                                                        println!("[sync] unknown block from {peer}, but rid had no tracked hash");
                                                     }
                                                 }
+                                            }
+
+
+                                                
                                             }
                                         }
                                     }
@@ -1553,10 +1559,21 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
             Ok(SyncResponse::Headers { headers: out })
         }
 
-        SyncRequest::GetBlock { hash } => {
-            let Some(v) = db.blocks.get(k_block(&hash))? else {
-                bail!("unknown block");
-            };
+SyncRequest::GetBlock { hash } => {
+    let Some(v) = db.blocks.get(k_block(&hash))? else {
+        println!("[sync-serve] GetBlock MISS {}", hex32(&hash));
+        bail!("unknown block");
+    };
+
+    println!("[sync-serve] GetBlock HIT {} bytes={}", hex32(&hash), v.len());
+
+    if v.len() > MAX_BLOCK_BYTES {
+        bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
+    }
+
+    let blk: Block = crate::codec::consensus_bincode().deserialize::<Block>(&v)?;
+    Ok(SyncResponse::Block { block: blk })
+}
 
             if v.len() > MAX_BLOCK_BYTES {
                 bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
