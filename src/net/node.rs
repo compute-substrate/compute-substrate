@@ -542,49 +542,6 @@ fn block_parent_ready(
     pending_apply.contains_key(&hdr.prev)
 }
 
-fn enqueue_children_of(
-    db: &Stores,
-    parent_hash: &Hash32,
-    pending_apply: &HashMap<Hash32, Block>,
-    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
-    want_blocks: &mut VecDeque<Hash32>,
-    max_want_queue: usize,
-) -> Result<()> {
-
-    for item in db.hdr.scan_prefix(parent_hash) {
-        let (_k, v) = item?;
-
-        let hi: crate::chain::index::HeaderIndex =
-            crate::codec::consensus_bincode().deserialize(&v)?;
-
-        let h = hi.hash;
-
-        if db.blocks.get(k_block(&h))?.is_some() {
-            continue;
-        }
-
-        if inflight.contains_key(&h) {
-            continue;
-        }
-
-        if pending_apply.contains_key(&h) {
-            continue;
-        }
-
-        if want_blocks.iter().any(|x| x == &h) {
-            continue;
-        }
-
-        if want_blocks.len() >= max_want_queue {
-            break;
-        }
-
-        want_blocks.push_back(h);
-    }
-
-    Ok(())
-}
-
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
@@ -1448,7 +1405,8 @@ println!(
 
                                                             if db.blocks.get(k_block(&h))?.is_none()
     && !inflight.contains_key(&h)
-    && block_parent_ready(&db, &pending_apply, &hdr)
+    && !pending_apply.contains_key(&h)
+    && !want_blocks.iter().any(|x| x == &h)
     && want_blocks.len() < MAX_WANT_QUEUE
 {
     want_blocks.push_back(h);
@@ -1540,15 +1498,6 @@ if let Some((rid2, t0, asked_peer)) = inflight.remove(&bh) {
                                                     }
 
 
-
-let _ = enqueue_children_of(
-    &db,
-    &bh,
-    &pending_apply,
-    &inflight,
-    &mut want_blocks,
-    MAX_WANT_QUEUE,
-);
 
 pending_apply.insert(bh, block);
 try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
