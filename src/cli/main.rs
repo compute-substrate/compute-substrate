@@ -535,25 +535,23 @@ pub async fn run() -> Result<()> {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-                        let peers = net2.connected_peers();
-                        let fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
-                        let stable = net2.is_peer_stable(PEER_STABLE_SECS);
+let peers = net2.connected_peers();
+let tip_fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
+let peer_stable = net2.is_peer_stable(PEER_STABLE_SECS);
 
-                        let effective_peers = if fresh { peers.max(1) } else { peers };
-
-                        if !fresh || !stable {
-                            if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
-                                let last_tip = net2.last_tip_seen_unix();
-                                let last_peer_change = net2.last_peer_change_unix();
-                                eprintln!(
-                                    "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={} last_tip_seen_unix={} last_peer_change_unix={})",
-                                    peers, effective_peers, fresh, stable, last_tip, last_peer_change
-                                );
-                                last_gate_log = std::time::Instant::now();
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            continue;
-                        }
+if peers < 1 || !peer_stable {
+    if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
+        let last_tip = net2.last_tip_seen_unix();
+        let last_peer_change = net2.last_peer_change_unix();
+        eprintln!(
+            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={} last_tip_seen_unix={} last_peer_change_unix={})",
+            peers, peers, tip_fresh, peer_stable, last_tip, last_peer_change
+        );
+        last_gate_log = std::time::Instant::now();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    continue;
+}
 
                         prune_mempool(&db2, &mp2);
 
