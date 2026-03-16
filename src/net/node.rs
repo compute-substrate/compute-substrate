@@ -872,7 +872,8 @@ let pump_blocks =
                     rid_to_hash.remove(&rid);
                 }
 
-                bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT); bad_providers.entry(h).or_default().insert(peer);
+                bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT); 
+bad_providers.entry(h).or_default().insert(peer);
 
                 if providers.get(&h) == Some(&peer) {
                     // leave provider stale in map if you want, but do not trust it for this hash anymore
@@ -1084,10 +1085,11 @@ SwarmEvent::NewListenAddr { address, .. } => {
                             continue;
                         }
 
-                        println!("[p2p] connected: {peer_id}");
-                        connected.insert(peer_id);
-                        connected_peers.store(connected.len(), Ordering::Relaxed);
-                        mark_peer_change(&last_peer_change_unix);
+println!("[p2p] connected: {peer_id}");
+connected.insert(peer_id);
+connected_peers.store(connected.len(), Ordering::Relaxed);
+mark_peer_change(&last_peer_change_unix);
+mark_tip_seen(&last_tip_seen_unix);
 
                         // only request tip on first connection
                         if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
@@ -1263,10 +1265,13 @@ let _ = pump_blocks(
                                     }
 
                                     match message {
-                                        Message::Request { request, channel, .. } => {
-                                            if !allow_rr_req(&mut buckets, &mut bans, peer) {
-                                                continue;
-                                            }
+
+Message::Request { request, channel, .. } => {
+    if !allow_rr_req(&mut buckets, &mut bans, peer) {
+        continue;
+    }
+
+    mark_tip_seen(&last_tip_seen_unix);
 
 {
 if matches!(request, SyncRequest::GetBlock { .. }) {
