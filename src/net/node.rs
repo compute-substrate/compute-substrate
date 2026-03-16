@@ -1396,10 +1396,7 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                         println!("[sync] unknown block from {peer}, but rid had no tracked hash");
                                                         }
                                                     }
-                                                }
-                                            }
 
-                                                
                                             }
                                         }
                                     }
