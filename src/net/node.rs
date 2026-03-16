@@ -865,39 +865,40 @@ async fn run_p2p_loop(
 
 
 
-                let mut target: Option<PeerId> = None;
+let mut target: Option<PeerId> = None;
 
-                // Prefer a known provider if we have one.
-                if let Some(p) = providers.get(&h) {
-                    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
-                        target = Some(*p);
-                    }
-                }
+// 1) Prefer the recorded provider for this hash.
+if let Some(p) = providers.get(&h) {
+    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
+        target = Some(*p);
+    }
+}
 
-                // Otherwise try the current sync peer.
-                if target.is_none() {
-                    if let Some(sp) = sync_peer {
-                        if connected.contains(&sp) && !is_bad(bad_providers, &h, &sp) {
-                            target = Some(sp);
-                        }
-                    }
-                }
+// 2) If provider is unavailable or already failed for this hash,
+// fall back to another connected peer that is not marked bad for this hash.
+// Prefer sync_peer first, then any connected peer.
+if target.is_none() {
+    if let Some(sp) = sync_peer {
+        if connected.contains(&sp) && !is_bad(bad_providers, &h, &sp) {
+            target = Some(sp);
+        }
+    }
+}
 
-                // Otherwise try any connected peer that has not already failed this hash.
-                if target.is_none() {
-                    target = connected
-                        .iter()
-                        .find(|p| !is_bad(bad_providers, &h, p))
-                        .cloned();
-                }
+if target.is_none() {
+    target = connected
+        .iter()
+        .find(|p| !is_bad(bad_providers, &h, p))
+        .cloned();
+}
 
-                // If nobody is eligible yet, requeue and wait.
-                let Some(peer) = target else {
-                    if want_blocks.len() < MAX_WANT_QUEUE {
-                        want_blocks.push_back(h);
-                    }
-                    break;
-                };
+// 3) If literally nobody is eligible yet, requeue and wait.
+if target.is_none() {
+    if want_blocks.len() < MAX_WANT_QUEUE {
+        want_blocks.push_back(h);
+    }
+    continue;
+}
 
 
 
