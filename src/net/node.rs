@@ -1556,21 +1556,13 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
             Ok(SyncResponse::Headers { headers: out })
         }
 
-SyncRequest::GetBlock { hash } => {
-    let Some(v) = db.blocks.get(k_block(&hash))? else {
-        println!("[sync-serve] GetBlock MISS {}", hex32(&hash));
-        bail!("unknown block");
-    };
+        SyncRequest::GetBlock { hash } => {
+            let Some(v) = db.blocks.get(k_block(&hash))? else {
+                println!("[sync-serve] GetBlock MISS {}", hex32(&hash));
+                bail!("unknown block");
+            };
 
-    println!("[sync-serve] GetBlock HIT {} bytes={}", hex32(&hash), v.len());
-
-    if v.len() > MAX_BLOCK_BYTES {
-        bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
-    }
-
-    let blk: Block = crate::codec::consensus_bincode().deserialize::<Block>(&v)?;
-    Ok(SyncResponse::Block { block: blk })
-}
+            println!("[sync-serve] GetBlock HIT {} bytes={}", hex32(&hash), v.len());
 
             if v.len() > MAX_BLOCK_BYTES {
                 bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
