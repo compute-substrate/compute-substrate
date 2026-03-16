@@ -850,7 +850,7 @@ let pump_blocks =
      bad_providers: &mut HashMap<Hash32, HashSet<PeerId>>,
      bans: &HashMap<PeerId, Instant>,
      peer_score: &mut HashMap<PeerId, i32>,
-     quarantine: &mut HashMap<PeerId, Instant>,
+     quarantine: &HashMap<PeerId, Instant>,
      rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
      db: &Stores,
      pending_apply: &HashMap<Hash32, Block>,
