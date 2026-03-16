@@ -830,12 +830,15 @@ async fn run_p2p_loop(
          sync_peer: Option<PeerId>,
          connected: &HashSet<PeerId>,
          providers: &HashMap<Hash32, PeerId>,
-         bad_providers: &HashMap<Hash32, HashSet<PeerId>>,
+         bad_providers: &mut HashMap<Hash32, HashSet<PeerId>>,
+         bans: &HashMap<PeerId, Instant>,
+         quarantine: &HashMap<PeerId, Instant>,
          rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
          db: &Stores,
          want_blocks: &mut VecDeque<Hash32>,
          inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>|
          -> Result<()> {
+
             let now = Instant::now();
             let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
 
@@ -845,14 +848,21 @@ async fn run_p2p_loop(
                 }
             }
 
-            for (h, _peer) in timed_out {
+            for (h, peer) in timed_out {
                 if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
                     rid_to_hash.remove(&rid);
                 }
+
+                bad_providers.entry(h).or_default().insert(peer);
+
+                if providers.get(&h) == Some(&peer) {
+                    // leave provider stale in map if you want, but do not trust it for this hash anymore
+                }
+
                 if want_blocks.len() < MAX_WANT_QUEUE {
                     want_blocks.push_back(h);
                 }
-                println!("[sync] requeue timed-out block {}", hex32(&h));
+                println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
             }
 
             while inflight.len() < MAX_INFLIGHT_BLOCKS {
@@ -866,41 +876,51 @@ async fn run_p2p_loop(
 
 
 
-let mut target: Option<PeerId> = None;
+                let mut target: Option<PeerId> = None;
 
-// 1) Prefer the recorded provider for this hash.
-if let Some(p) = providers.get(&h) {
-    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
-        target = Some(*p);
-    }
-}
+                // 1) Prefer the recorded provider for this hash, but only if still eligible.
+                if let Some(p) = providers.get(&h) {
+                    if connected.contains(p)
+                        && !is_banned(bans, p)
+                        && !is_quarantined(quarantine, p)
+                        && !is_bad(bad_providers, &h, p)
+                    {
+                        target = Some(*p);
+                    }
+                }
 
-// 2) If provider is unavailable or already failed for this hash,
-// fall back to another connected peer that is not marked bad for this hash.
-// Prefer sync_peer first, then any connected peer.
-if target.is_none() {
-    if let Some(sp) = sync_peer {
-        if connected.contains(&sp) && !is_bad(bad_providers, &h, &sp) {
-            target = Some(sp);
-        }
-    }
-}
+                // 2) Fall back to sync_peer if eligible.
+                if target.is_none() {
+                    if let Some(sp) = sync_peer {
+                        if connected.contains(&sp)
+                            && !is_banned(bans, &sp)
+                            && !is_quarantined(quarantine, &sp)
+                            && !is_bad(bad_providers, &h, &sp)
+                        {
+                            target = Some(sp);
+                        }
+                    }
+                }
 
-if target.is_none() {
-    target = connected
-        .iter()
-        .find(|p| !is_bad(bad_providers, &h, p))
-        .cloned();
-}
+                // 3) Fall back to any connected eligible peer.
+                if target.is_none() {
+                    target = connected
+                        .iter()
+                        .find(|p| {
+                            !is_banned(bans, p)
+                                && !is_quarantined(quarantine, p)
+                                && !is_bad(bad_providers, &h, p)
+                        })
+                        .cloned();
+                }
 
-// 3) If literally nobody is eligible yet, requeue and wait.
-if target.is_none() {
-    if want_blocks.len() < MAX_WANT_QUEUE {
-        want_blocks.push_back(h);
-    }
-    continue;
-}
-
+                // 4) Nobody eligible yet: requeue and wait.
+                if target.is_none() {
+                    if want_blocks.len() < MAX_WANT_QUEUE {
+                        want_blocks.push_back(h);
+                    }
+                    continue;
+                }
 
 
 
@@ -959,10 +979,19 @@ if target.is_none() {
                         .or_else(|| connected.iter().find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p)).cloned());
                 }
 
-                let _ = pump_blocks(
-                    &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                    &db, &mut want_blocks, &mut inflight
-                );
+let _ = pump_blocks(
+    &mut swarm,
+    sync_peer,
+    &connected,
+    &providers,
+    &mut bad_providers,
+    &bans,
+    &quarantine,
+    &mut rid_to_hash,
+    &db,
+    &mut want_blocks,
+    &mut inflight,
+);
 
                 try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
             }
@@ -1131,10 +1160,19 @@ SwarmEvent::NewListenAddr { address, .. } => {
                                     }
                                 }
 
-                                let _ = pump_blocks(
-                                    &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                                    &db, &mut want_blocks, &mut inflight
-                                );
+let _ = pump_blocks(
+    &mut swarm,
+    sync_peer,
+    &connected,
+    &providers,
+    &mut bad_providers,
+    &bans,
+    &quarantine,
+    &mut rid_to_hash,
+    &db,
+    &mut want_blocks,
+    &mut inflight,
+);
 
                             } else if topic == TOPIC_TX {
                                 let gt: GossipTx = match crate::codec::consensus_bincode().deserialize::<GossipTx>(&data) {
@@ -1283,7 +1321,7 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                                 continue;
                                                             }
 
-                                                            providers.entry(h).or_insert(peer);
+                                                          
 
                                                             let idx_res = {
                                                                 let _g = chain_lock.lock();
@@ -1319,9 +1357,18 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                         }
 
                                                         let _ = pump_blocks(
-                                                            &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                                                            &db, &mut want_blocks, &mut inflight
-                                                        );
+    &mut swarm,
+    sync_peer,
+    &connected,
+    &providers,
+    &mut bad_providers,
+    &bans,
+    &quarantine,
+    &mut rid_to_hash,
+    &db,
+    &mut want_blocks,
+    &mut inflight,
+);
                                                     }
                                                 }
 
@@ -1337,15 +1384,15 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                         }
                                                     }
 
-                                                    let bh = header_hash(&block.header);
+let bh = header_hash(&block.header);
+providers.insert(bh, peer);
 
-                                                    if let Some((rid2, t0, asked_peer)) = inflight.remove(&bh) {
-                                                        rid_to_hash.remove(&rid2);
-                                                        if asked_peer == peer {
-                                                            // good: answered inflight
-                                                            let _elapsed = t0.elapsed().as_millis();
-                                                        }
-                                                    }
+if let Some((rid2, t0, asked_peer)) = inflight.remove(&bh) {
+    rid_to_hash.remove(&rid2);
+    if asked_peer == peer {
+        let _elapsed = t0.elapsed().as_millis();
+    }
+}
 
                                                     if !accept_header_universe_pow(&cfg, &block.header, &bh) {
                                                         note_invalid(&mut buckets, &mut bans, peer, "block: failed pow/limit/universe");
@@ -1393,37 +1440,68 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                     pending_apply.insert(bh, block);
                                                     try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
 
-                                                    let _ = pump_blocks(
-                                                        &mut swarm, sync_peer, &connected, &providers, &bad_providers, &mut rid_to_hash,
-                                                        &db, &mut want_blocks, &mut inflight
-                                                    );
+let _ = pump_blocks(
+    &mut swarm,
+    sync_peer,
+    &connected,
+    &providers,
+    &mut bad_providers,
+    &bans,
+    &quarantine,
+    &mut rid_to_hash,
+    &db,
+    &mut want_blocks,
+    &mut inflight,
+);
+
                                                 }
 
                                                 SyncResponse::Ack => {}
 
-                                                SyncResponse::Err { msg } => {
-                                                println!("[sync] error response from {peer}: {msg}");
-                                            
-                                                    if msg.contains("unknown block") {
-                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNKNOWN_BLOCK);
-                                                    
-                                                        if let Some(h) = rid_to_hash.remove(&rid) {
-                                                            // println!("[sync] unknown block from {peer} for {}", hex32(&h));
-                                                    
-                                                            inflight.remove(&h);
-                                                            bad_providers.entry(h).or_default().insert(peer);
-                                                    
-                                                            if providers.get(&h) == Some(&peer) {
-                                                                providers.remove(&h);
-                                                            }
-                                                            if want_blocks.len() < MAX_WANT_QUEUE {
-                                                                want_blocks.push_back(h);
-                                                            }
-                                                        } else {
-                                                            println!("[sync] unknown block from {peer}, but rid had no tracked hash");
-                                                        }
-                                                    }
-                                                }
+SyncResponse::Err { msg } => {
+    println!("[sync] error response from {peer}: {msg}");
+
+    if msg.contains("unknown block") {
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNKNOWN_BLOCK);
+
+        if let Some(h) = rid_to_hash.remove(&rid) {
+            inflight.remove(&h);
+            bad_providers.entry(h).or_default().insert(peer);
+
+            if providers.get(&h) == Some(&peer) {
+                providers.remove(&h);
+            }
+
+            if want_blocks.len() < MAX_WANT_QUEUE {
+                want_blocks.push_back(h);
+            }
+        } else {
+            println!("[sync] unknown block from {peer}, but rid had no tracked hash");
+        }
+
+        if sync_peer == Some(peer) {
+            sync_peer = choose_best_sync_peer(
+                &connected,
+                &peer_work,
+                &peer_score,
+                &bans,
+                &quarantine,
+            )
+            .filter(|p| *p != peer)
+            .or_else(|| {
+                connected
+                    .iter()
+                    .find(|p| {
+                        **p != peer
+                            && !is_banned(&bans, p)
+                            && !is_quarantined(&quarantine, p)
+                    })
+                    .cloned()
+            });
+        }
+    }
+}
+
                                             }
                                         }
                                     }
