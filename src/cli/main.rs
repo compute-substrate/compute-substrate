@@ -49,6 +49,9 @@ pub enum Commands {
 
         #[arg(long, default_value = "")]
         bootnodes: String,
+
+        #[arg(long, default_value = "normal")]
+        p2p_test_mode: String,
     },
 
     Wallet {
@@ -418,6 +421,7 @@ pub async fn run() -> Result<()> {
             genesis,
             p2p_listen,
             bootnodes,
+            p2p_test_mode,
         } => {
             std::fs::create_dir_all(&datadir)?;
             let db = Arc::new(Stores::open(&datadir)?);
@@ -468,13 +472,23 @@ pub async fn run() -> Result<()> {
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
 
+                        let test_mode = match p2p_test_mode.as_str() {
+                "normal" => crate::net::node::TestPeerMode::Normal,
+                "stall-blocks" => crate::net::node::TestPeerMode::StallBlockResponses,
+                "unknown-blocks" => crate::net::node::TestPeerMode::UnknownBlockResponses,
+                other => anyhow::bail!(
+                    "unknown --p2p-test-mode '{}'; expected one of: normal, stall-blocks, unknown-blocks",
+                    other
+                ),
+            };
+
             let net_cfg = crate::net::node::NetConfig {
                 datadir: datadir.clone(),
                 listen: listen_ma,
                 bootnodes: boots,
                 genesis_hash,
                 is_bootnode: !mine,
-                test_mode: crate::net::node::TestPeerMode::Normal,
+                test_mode,
             };
 
             // Start P2P and keep a handle for miner gating
