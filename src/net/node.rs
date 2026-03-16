@@ -550,25 +550,31 @@ fn enqueue_children_of(
     want_blocks: &mut VecDeque<Hash32>,
     max_want_queue: usize,
 ) -> Result<()> {
-    for item in db.hdr.scan_prefix(parent_hash)? {
+
+    for item in db.hdr.scan_prefix(parent_hash) {
         let (_k, v) = item?;
-        let hi: crate::chain::index::HeaderIndex = crate::codec::consensus_bincode()
-            .deserialize(&v)?;
+
+        let hi: crate::chain::index::HeaderIndex =
+            crate::codec::consensus_bincode().deserialize(&v)?;
 
         let h = hi.hash;
 
         if db.blocks.get(k_block(&h))?.is_some() {
             continue;
         }
+
         if inflight.contains_key(&h) {
             continue;
         }
+
         if pending_apply.contains_key(&h) {
             continue;
         }
+
         if want_blocks.iter().any(|x| x == &h) {
             continue;
         }
+
         if want_blocks.len() >= max_want_queue {
             break;
         }
@@ -1373,16 +1379,19 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                     let locator_tip = if best_hdr_tip != [0u8; 32] { best_hdr_tip } else { applied_tip };
 
                                                     if chainwork > local_w && sync_peer == Some(peer) {
-                                                        let locator = build_locator(&db, &locator_tip);
-                                                        let _ = swarm.behaviour_mut().rr.send_request(
-                                                            &peer,
-                                                            SyncRequest::GetHeadersByLocator { locator, max: MAX_HEADERS_PER_SYNC }
-                                                        );
+
+let locator = build_locator(&db, &locator_tip);
+let locator_len = locator.len();
+
+let _ = swarm.behaviour_mut().rr.send_request(
+    &peer,
+    SyncRequest::GetHeadersByLocator { locator, max: MAX_HEADERS_PER_SYNC }
+);
 
 println!(
     "[sync] requesting headers-by-locator from {} (locator_len={})",
     peer,
-    locator.len()
+    locator_len
 );
 
                                                     }
