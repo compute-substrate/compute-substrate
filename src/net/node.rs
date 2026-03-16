@@ -526,6 +526,23 @@ fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
     }
 }
 
+fn block_parent_ready(
+    db: &Stores,
+    pending_apply: &HashMap<Hash32, Block>,
+    hdr: &BlockHeader,
+) -> bool {
+    if hdr.prev == [0u8; 32] {
+        return true;
+    }
+
+    if db.blocks.get(k_block(&hdr.prev)).ok().flatten().is_some() {
+        return true;
+    }
+
+    pending_apply.contains_key(&hdr.prev)
+}
+
+
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
@@ -825,19 +842,21 @@ async fn run_p2p_loop(
         last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
     };
 
-    let pump_blocks =
-        |swarm: &mut Swarm<Behaviour>,
-         sync_peer: Option<PeerId>,
-         connected: &HashSet<PeerId>,
-         providers: &HashMap<Hash32, PeerId>,
-         bad_providers: &mut HashMap<Hash32, HashSet<PeerId>>,
-         bans: &HashMap<PeerId, Instant>,
-         quarantine: &HashMap<PeerId, Instant>,
-         rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
-         db: &Stores,
-         want_blocks: &mut VecDeque<Hash32>,
-         inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>|
-         -> Result<()> {
+let pump_blocks =
+    |swarm: &mut Swarm<Behaviour>,
+     sync_peer: Option<PeerId>,
+     connected: &HashSet<PeerId>,
+     providers: &HashMap<Hash32, PeerId>,
+     bad_providers: &mut HashMap<Hash32, HashSet<PeerId>>,
+     bans: &HashMap<PeerId, Instant>,
+     peer_score: &mut HashMap<PeerId, i32>,
+     quarantine: &mut HashMap<PeerId, Instant>,
+     rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
+     db: &Stores,
+     pending_apply: &HashMap<Hash32, Block>,
+     want_blocks: &mut VecDeque<Hash32>,
+     inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>|
+     -> Result<()> {
 
             let now = Instant::now();
             let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
@@ -853,7 +872,7 @@ async fn run_p2p_loop(
                     rid_to_hash.remove(&rid);
                 }
 
-                bad_providers.entry(h).or_default().insert(peer);
+                bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT); bad_providers.entry(h).or_default().insert(peer);
 
                 if providers.get(&h) == Some(&peer) {
                     // leave provider stale in map if you want, but do not trust it for this hash anymore
@@ -873,6 +892,23 @@ async fn run_p2p_loop(
                 if inflight.contains_key(&h) {
                     continue;
                 }
+
+let Some(hi) = get_hidx(db, &h)? else {
+    if want_blocks.len() < MAX_WANT_QUEUE {
+        want_blocks.push_back(h);
+    }
+    continue;
+};
+
+if hi.parent != [0u8; 32]
+    && db.blocks.get(k_block(&hi.parent))?.is_none()
+    && !pending_apply.contains_key(&hi.parent)
+{
+    if want_blocks.len() < MAX_WANT_QUEUE {
+        want_blocks.push_back(h);
+    }
+    continue;
+}
 
 
 
@@ -986,9 +1022,11 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
+    &peer_score,
     &quarantine,
     &mut rid_to_hash,
     &db,
+    &pending_apply,
     &mut want_blocks,
     &mut inflight,
 );
@@ -1149,16 +1187,17 @@ SwarmEvent::NewListenAddr { address, .. } => {
                                     bump_score(&mut peer_score, &mut quarantine, p, 1);
                                 }
 
-                                if seen_blocks.insert(h) {
-                                    if db.blocks.get(k_block(&h))?.is_none()
-                                        && want_blocks.len() < MAX_WANT_QUEUE
-                                    {
-                                        want_blocks.push_back(h);
-                                    }
-                                    if sync_peer.is_none() {
-                                        sync_peer = src;
-                                    }
-                                }
+if seen_blocks.insert(h) {
+    if db.blocks.get(k_block(&h))?.is_none()
+        && !inflight.contains_key(&h)
+        && want_blocks.len() < MAX_WANT_QUEUE
+    {
+        want_blocks.push_back(h);
+    }
+    if sync_peer.is_none() {
+        sync_peer = src;
+    }
+}
 
 let _ = pump_blocks(
     &mut swarm,
@@ -1167,9 +1206,11 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
+    &peer_score,
     &quarantine,
     &mut rid_to_hash,
     &db,
+    &pending_apply,
     &mut want_blocks,
     &mut inflight,
 );
@@ -1349,26 +1390,30 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                                             }
 
                                                             if db.blocks.get(k_block(&h))?.is_none()
-                                                                && !inflight.contains_key(&h)
-                                                                && want_blocks.len() < MAX_WANT_QUEUE
-                                                            {
-                                                                want_blocks.push_back(h);
-                                                            }
+    && !inflight.contains_key(&h)
+    && block_parent_ready(&db, &pending_apply, &hdr)
+    && want_blocks.len() < MAX_WANT_QUEUE
+{
+    want_blocks.push_back(h);
+}
                                                         }
 
-                                                        let _ = pump_blocks(
+let _ = pump_blocks(
     &mut swarm,
     sync_peer,
     &connected,
     &providers,
     &mut bad_providers,
     &bans,
+    &peer_score,
     &quarantine,
     &mut rid_to_hash,
     &db,
+    &pending_apply,
     &mut want_blocks,
     &mut inflight,
 );
+
                                                     }
                                                 }
 
@@ -1437,7 +1482,7 @@ if let Some((rid2, t0, asked_peer)) = inflight.remove(&bh) {
                                                         }
                                                     }
 
-                                                    pending_apply.insert(bh, block);
+pending_apply.insert(bh, block);
                                                     try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
 
 let _ = pump_blocks(
@@ -1447,9 +1492,11 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
+    &peer_score,
     &quarantine,
     &mut rid_to_hash,
     &db,
+    &pending_apply,
     &mut want_blocks,
     &mut inflight,
 );
@@ -1513,18 +1560,7 @@ SyncResponse::Err { msg } => {
                         // Penalize timeouts (production upgrade)
                         // Scan inflight and mark peers that keep timing out.
                         // (Lightweight: done here since we are already in event loop.)
-                        {
-                            let now = Instant::now();
-                            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
-                            for (h, (_rid, t0, p)) in inflight.iter() {
-                                if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
-                                    timed_out.push((*h, *p));
-                                }
-                            }
-                            for (_h, p) in timed_out {
-                                bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_TIMEOUT);
-                            }
-                        }
+                  
                     }
 
                     _ => {}
