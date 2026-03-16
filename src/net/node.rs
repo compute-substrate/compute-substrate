@@ -865,25 +865,39 @@ async fn run_p2p_loop(
 
 
 
+                let mut target: Option<PeerId> = None;
 
-let mut target: Option<PeerId> = None;
+                // Prefer a known provider if we have one.
+                if let Some(p) = providers.get(&h) {
+                    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
+                        target = Some(*p);
+                    }
+                }
 
-// STRICT provider rule:
-// only ask the peer that advertised the header
+                // Otherwise try the current sync peer.
+                if target.is_none() {
+                    if let Some(sp) = sync_peer {
+                        if connected.contains(&sp) && !is_bad(bad_providers, &h, &sp) {
+                            target = Some(sp);
+                        }
+                    }
+                }
 
-if let Some(p) = providers.get(&h) {
-    if connected.contains(p) && !is_bad(bad_providers, &h, p) {
-        target = Some(*p);
-    }
-}
+                // Otherwise try any connected peer that has not already failed this hash.
+                if target.is_none() {
+                    target = connected
+                        .iter()
+                        .find(|p| !is_bad(bad_providers, &h, p))
+                        .cloned();
+                }
 
-// If no provider known yet, requeue and wait
-if target.is_none() {
-    if want_blocks.len() < MAX_WANT_QUEUE {
-        want_blocks.push_back(h);
-    }
-    continue;
-}
+                // If nobody is eligible yet, requeue and wait.
+                let Some(peer) = target else {
+                    if want_blocks.len() < MAX_WANT_QUEUE {
+                        want_blocks.push_back(h);
+                    }
+                    break;
+                };
 
 
 
@@ -1100,7 +1114,7 @@ SwarmEvent::NewListenAddr { address, .. } => {
                                 mark_tip_seen(&last_tip_seen_unix);
 
                                 if let Some(p) = src {
-                                    providers.entry(h).or_insert(p);
+                                    // Gossip source is only a relay hint, not a guaranteed block provider.
                                     bump_score(&mut peer_score, &mut quarantine, p, 1);
                                 }
 
