@@ -891,7 +891,11 @@ bad_providers.entry(h).or_default().insert(peer);
                 println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
             }
 
-            while inflight.len() < MAX_INFLIGHT_BLOCKS {
+let mut scan_budget = want_blocks.len();
+
+while inflight.len() < MAX_INFLIGHT_BLOCKS && scan_budget > 0 {
+    scan_budget -= 1;
+
                 let Some(h) = want_blocks.pop_front() else { break };
                 if db.blocks.get(k_block(&h))?.is_some() {
                     continue;
