@@ -984,32 +984,38 @@ if hi.parent != [0u8; 32]
                     last_redial = Instant::now();
                 }
 
-// periodic tip requests (throttled)
-if let Some(sp) = sync_peer {
-    if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
-        let should_poll = last_tip_req_at
-            .get(&sp)
-            .map(|t| t.elapsed() >= Duration::from_secs(TIP_POLL_SECS))
-            .unwrap_or(true);
+// stale-fallback tip poll only
+let tip_age = unix_now().saturating_sub(last_tip_seen_unix.load(Ordering::Relaxed));
 
-        if should_poll {
-            let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
-            last_tip_req_at.insert(sp, Instant::now());
-        }
+if tip_age >= TIP_POLL_SECS {
+    if sync_peer.is_none() {
+        sync_peer = choose_best_sync_peer(
+            &connected,
+            &peer_work,
+            &peer_score,
+            &bans,
+            &quarantine,
+        )
+        .or_else(|| {
+            connected
+                .iter()
+                .find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p))
+                .cloned()
+        });
     }
-} else {
-    for p in connected.iter() {
-        if is_banned(&bans, p) { continue; }
-        if is_quarantined(&quarantine, p) { continue; }
 
-        let should_poll = last_tip_req_at
-            .get(p)
-            .map(|t| t.elapsed() >= Duration::from_secs(TIP_POLL_SECS))
-            .unwrap_or(true);
+    if let Some(sp) = sync_peer {
+        if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
+            let should_poll = last_tip_req_at
+                .get(&sp)
+                .map(|t| t.elapsed() >= Duration::from_secs(TIP_POLL_SECS))
+                .unwrap_or(true);
 
-        if should_poll {
-            let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
-            last_tip_req_at.insert(*p, Instant::now());
+            if should_poll {
+                let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
+                last_tip_req_at.insert(sp, Instant::now());
+                println!("[sync] stale-tip poll to {} (tip_age={}s)", sp, tip_age);
+            }
         }
     }
 }
@@ -1018,41 +1024,6 @@ if let Some(sp) = sync_peer {
                     sync_peer = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine)
                         .or_else(|| connected.iter().find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p)).cloned());
                 }
-
-if let Some(sp) = sync_peer {
-    if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
-        let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
-        let local_w = if best_hdr_work > 0 { best_hdr_work } else { applied_w };
-        let remote_w = *peer_work.get(&sp).unwrap_or(&0);
-
-        if remote_w > local_w {
-            let locator_tip = if best_hdr_tip != [0u8; 32] {
-                best_hdr_tip
-            } else {
-                applied_tip
-            };
-
-            let locator = build_locator(&db, &locator_tip);
-            let locator_len = locator.len();
-
-            let _ = swarm.behaviour_mut().rr.send_request(
-                &sp,
-                SyncRequest::GetHeadersByLocator {
-                    locator,
-                    max: MAX_HEADERS_PER_SYNC,
-                },
-            );
-
-            println!(
-                "[sync] poll-triggered headers-by-locator from {} (local_w={}, remote_w={}, locator_len={})",
-                sp,
-                local_w,
-                remote_w,
-                locator_len
-            );
-        }
-    }
-}
 
 let _ = pump_blocks(
     &mut swarm,
