@@ -720,7 +720,14 @@ async fn run_p2p_loop(
     gossipsub.subscribe(&IdentTopic::new(TOPIC_HDR))?;
     gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
 
-    let rr_cfg = request_response::Config::default();
+let mut rr_cfg = request_response::Config::default();
+
+// CRITICAL: enforce timeouts so stalled streams don't hang forever
+rr_cfg.set_request_timeout(Duration::from_secs(10));
+
+// Optional but recommended: limit concurrent streams
+rr_cfg.set_max_concurrent_streams(128);
+
     let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
     let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
 
@@ -1611,6 +1618,25 @@ SyncResponse::Err { msg } => {
 
                                             }
                                         }
+
+
+Event::OutboundFailure { peer, request_id, error } => {
+    println!("[sync] outbound failure to {}: {:?}", peer, error);
+
+    if let Some(h) = rid_to_hash.remove(&request_id) {
+        inflight.remove(&h);
+
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_TIMEOUT);
+
+        if want_blocks.len() < MAX_WANT_QUEUE {
+            want_blocks.push_back(h);
+        }
+
+        println!("[sync] requeued {} after outbound failure", hex32(&h));
+    }
+}
+
+
                                     }
                                 }
                                 _ => {}
