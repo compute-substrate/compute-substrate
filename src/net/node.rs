@@ -1,39 +1,4 @@
 // src/net/node.rs
-//
-// Mainnet-hardening notes (what I changed vs your pasted file):
-// 1) Removed the local MAX_BLOCK_BYTES constant and instead use consensus params:
-//      - crate::params::MAX_BLOCK_BYTES
-//      - crate::params::MAX_TX_BYTES
-//    This ensures P2P byte caps match consensus limits.
-//
-// 2) Added TX-size enforcement on inbound TX gossip *after decode* (defense-in-depth):
-//      - if consensus_bincode().serialize(&gt.tx).len() > MAX_TX_BYTES => reject + count invalid
-//
-// 3) Added outbound TX gossip check: if tx serializes > MAX_TX_BYTES, we refuse to publish it.
-//
-// 4) Tightened RR codec write_request/write_response to refuse sending oversized bodies
-//    (protects our own node from accidentally emitting > MAX_RR_MSG_BYTES).
-//
-// 5) Added Option A plumbing (miner gating support):
-//      - Track connected peer count
-//      - Track "last remote tip observed" time
-//      - Track "last peer change" time (peer stability latch)
-//      - Expose these via NetHandle so miner can refuse to mine unless:
-//           connected_peers >= 1 AND tip_fresh <= N seconds AND peers stable >= M seconds
-//
-// 6) FIXED: run_p2p() previously never returned NetHandle because it entered an infinite loop.
-//    Now:
-//      - spawn_p2p() returns NetHandle immediately and spawns the P2P loop
-//      - run_p2p() is an alias for spawn_p2p() for compatibility
-//
-// 7) Bootnode auto-redial:
-//      - If we have 0 connected peers, periodically attempt to dial bootnodes again.
-//
-// 8) NEW (this patch): connection refcount + dial backoff (fixes “connected spam” + tip spam).
-//
-// 9) NEW (production upgrades):
-//      - peer scoring (prefer good peers; deprioritize bad)
-//      - misbehavior quarantine (soft-ban for N seconds when score too low)
 
 use crate::chain::pow::{bits_within_pow_limit, pow_ok};
 use anyhow::{bail, Context, Result};
@@ -80,7 +45,7 @@ const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 200;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 5000;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 500;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 50;
 
@@ -1283,9 +1248,13 @@ let _ = pump_blocks(
 
 Message::Request { request, channel, .. } => {
 
-    if !allow_rr_req(&mut buckets, &mut bans, peer) {
-        continue;
-    }
+if !allow_rr_req(&mut buckets, &mut bans, peer) {
+    let _ = swarm.behaviour_mut().rr.send_response(
+        channel,
+        SyncResponse::Err { msg: "rate limited".into() },
+    );
+    continue;
+}
 
     mark_tip_seen(&last_tip_seen_unix);
 
@@ -1636,12 +1605,38 @@ Event::OutboundFailure { peer, request_id, error } => {
         inflight.remove(&h);
 
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_TIMEOUT);
+        bad_providers.entry(h).or_default().insert(peer);
+
+        if providers.get(&h) == Some(&peer) {
+            providers.remove(&h);
+        }
 
         if want_blocks.len() < MAX_WANT_QUEUE {
             want_blocks.push_back(h);
         }
 
         println!("[sync] requeued {} after outbound failure", hex32(&h));
+    }
+
+    if sync_peer == Some(peer) {
+        sync_peer = choose_best_sync_peer(
+            &connected,
+            &peer_work,
+            &peer_score,
+            &bans,
+            &quarantine,
+        )
+        .filter(|p| *p != peer)
+        .or_else(|| {
+            connected
+                .iter()
+                .find(|p| {
+                    **p != peer
+                        && !is_banned(&bans, p)
+                        && !is_quarantined(&quarantine, p)
+                })
+                .cloned()
+        });
     }
 }
 
