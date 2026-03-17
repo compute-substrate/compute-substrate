@@ -63,6 +63,8 @@ const SCORE_BAD_UNKNOWN_BLOCK: i32 = -2;
 
 const TIP_POLL_SECS: u64 = 120;
 
+const REGULAR_TIP_POLL_SECS: u64 = 10;
+
 // quarantine: soft-ban for a while when score too low
 const QUAR_SECS: u64 = 60;
 const QUAR_SCORE_THRESHOLD: i32 = -20;
@@ -993,36 +995,39 @@ if hi.parent != [0u8; 32]
                     last_redial = Instant::now();
                 }
 
-// stale-fallback tip poll only
+// regular tip polling + stale fallback
 let tip_age = unix_now().saturating_sub(last_tip_seen_unix.load(Ordering::Relaxed));
 
-if tip_age >= TIP_POLL_SECS {
-    if sync_peer.is_none() {
-        sync_peer = choose_best_sync_peer(
-            &connected,
-            &peer_work,
-            &peer_score,
-            &bans,
-            &quarantine,
-        )
-        .or_else(|| {
-            connected
-                .iter()
-                .find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p))
-                .cloned()
-        });
-    }
+if sync_peer.is_none() {
+    sync_peer = choose_best_sync_peer(
+        &connected,
+        &peer_work,
+        &peer_score,
+        &bans,
+        &quarantine,
+    )
+    .or_else(|| {
+        connected
+            .iter()
+            .find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p))
+            .cloned()
+    });
+}
 
-    if let Some(sp) = sync_peer {
-        if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
-            let should_poll = last_tip_req_at
-                .get(&sp)
-                .map(|t| t.elapsed() >= Duration::from_secs(TIP_POLL_SECS))
-                .unwrap_or(true);
+if let Some(sp) = sync_peer {
+    if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
+        let regular_due = last_tip_req_at
+            .get(&sp)
+            .map(|t| t.elapsed() >= Duration::from_secs(REGULAR_TIP_POLL_SECS))
+            .unwrap_or(true);
 
-            if should_poll {
-                let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
-                last_tip_req_at.insert(sp, Instant::now());
+        let stale_due = tip_age >= TIP_POLL_SECS;
+
+        if regular_due || stale_due {
+            let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
+            last_tip_req_at.insert(sp, Instant::now());
+
+            if stale_due {
                 println!("[sync] stale-tip poll to {} (tip_age={}s)", sp, tip_age);
             }
         }
@@ -1114,12 +1119,11 @@ mark_peer_change(&last_peer_change_unix);
                             sync_peer = Some(peer_id);
                         }
 
-                        if !is_quarantined(&quarantine, &peer_id) {
-                            let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
-                            last_tip_req_at.insert(peer_id, Instant::now());
-                            mark_tip_seen(&last_tip_seen_unix);
-                            println!("[sync] requested tip ({rid:?})");
-                        }
+if !is_quarantined(&quarantine, &peer_id) {
+    let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
+    last_tip_req_at.insert(peer_id, Instant::now());
+    println!("[sync] requested tip ({rid:?})");
+}
 
                     }
 
