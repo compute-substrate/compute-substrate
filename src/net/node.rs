@@ -65,6 +65,8 @@ const TIP_POLL_SECS: u64 = 120;
 
 const REGULAR_TIP_POLL_SECS: u64 = 10;
 
+const GETTIP_LOG_EVERY_SECS: u64 = 60;
+
 // quarantine: soft-ban for a while when score too low
 const QUAR_SECS: u64 = 60;
 const QUAR_SCORE_THRESHOLD: i32 = -20;
@@ -771,6 +773,8 @@ poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut last_tip_req_at: HashMap<PeerId, Instant> = HashMap::new();
 
+let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
+
     let is_bad = |bad: &HashMap<Hash32, HashSet<PeerId>>, h: &Hash32, p: &PeerId| -> bool {
         bad.get(h).map(|s| s.contains(p)).unwrap_or(false)
     };
@@ -1147,6 +1151,9 @@ if !is_quarantined(&quarantine, &peer_id) {
                         peer_work.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
 
+last_gettip_log_at.remove(&peer_id);
+
+
 last_logged_tip.remove(&peer_id);
 
 
@@ -1313,8 +1320,17 @@ if !allow_rr_req(&mut buckets, &mut bans, peer) {
 
 
 match &request {
-    SyncRequest::GetTip => {
-        println!("[sync-serve] recv GetTip from {peer}");
+
+SyncRequest::GetTip => {
+        let should_log = last_gettip_log_at
+            .get(&peer)
+            .map(|t| t.elapsed() >= Duration::from_secs(GETTIP_LOG_EVERY_SECS))
+            .unwrap_or(true);
+
+        if should_log {
+            println!("[sync-serve] recv GetTip from {peer}");
+            last_gettip_log_at.insert(peer, Instant::now());
+        }
     }
     SyncRequest::GetHeadersByLocator { locator, max } => {
         println!(
@@ -1323,6 +1339,7 @@ match &request {
             max
         );
     }
+
     SyncRequest::GetHeaders { from_height, max } => {
         println!(
             "[sync-serve] recv GetHeaders from {peer} from_height={} max={}",
