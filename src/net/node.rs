@@ -860,6 +860,10 @@ let pump_blocks =
             let now = Instant::now();
             let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
 
+if !inflight.is_empty() {
+    println!("[sync] inflight_blocks={}", inflight.len());
+}
+
             for (h, (_rid, t0, peer)) in inflight.iter() {
                 if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
                     timed_out.push((*h, *peer));
@@ -1267,11 +1271,39 @@ let _ = pump_blocks(
                                     match message {
 
 Message::Request { request, channel, .. } => {
+
     if !allow_rr_req(&mut buckets, &mut bans, peer) {
         continue;
     }
 
     mark_tip_seen(&last_tip_seen_unix);
+
+
+match &request {
+    SyncRequest::GetTip => {
+        println!("[sync-serve] recv GetTip from {peer}");
+    }
+    SyncRequest::GetHeadersByLocator { locator, max } => {
+        println!(
+            "[sync-serve] recv GetHeadersByLocator from {peer} locator_len={} max={}",
+            locator.len(),
+            max
+        );
+    }
+    SyncRequest::GetHeaders { from_height, max } => {
+        println!(
+            "[sync-serve] recv GetHeaders from {peer} from_height={} max={}",
+            from_height,
+            max
+        );
+    }
+    SyncRequest::GetBlock { hash } => {
+        println!("[sync-serve] recv GetBlock from {peer} hash={}", hex32(hash));
+    }
+    SyncRequest::SubmitTx { .. } => {
+        println!("[sync-serve] recv SubmitTx from {peer}");
+    }
+}
 
 {
 if matches!(request, SyncRequest::GetBlock { .. }) {
@@ -1441,11 +1473,8 @@ let _ = pump_blocks(
 
                                                 SyncResponse::Block { block } => {
 
-println!(
-    "[sync] got block {} from {}",
-    hex32(&header_hash(&block.header)),
-    peer
-);
+let bh = header_hash(&block.header);
+println!("[sync] got block {} from {}", hex32(&bh), peer);
 
                                                     mark_tip_seen(&last_tip_seen_unix);
                                                     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
@@ -1736,21 +1765,28 @@ println!(
             Ok(SyncResponse::Headers { headers: out })
         }
 
-        SyncRequest::GetBlock { hash } => {
-            let Some(v) = db.blocks.get(k_block(&hash))? else {
-                // println!("[sync-serve] GetBlock MISS {}", hex32(&hash));
-                bail!("unknown block");
-            };
+SyncRequest::GetBlock { hash } => {
+    println!("[sync-serve] GetBlock lookup {}", hex32(&hash));
 
-            // println!("[sync-serve] GetBlock HIT {} bytes={}", hex32(&hash), v.len());
+    let Some(v) = db.blocks.get(k_block(&hash))? else {
+        println!("[sync-serve] GetBlock MISS {}", hex32(&hash));
+        bail!("unknown block");
+    };
 
-            if v.len() > MAX_BLOCK_BYTES {
-                bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
-            }
+    println!(
+        "[sync-serve] GetBlock HIT {} bytes={}",
+        hex32(&hash),
+        v.len()
+    );
 
-            let blk: Block = crate::codec::consensus_bincode().deserialize::<Block>(&v)?;
-            Ok(SyncResponse::Block { block: blk })
-        }
+    if v.len() > MAX_BLOCK_BYTES {
+        bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
+    }
+
+    let blk: Block = crate::codec::consensus_bincode().deserialize::<Block>(&v)?;
+    Ok(SyncResponse::Block { block: blk })
+}
+
 
         SyncRequest::SubmitTx { tx: _tx } => Ok(SyncResponse::Ack),
     }
