@@ -495,15 +495,12 @@ fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
 
 
 fn should_log_tip_update(
-    prev_height: Option<u64>,
-    prev_work: Option<u128>,
+    last_logged: Option<(u64, u128, u128)>,
     new_height: u64,
     new_work: u128,
     local_work: u128,
 ) -> bool {
-    prev_height != Some(new_height)
-        || prev_work != Some(new_work)
-        || new_work != local_work
+    last_logged != Some((new_height, new_work, local_work))
 }
 
 fn block_parent_ready(
@@ -737,6 +734,9 @@ let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
     let mut sync_peer: Option<PeerId> = None;
+
+let mut last_logged_tip: HashMap<PeerId, (u64, u128, u128)> = HashMap::new();
+
 
     // NEW: peer scoring + quarantine
     let mut peer_score: HashMap<PeerId, i32> = HashMap::new();
@@ -1143,6 +1143,9 @@ mark_peer_change(&last_peer_change_unix);
                         peer_work.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
 
+last_logged_tip.remove(&peer_id);
+
+
                         let mut dead_hashes = vec![];
                         for (h, (_rid, _t0, asked_peer)) in inflight.iter() {
                             if *asked_peer == peer_id {
@@ -1380,20 +1383,19 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
-    let prev_height = peer_heights.get(&peer).copied();
-    let prev_work = peer_work.get(&peer).copied();
+peer_heights.insert(peer, height);
+peer_work.insert(peer, chainwork);
 
-    peer_heights.insert(peer, height);
-    peer_work.insert(peer, chainwork);
+let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
+let last_logged = last_logged_tip.get(&peer).copied();
 
-    let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
-
-    if should_log_tip_update(prev_height, prev_work, height, chainwork, _dbg_w) {
-        println!(
-            "[sync] tip from {}: remote_height={} remote_work={} local_work={}",
-            peer, height, chainwork, _dbg_w
-        );
-    }
+if should_log_tip_update(last_logged, height, chainwork, _dbg_w) {
+    println!(
+        "[sync] tip from {}: remote_height={} remote_work={} local_work={}",
+        peer, height, chainwork, _dbg_w
+    );
+    last_logged_tip.insert(peer, (height, chainwork, _dbg_w));
+}
 
     let best = choose_best_sync_peer(
         &connected,
