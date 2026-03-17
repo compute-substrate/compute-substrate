@@ -20,7 +20,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::time::interval;
+use tokio::time::{interval, MissedTickBehavior};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -746,7 +746,8 @@ let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
     let mut buckets: HashMap<PeerId, RateBucket> = HashMap::new();
     let mut bans: HashMap<PeerId, Instant> = HashMap::new();
 
-    let mut poll = interval(Duration::from_secs(5));
+let mut poll = interval(Duration::from_secs(5));
+poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut last_redial = Instant::now() - Duration::from_secs(60);
     let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
@@ -979,12 +980,19 @@ if hi.parent != [0u8; 32]
                     last_redial = Instant::now();
                 }
 
-                // periodic tip requests (skip banned/quarantined)
-                for p in connected.iter() {
-                    if is_banned(&bans, p) { continue; }
-                    if is_quarantined(&quarantine, p) { continue; }
-                    let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
-                }
+// periodic tip requests (skip banned/quarantined)
+// only ask one peer unless we currently have no sync peer
+if let Some(sp) = sync_peer {
+    if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
+        let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
+    }
+} else {
+    for p in connected.iter() {
+        if is_banned(&bans, p) { continue; }
+        if is_quarantined(&quarantine, p) { continue; }
+        let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
+    }
+}
 
                 if sync_peer.is_none() {
                     sync_peer = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine)
