@@ -720,16 +720,12 @@ async fn run_p2p_loop(
     gossipsub.subscribe(&IdentTopic::new(TOPIC_HDR))?;
     gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
 
-let mut rr_cfg = request_response::Config::default();
+let rr_cfg = request_response::Config::default()
+    .with_request_timeout(Duration::from_secs(10))
+    .with_max_concurrent_streams(128);
 
-// CRITICAL: enforce timeouts so stalled streams don't hang forever
-rr_cfg.set_request_timeout(Duration::from_secs(10));
-
-// Optional but recommended: limit concurrent streams
-rr_cfg.set_max_concurrent_streams(128);
-
-    let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
-    let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
+let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
+let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
 
     let behaviour = Behaviour { gossipsub, rr };
 
@@ -1262,6 +1258,10 @@ let _ = pump_blocks(
                             }
                         }
 
+
+
+
+
                         if let Some(rr_ev) = as_rr_event(event) {
                             use request_response::{Event, Message};
 
@@ -1620,6 +1620,11 @@ SyncResponse::Err { msg } => {
                                         }
 
 
+
+                                    }
+                                }
+
+
 Event::OutboundFailure { peer, request_id, error } => {
     println!("[sync] outbound failure to {}: {:?}", peer, error);
 
@@ -1636,12 +1641,13 @@ Event::OutboundFailure { peer, request_id, error } => {
     }
 }
 
+Event::InboundFailure { peer, error, .. } => {
+            println!("[sync] inbound failure from {}: {:?}", peer, error);
+        }
 
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
+        _ => {}
+    }
+}
 
                         // Penalize timeouts (production upgrade)
                         // Scan inflight and mark peers that keep timing out.
