@@ -991,6 +991,41 @@ if hi.parent != [0u8; 32]
                         .or_else(|| connected.iter().find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p)).cloned());
                 }
 
+if let Some(sp) = sync_peer {
+    if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
+        let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
+        let local_w = if best_hdr_work > 0 { best_hdr_work } else { applied_w };
+        let remote_w = *peer_work.get(&sp).unwrap_or(&0);
+
+        if remote_w > local_w {
+            let locator_tip = if best_hdr_tip != [0u8; 32] {
+                best_hdr_tip
+            } else {
+                applied_tip
+            };
+
+            let locator = build_locator(&db, &locator_tip);
+            let locator_len = locator.len();
+
+            let _ = swarm.behaviour_mut().rr.send_request(
+                &sp,
+                SyncRequest::GetHeadersByLocator {
+                    locator,
+                    max: MAX_HEADERS_PER_SYNC,
+                },
+            );
+
+            println!(
+                "[sync] poll-triggered headers-by-locator from {} (local_w={}, remote_w={}, locator_len={})",
+                sp,
+                local_w,
+                remote_w,
+                locator_len
+            );
+        }
+    }
+}
+
 let _ = pump_blocks(
     &mut swarm,
     sync_peer,
@@ -1336,6 +1371,13 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
 
                                                     peer_heights.insert(peer, height);
                                                     peer_work.insert(peer, chainwork);
+
+
+let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
+println!(
+    "[sync] tip from {}: remote_height={} remote_work={} local_work={}",
+    peer, height, chainwork, _dbg_w
+);
 
                                                     let best = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine);
                                                     if best.is_some() && sync_peer != best {
