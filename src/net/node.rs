@@ -967,7 +967,7 @@ if hi.parent != [0u8; 32]
                     .behaviour_mut()
                     .rr
                     .send_request(&peer, SyncRequest::GetBlock { hash: h });
-                // println!("[sync] request block {} from {}", hex32(&h), peer);
+                println!("[sync] request block {} from {}", hex32(&h), peer);
 
                 rid_to_hash.insert(rid, h);
                 inflight.insert(h, (rid, Instant::now(), peer));
@@ -1076,16 +1076,17 @@ SwarmEvent::NewListenAddr { address, .. } => {
                             continue;
                         }
 
-                        // NEW: refcount; only treat 0->1 as “connected”
-                        let e = conn_refcnt.entry(peer_id).or_insert(0);
-                        *e += 1;
-                        if *e > 1 {
-                            // duplicate connection, do not spam logs / do not re-add / do not re-request tip
-                            continue;
-                        }
+// Track refcount, but use `connected` as the authoritative "first connect" gate.
+let e = conn_refcnt.entry(peer_id).or_insert(0);
+*e += 1;
+
+let is_first_logical_connection = connected.insert(peer_id);
+if !is_first_logical_connection {
+    // Already logically connected to this peer; ignore duplicate established events.
+    continue;
+}
 
 println!("[p2p] connected: {peer_id}");
-connected.insert(peer_id);
 connected_peers.store(connected.len(), Ordering::Relaxed);
 mark_peer_change(&last_peer_change_unix);
 mark_tip_seen(&last_tip_seen_unix);
@@ -1355,10 +1356,16 @@ println!(
                                                 }
 
                                                 SyncResponse::Headers { headers } => {
-                                                    if !headers.is_empty() {
-                                                        mark_tip_seen(&last_tip_seen_unix);
-                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
-                                                    }
+    println!(
+        "[sync] got headers from {} count={}",
+        peer,
+        headers.len()
+    );
+
+    if !headers.is_empty() {
+        mark_tip_seen(&last_tip_seen_unix);
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
+    }
 
                                                     if sync_peer.is_some() && sync_peer != Some(peer) {
                                                         // ignore racing peers
@@ -1433,6 +1440,13 @@ let _ = pump_blocks(
                                                 }
 
                                                 SyncResponse::Block { block } => {
+
+println!(
+    "[sync] got block {} from {}",
+    hex32(&header_hash(&block.header)),
+    peer
+);
+
                                                     mark_tip_seen(&last_tip_seen_unix);
                                                     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
 
@@ -1711,6 +1725,14 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
             }
 
             out.reverse();
+
+println!(
+    "[sync-serve] GetHeadersByLocator: anchor_h={} returning={} tip={}",
+    anchor_h,
+    out.len(),
+    hex32(&tip),
+);
+
             Ok(SyncResponse::Headers { headers: out })
         }
 
