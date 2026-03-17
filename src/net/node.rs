@@ -61,7 +61,7 @@ const SCORE_BAD_INVALID: i32 = -4;
 const SCORE_BAD_TIMEOUT: i32 = -2;
 const SCORE_BAD_UNKNOWN_BLOCK: i32 = -2;
 
-const TIP_POLL_SECS: u64 = 30;
+const TIP_POLL_SECS: u64 = 120;
 
 // quarantine: soft-ban for a while when score too low
 const QUAR_SECS: u64 = 60;
@@ -493,6 +493,19 @@ fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
     }
 }
 
+
+fn should_log_tip_update(
+    prev_height: Option<u64>,
+    prev_work: Option<u128>,
+    new_height: u64,
+    new_work: u128,
+    local_work: u128,
+) -> bool {
+    prev_height != Some(new_height)
+        || prev_work != Some(new_work)
+        || new_work != local_work
+}
+
 fn block_parent_ready(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
@@ -833,10 +846,6 @@ let pump_blocks =
             let now = Instant::now();
             let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
 
-if !inflight.is_empty() {
-    println!("[sync] inflight_blocks={}", inflight.len());
-}
-
             for (h, (_rid, t0, peer)) in inflight.iter() {
                 if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
                     timed_out.push((*h, *peer));
@@ -1104,11 +1113,14 @@ mark_peer_change(&last_peer_change_unix);
                         if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
                             sync_peer = Some(peer_id);
                         }
+
                         if !is_quarantined(&quarantine, &peer_id) {
                             let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
                             last_tip_req_at.insert(peer_id, Instant::now());
+                            mark_tip_seen(&last_tip_seen_unix);
                             println!("[sync] requested tip ({rid:?})");
                         }
+
                     }
 
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
@@ -1364,49 +1376,72 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
 
                                         Message::Response { request_id: rid, response } => {
                                             match response {
-                                                SyncResponse::Tip { hash: _hash, height, chainwork } => {
-                                                    mark_tip_seen(&last_tip_seen_unix);
-                                                    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
+ SyncResponse::Tip { hash: _hash, height, chainwork } => {
+    mark_tip_seen(&last_tip_seen_unix);
+    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
-                                                    peer_heights.insert(peer, height);
-                                                    peer_work.insert(peer, chainwork);
+    let prev_height = peer_heights.get(&peer).copied();
+    let prev_work = peer_work.get(&peer).copied();
 
+    peer_heights.insert(peer, height);
+    peer_work.insert(peer, chainwork);
 
-let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
-println!(
-    "[sync] tip from {}: remote_height={} remote_work={} local_work={}",
-    peer, height, chainwork, _dbg_w
-);
+    let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
 
-                                                    let best = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine);
-                                                    if best.is_some() && sync_peer != best {
-                                                        sync_peer = best;
-                                                    } else if sync_peer.is_none() {
-                                                        sync_peer = Some(peer);
-                                                    }
+    if should_log_tip_update(prev_height, prev_work, height, chainwork, _dbg_w) {
+        println!(
+            "[sync] tip from {}: remote_height={} remote_work={} local_work={}",
+            peer, height, chainwork, _dbg_w
+        );
+    }
 
-                                                    let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
-                                                    let local_w = if best_hdr_work > 0 { best_hdr_work } else { applied_w };
-                                                    let locator_tip = if best_hdr_tip != [0u8; 32] { best_hdr_tip } else { applied_tip };
+    let best = choose_best_sync_peer(
+        &connected,
+        &peer_work,
+        &peer_score,
+        &bans,
+        &quarantine,
+    );
 
-                                                    if chainwork > local_w && sync_peer == Some(peer) {
+    if best.is_some() && sync_peer != best {
+        sync_peer = best;
+    } else if sync_peer.is_none() {
+        sync_peer = Some(peer);
+    }
 
-let locator = build_locator(&db, &locator_tip);
-let locator_len = locator.len();
+    let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
 
-let _ = swarm.behaviour_mut().rr.send_request(
-    &peer,
-    SyncRequest::GetHeadersByLocator { locator, max: MAX_HEADERS_PER_SYNC }
-);
+    let local_w = if best_hdr_work > 0 {
+        best_hdr_work
+    } else {
+        applied_w
+    };
 
-println!(
-    "[sync] requesting headers-by-locator from {} (locator_len={})",
-    peer,
-    locator_len
-);
+    let locator_tip = if best_hdr_tip != [0u8; 32] {
+        best_hdr_tip
+    } else {
+        applied_tip
+    };
 
-                                                    }
-                                                }
+    if chainwork > local_w && sync_peer == Some(peer) {
+        let locator = build_locator(&db, &locator_tip);
+        let locator_len = locator.len();
+
+        let _ = swarm.behaviour_mut().rr.send_request(
+            &peer,
+            SyncRequest::GetHeadersByLocator {
+                locator,
+                max: MAX_HEADERS_PER_SYNC,
+            },
+        );
+
+        println!(
+            "[sync] requesting headers-by-locator from {} (locator_len={})",
+            peer,
+            locator_len
+        );
+    }
+}
 
                                                 SyncResponse::Headers { headers } => {
     println!(
