@@ -61,6 +61,8 @@ const SCORE_BAD_INVALID: i32 = -4;
 const SCORE_BAD_TIMEOUT: i32 = -2;
 const SCORE_BAD_UNKNOWN_BLOCK: i32 = -2;
 
+const TIP_POLL_SECS: u64 = 30;
+
 // quarantine: soft-ban for a while when score too low
 const QUAR_SECS: u64 = 60;
 const QUAR_SCORE_THRESHOLD: i32 = -20;
@@ -752,6 +754,8 @@ poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_redial = Instant::now() - Duration::from_secs(60);
     let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
 
+    let mut last_tip_req_at: HashMap<PeerId, Instant> = HashMap::new();
+
     let is_bad = |bad: &HashMap<Hash32, HashSet<PeerId>>, h: &Hash32, p: &PeerId| -> bool {
         bad.get(h).map(|s| s.contains(p)).unwrap_or(false)
     };
@@ -980,17 +984,33 @@ if hi.parent != [0u8; 32]
                     last_redial = Instant::now();
                 }
 
-// periodic tip requests (skip banned/quarantined)
-// only ask one peer unless we currently have no sync peer
+// periodic tip requests (throttled)
 if let Some(sp) = sync_peer {
     if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
-        let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
+        let should_poll = last_tip_req_at
+            .get(&sp)
+            .map(|t| t.elapsed() >= Duration::from_secs(TIP_POLL_SECS))
+            .unwrap_or(true);
+
+        if should_poll {
+            let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
+            last_tip_req_at.insert(sp, Instant::now());
+        }
     }
 } else {
     for p in connected.iter() {
         if is_banned(&bans, p) { continue; }
         if is_quarantined(&quarantine, p) { continue; }
-        let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
+
+        let should_poll = last_tip_req_at
+            .get(p)
+            .map(|t| t.elapsed() >= Duration::from_secs(TIP_POLL_SECS))
+            .unwrap_or(true);
+
+        if should_poll {
+            let _ = swarm.behaviour_mut().rr.send_request(p, SyncRequest::GetTip);
+            last_tip_req_at.insert(*p, Instant::now());
+        }
     }
 }
 
@@ -1108,7 +1128,6 @@ if !is_first_logical_connection {
 println!("[p2p] connected: {peer_id}");
 connected_peers.store(connected.len(), Ordering::Relaxed);
 mark_peer_change(&last_peer_change_unix);
-mark_tip_seen(&last_tip_seen_unix);
 
                         // only request tip on first connection
                         if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
@@ -1116,6 +1135,7 @@ mark_tip_seen(&last_tip_seen_unix);
                         }
                         if !is_quarantined(&quarantine, &peer_id) {
                             let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
+                            last_tip_req_at.insert(peer_id, Instant::now());
                             println!("[sync] requested tip ({rid:?})");
                         }
                     }
@@ -1138,6 +1158,7 @@ mark_tip_seen(&last_tip_seen_unix);
 
                         peer_heights.remove(&peer_id);
                         peer_work.remove(&peer_id);
+                        last_tip_req_at.remove(&peer_id);
 
                         let mut dead_hashes = vec![];
                         for (h, (_rid, _t0, asked_peer)) in inflight.iter() {
@@ -1299,7 +1320,6 @@ if !allow_rr_req(&mut buckets, &mut bans, peer) {
     continue;
 }
 
-    mark_tip_seen(&last_tip_seen_unix);
 
 
 match &request {
