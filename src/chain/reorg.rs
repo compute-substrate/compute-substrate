@@ -1201,10 +1201,12 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         failpoints::hit(&format!("undo:{}:post_journal", i));
     }
 
-    // land at ancestor (commit)
+// land at ancestor (commit) only if needed
+if !tip_is(db, &anc.hash)? {
     set_tip(db, &anc.hash).context("[reorg] set_tip(ancestor)")?;
     flush_state_step(db).context("flush_state_step(set ancestor)")?;
-    failpoints::hit("reorg:at_ancestor_post_flush");
+}
+failpoints::hit("reorg:at_ancestor_post_flush");
 
     // transition to apply (journal + flush)
     j.phase = Phase::Apply;
@@ -1297,8 +1299,10 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
             flush_state_step(db).with_context(|| format!("rollback flush_state_step(reapply_old {})", i))?;
         }
 
-        set_tip(db, &old_tip).context("[reorg] rollback final set_tip(old_tip)")?;
-        flush_state_step(db).context("rollback flush_state_step(final set old_tip)")?;
+if !tip_is(db, &old_tip)? {
+    set_tip(db, &old_tip).context("[reorg] rollback final set_tip(old_tip)")?;
+    flush_state_step(db).context("rollback flush_state_step(final set old_tip)")?;
+}
 
         mempool_prune_if_present(db, mempool);
 
@@ -1308,10 +1312,12 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
         return Err(e);
     }
 
-    // Finalize: tip to new_tip, then clear journal, committing both
+// Finalize: only set final new_tip if not already there, then clear journal
+if !tip_is(db, new_tip)? {
     set_tip_checked(db, new_tip, "final new_tip")?;
-    journal_clear(db).context("journal_clear(success)")?;
-    flush_state_step(db).context("flush(final tip + journal_clear)")?;
+}
+journal_clear(db).context("journal_clear(success)")?;
+flush_state_step(db).context("flush(final tip + journal_clear)")?;
 
     let final_tip = get_tip(db).context("get_tip(final)")?.unwrap_or([0u8; 32]);
     if final_tip != *new_tip {
