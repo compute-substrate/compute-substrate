@@ -239,35 +239,37 @@ start_b() {
 
 start_c() {
   local bootnodes="$1"
-  local crash_at="${2:-}"
+  local failpoint="${2:-}"
   local sess
   sess="$(session_name c)"
   kill_session_if_exists "$sess"
 
-  if [[ -n "$crash_at" ]]; then
+  if [[ -n "$failpoint" ]]; then
     tmux new-session -d -s "$sess" "bash -lc '
       set -euo pipefail
-      export RUST_LOG=\"${RUST_LOG}\"
-      export CSD_CRASH_AT=\"${crash_at}\"
-      exec \"${BIN_PATH}\" node \
-        --datadir \"${C_DATADIR}\" \
-        --rpc \"${C_RPC}\" \
-        --genesis \"${GENESIS_PATH}\" \
-        --p2p-listen \"${C_P2P_LISTEN}\" \
-        --bootnodes \"${bootnodes}\" \
-        2>&1 | tee -a \"${C_LOG}\"
+      exec env \
+        RUST_LOG=\"${RUST_LOG}\" \
+        CSD_CRASH_AT=\"${failpoint}\" \
+        \"${BIN_PATH}\" node \
+          --datadir \"${C_DATADIR}\" \
+          --rpc \"${C_RPC}\" \
+          --genesis \"${GENESIS_PATH}\" \
+          --p2p-listen \"${C_P2P_LISTEN}\" \
+          --bootnodes \"${bootnodes}\" \
+          2>&1 | tee -a \"${C_LOG}\"
     '"
   else
     tmux new-session -d -s "$sess" "bash -lc '
       set -euo pipefail
-      export RUST_LOG=\"${RUST_LOG}\"
-      exec \"${BIN_PATH}\" node \
-        --datadir \"${C_DATADIR}\" \
-        --rpc \"${C_RPC}\" \
-        --genesis \"${GENESIS_PATH}\" \
-        --p2p-listen \"${C_P2P_LISTEN}\" \
-        --bootnodes \"${bootnodes}\" \
-        2>&1 | tee -a \"${C_LOG}\"
+      exec env \
+        RUST_LOG=\"${RUST_LOG}\" \
+        \"${BIN_PATH}\" node \
+          --datadir \"${C_DATADIR}\" \
+          --rpc \"${C_RPC}\" \
+          --genesis \"${GENESIS_PATH}\" \
+          --p2p-listen \"${C_P2P_LISTEN}\" \
+          --bootnodes \"${bootnodes}\" \
+          2>&1 | tee -a \"${C_LOG}\"
     '"
   fi
 }
