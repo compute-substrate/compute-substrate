@@ -457,11 +457,6 @@ pub async fn run() -> Result<()> {
             let (mined_hdr_tx, mined_hdr_rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::net::MinedHeaderEvent>();
 
-            let app = crate::api::router(db.clone(), mempool.clone(), tx_gossip_tx.clone());
-
-            let listener = tokio::net::TcpListener::bind(&rpc).await?;
-            println!("RPC on http://{}", rpc);
-
             let listen_ma: libp2p::Multiaddr = p2p_listen.parse()?;
             let boots: Vec<libp2p::Multiaddr> = if bootnodes.trim().is_empty() {
                 vec![]
@@ -501,6 +496,16 @@ pub async fn run() -> Result<()> {
                 chain_lock.clone(),
             )
             .await?;
+
+            let app = crate::api::router(
+                db.clone(),
+                mempool.clone(),
+                tx_gossip_tx.clone(),
+                net.connected_peers.clone(),
+            );
+
+            let listener = tokio::net::TcpListener::bind(&rpc).await?;
+            println!("RPC on http://{}", rpc);
 
             if mine {
                 if miner_addr20.trim().is_empty() {
