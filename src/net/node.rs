@@ -673,6 +673,11 @@ async fn run_p2p_loop(
     mut tx_gossip_rx: tokio::sync::mpsc::UnboundedReceiver<GossipTxEvent>,
     chain_lock: ChainLock,
 ) -> Result<()> {
+
+    if let Ok(v) = std::env::var("CSD_CRASH_AT") {
+    eprintln!("[failpoint] CSD_CRASH_AT={}", v);
+}
+    
     println!("[p2p] peer_id: {peer_id}");
 
     let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
