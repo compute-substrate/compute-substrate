@@ -297,7 +297,7 @@ pub struct NetConfig {
 #[derive(Clone)]
 pub struct NetHandle {
     pub peer_id: PeerId,
-    connected_peers: Arc<AtomicUsize>,
+    pub connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
