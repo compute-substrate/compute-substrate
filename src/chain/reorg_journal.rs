@@ -1,4 +1,3 @@
-// src/chain/reorg_journal.rs
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sled::transaction::{ConflictableTransactionError, TransactionError};
@@ -85,11 +84,24 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
     let active = read_active_best_effort(db).context("read_active_best_effort")?;
 
     let a = match meta_get_bytes(db, k_reorg_slot_a())? {
-        Some(v) => decode(&v).ok(),
+        Some(v) => match decode(&v) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("[reorg-journal] failed to decode slot A: {e:#}");
+                None
+            }
+        },
         None => None,
     };
+
     let b = match meta_get_bytes(db, k_reorg_slot_b())? {
-        Some(v) => decode(&v).ok(),
+        Some(v) => match decode(&v) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("[reorg-journal] failed to decode slot B: {e:#}");
+                None
+            }
+        },
         None => None,
     };
 
@@ -103,7 +115,6 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
             } else if x.seq > y.seq {
                 x
             } else {
-                // Tie-break: prefer the active slot
                 let prefer_a = (active & 1) == 0;
                 if prefer_a { x } else { y }
             }
@@ -113,13 +124,16 @@ pub fn journal_read(db: &Stores) -> Result<Option<ReorgJournal>> {
     Ok(Some(picked))
 }
 
+/// Writes the next journal version atomically into the inactive slot and flips
+/// the active pointer inside one sled transaction.
+///
+/// Durability is NOT provided here.
+/// Caller must perform the durability barrier via db.db.flush().
 pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
     failpoints::hit("journal_write:pre");
 
-    // Atomic update: write inactive slot + flip active pointer together.
     db.meta
         .transaction(|tx| {
-            // Read current active *inside* transaction.
             let active = match tx.get(k_reorg_active())? {
                 Some(v) if !v.is_empty() => v[0] & 1,
                 _ => 0,
@@ -127,7 +141,6 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
             let target = other_slot(active);
             let target_key = slot_key(target);
 
-            // Compute next seq from both slots (decode best-effort).
             let a_seq = match tx.get(k_reorg_slot_a())? {
                 Some(v) => decode(&v).ok().map(|jj| jj.seq).unwrap_or(0),
                 None => 0,
@@ -146,14 +159,9 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
                 Err(e) => return Err(ConflictableTransactionError::Abort(e)),
             };
 
-            // We want the crash-fuzz failpoint to be meaningful:
-            // it should occur BEFORE we make the journal durable.
             failpoints::hit("journal_write:pre_flush");
 
-            // 1) Write new bytes to inactive slot
             tx.insert(target_key, bytes)?;
-
-            // 2) Flip active pointer
             tx.insert(k_reorg_active(), vec![target & 1])?;
 
             Ok(())
@@ -164,20 +172,19 @@ pub fn journal_write(db: &Stores, j: &ReorgJournal) -> Result<()> {
         })
         .context("meta.transaction(journal_write)")?;
 
-    // ✅ CRITICAL: durability barrier for crash-fuzz
-    // Transaction commit is atomic but not guaranteed durable across a simulated crash.
-    db.db.flush().context("db.flush after journal_write")?;
-
-    failpoints::hit("journal_write:post_flush");
+    // No flush here. Caller owns durability boundary.
     Ok(())
 }
 
+/// Clears both journal slots and active pointer atomically.
+///
+/// Durability is NOT provided here.
+/// Caller must perform the durability barrier via db.db.flush().
 pub fn journal_clear(db: &Stores) -> Result<()> {
     failpoints::hit("journal_clear:pre");
 
     db.meta
         .transaction(|tx| {
-            // Same deal: allow fuzz to crash before the durable barrier.
             failpoints::hit("journal_clear:pre_flush");
 
             tx.remove(k_reorg_active())?;
@@ -192,9 +199,6 @@ pub fn journal_clear(db: &Stores) -> Result<()> {
         })
         .context("meta.transaction(journal_clear)")?;
 
-    // ✅ CRITICAL: durability barrier for crash-fuzz
-    db.db.flush().context("db.flush after journal_clear")?;
-
-    failpoints::hit("journal_clear:post_flush");
+    // No flush here. Caller owns durability boundary.
     Ok(())
 }
