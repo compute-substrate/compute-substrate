@@ -15,6 +15,7 @@ use crate::net::GossipTxEvent as _; // keep type visible even if optimized paths
 use crate::state::app::{k_proposal, topk_snapshot, Proposal};
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
 use crate::types::{AppPayload, Block, Hash32, OutPoint, Transaction, TxOut};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn c() -> crate::codec::ConsensusBincode {
     crate::codec::consensus_bincode()
@@ -26,6 +27,7 @@ pub struct ApiState {
     pub mempool: Arc<Mempool>,
     // IMPORTANT: must be GossipTxEvent so node.rs can publish it to gossipsub
     pub tx_gossip: tokio::sync::mpsc::UnboundedSender<GossipTxEvent>,
+pub connected_peers: Arc<AtomicUsize>,
 }
 
 #[derive(Serialize)]
@@ -231,15 +233,18 @@ pub fn router(
     db: Arc<Stores>,
     mempool: Arc<Mempool>,
     tx_gossip: tokio::sync::mpsc::UnboundedSender<GossipTxEvent>,
+connected_peers: Arc<AtomicUsize>,
 ) -> Router {
     let st = ApiState {
         db,
         mempool,
         tx_gossip,
+connected_peers,
     };
 
     Router::new()
         .route("/health", get(health))
+  .route("/peers", get(peers))
         .route("/metrics", get(metrics))
         .route("/tip", get(tip))
         .route("/mempool", get(mempool_info))
@@ -287,6 +292,7 @@ async fn health(State(st): State<ApiState>) -> Json<HealthResp> {
         tip: format!("0x{}", hex::encode(tip)),
         height: hi.height,
         chainwork: hi.chainwork.to_string(),
+  peer_count: st.connected_peers.load(Ordering::Relaxed),
         mempool_tx_count: s.txs,
         mempool_spent_outpoints: s.spent_len,
         mempool_bytes: s.total_bytes,
@@ -336,6 +342,13 @@ fn parse_hash32(s: &str) -> Result<Hash32, String> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+async fn peers(State(st): State<ApiState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "peer_count": st.connected_peers.load(Ordering::Relaxed),
+    }))
 }
 
 fn parse_addr20(s: &str) -> Result<[u8; 20], String> {
