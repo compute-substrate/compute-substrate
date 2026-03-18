@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::chain::index::{get_hidx, HeaderIndex};
 use crate::crypto::{sighash, txid};
-use crate::net::mempool::Mempool;
+use crate::net::mempool::{Mempool, MempoolStats};
 use crate::net::GossipTxEvent;
 use crate::net::GossipTxEvent as _; // keep type visible even if optimized paths change
 use crate::state::app::{k_proposal, topk_snapshot, Proposal};
@@ -33,6 +33,32 @@ struct TipResp {
     tip: String,
     height: u64,
     chainwork: String,
+}
+
+#[derive(Serialize)]
+struct HealthResp {
+    pub ok: bool,
+    pub tip: String,
+    pub height: u64,
+    pub chainwork: String,
+    pub mempool_tx_count: usize,
+    pub mempool_spent_outpoints: usize,
+    pub mempool_bytes: usize,
+    pub mempool_min_feerate_ppm: Option<u64>,
+    pub mempool_max_feerate_ppm: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct MetricsResp {
+    pub ok: bool,
+    pub tip: String,
+    pub height: u64,
+    pub chainwork: String,
+    pub mempool_tx_count: usize,
+    pub mempool_spent_outpoints: usize,
+    pub mempool_bytes: usize,
+    pub mempool_min_feerate_ppm: Option<u64>,
+    pub mempool_max_feerate_ppm: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +240,7 @@ pub fn router(
 
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/tip", get(tip))
         .route("/mempool", get(mempool_info))
         // Explorer-grade read endpoints:
@@ -247,8 +274,46 @@ pub fn router(
         .with_state(st)
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true }))
+async fn health(State(st): State<ApiState>) -> Json<HealthResp> {
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let s: MempoolStats = st.mempool.stats();
+
+    Json(HealthResp {
+        ok: true,
+        tip: format!("0x{}", hex::encode(tip)),
+        height: hi.height,
+        chainwork: hi.chainwork.to_string(),
+        mempool_tx_count: s.txs,
+        mempool_spent_outpoints: s.spent_len,
+        mempool_bytes: s.total_bytes,
+        mempool_min_feerate_ppm: s.min_feerate_ppm,
+        mempool_max_feerate_ppm: s.max_feerate_ppm,
+    })
+}
+
+async fn metrics(State(st): State<ApiState>) -> Json<MetricsResp> {
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let s: MempoolStats = st.mempool.stats();
+
+    Json(MetricsResp {
+        ok: true,
+        tip: format!("0x{}", hex::encode(tip)),
+        height: hi.height,
+        chainwork: hi.chainwork.to_string(),
+        mempool_tx_count: s.txs,
+        mempool_spent_outpoints: s.spent_len,
+        mempool_bytes: s.total_bytes,
+        mempool_min_feerate_ppm: s.min_feerate_ppm,
+        mempool_max_feerate_ppm: s.max_feerate_ppm,
+    })
 }
 
 fn zero_hidx(tip: Hash32) -> HeaderIndex {
@@ -1069,10 +1134,15 @@ async fn tx_template_attest(
 }
 
 async fn mempool_info(State(st): State<ApiState>) -> Json<serde_json::Value> {
+    let s: MempoolStats = st.mempool.stats();
+
     Json(serde_json::json!({
-        "tx_count": st.mempool.len(),
-        "spent_outpoints": st.mempool.spent_len(),
-        "bytes": st.mempool.total_bytes(),
+        "ok": true,
+        "tx_count": s.txs,
+        "spent_outpoints": s.spent_len,
+        "bytes": s.total_bytes,
+        "min_feerate_ppm": s.min_feerate_ppm,
+        "max_feerate_ppm": s.max_feerate_ppm,
     }))
 }
 
