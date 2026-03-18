@@ -423,6 +423,11 @@ pub async fn run() -> Result<()> {
             bootnodes,
             p2p_test_mode,
         } => {
+
+            if let Ok(v) = std::env::var("CSD_CRASH_AT") {
+        eprintln!("[failpoint] CSD_CRASH_AT={}", v);
+    }
+            
             std::fs::create_dir_all(&datadir)?;
             let db = Arc::new(Stores::open(&datadir)?);
 
