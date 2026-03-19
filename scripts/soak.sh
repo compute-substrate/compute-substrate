@@ -2,10 +2,10 @@
 set -euo pipefail
 
 STAGING="${STAGING:-$HOME/compute-substrate/scripts/staging.sh}"
-SOAK_SECS="${SOAK_SECS:-3600}"          # default 1 hour
-CHECK_EVERY="${CHECK_EVERY:-30}"        # health check interval
-WAIT_SYNC_SECS="${WAIT_SYNC_SECS:-180}" # convergence timeout
-CRASH_WAIT_SECS="${CRASH_WAIT_SECS:-25}" # wait for failpoint to actually trigger
+SOAK_SECS="${SOAK_SECS:-3600}"          
+CHECK_EVERY="${CHECK_EVERY:-30}"       
+WAIT_SYNC_SECS="${WAIT_SYNC_SECS:-180}"
+CRASH_WAIT_SECS="${CRASH_WAIT_SECS:-25}"
 LOG_DIR="${LOG_DIR:-$HOME/csd-soak-logs}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="$LOG_DIR/$RUN_ID"
