@@ -449,26 +449,48 @@ async fn block_get(Path(hash): Path<String>, State(st): State<ApiState>) -> Json
         "nonce": blk.header.nonce,
     });
 
-    let txs_json: Vec<serde_json::Value> = blk
-        .txs
-        .iter()
-        .map(|tx| {
-            let id = txid(tx);
+let txs_json: Vec<serde_json::Value> = blk
+    .txs
+    .iter()
+    .map(|tx| {
+        let id = txid(tx);
+
+        let inputs_json: Vec<serde_json::Value> = tx.inputs.iter().map(|inp| {
+            let script_sig_hex = format!("0x{}", hex::encode(&inp.script_sig));
+
+            // Your coinbase format is:
+            // [height_le_bytes][0x00][memo...]
+            // So decode printable text after the first 0x00, if present.
+            let script_sig_text = inp
+                .script_sig
+                .split(|b| *b == 0x00)
+                .nth(1)
+                .and_then(|tail| std::str::from_utf8(tail).ok())
+                .map(|s| s.to_string());
+
             serde_json::json!({
-                "txid": format!("0x{}", hex::encode(id)),
-                "version": tx.version,
-                "inputs": tx.inputs.len(),
-                "outputs": tx.outputs.iter().map(|o| {
-                    serde_json::json!({
-                        "value": o.value,
-                        "script_pubkey": format!("0x{}", hex::encode(o.script_pubkey)),
-                    })
-                }).collect::<Vec<_>>(),
-                "locktime": tx.locktime,
-                "app": format!("{:?}", tx.app),
+                "prev_txid": format!("0x{}", hex::encode(inp.prevout.txid)),
+                "vout": inp.prevout.vout,
+                "script_sig": script_sig_hex,
+                "script_sig_text": script_sig_text,
             })
+        }).collect();
+
+        serde_json::json!({
+            "txid": format!("0x{}", hex::encode(id)),
+            "version": tx.version,
+            "inputs": inputs_json,
+            "outputs": tx.outputs.iter().map(|o| {
+                serde_json::json!({
+                    "value": o.value,
+                    "script_pubkey": format!("0x{}", hex::encode(o.script_pubkey)),
+                })
+            }).collect::<Vec<_>>(),
+            "locktime": tx.locktime,
+            "app": format!("{:?}", tx.app),
         })
-        .collect();
+    })
+    .collect();
 
     Json(BlockResp {
         ok: true,
