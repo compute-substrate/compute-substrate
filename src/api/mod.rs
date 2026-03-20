@@ -65,6 +65,22 @@ pub peer_count: usize,
     pub mempool_max_feerate_ppm: Option<u64>,
 }
 
+#[derive(Serialize)]
+pub struct DomainItem {
+    pub domain: String,
+    pub proposals: u64,
+    pub attestations: u64,
+}
+
+#[derive(Serialize)]
+pub struct DomainsResp {
+    pub ok: bool,
+    pub tip: String,
+    pub height: u64,
+    pub count: usize,
+    pub domains: Vec<DomainItem>,
+}
+
 #[derive(Deserialize)]
 pub struct TxSubmitReq {
     pub tx: Transaction,
@@ -273,6 +289,7 @@ connected_peers,
         // Canonical app endpoints:
         .route("/proposal/:id", get(proposal_get))
         .route("/topk/:epoch/:domain", get(topk_get))
+        .route("/domains", get(domains_list))
         // Tx template helpers (public attestation surface):
         .route("/tx/template/propose", post(tx_template_propose))
         .route("/tx/template/attest", post(tx_template_attest))
@@ -352,6 +369,121 @@ async fn peers(State(st): State<ApiState>) -> Json<serde_json::Value> {
         "ok": true,
         "peer_count": st.connected_peers.load(Ordering::Relaxed),
     }))
+}
+
+async fn domains_list(State(st): State<ApiState>) -> Json<DomainsResp> {
+    use std::collections::HashMap;
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let mut props_by_domain: HashMap<String, u64> = HashMap::new();
+    let mut atts_by_domain: HashMap<String, u64> = HashMap::new();
+
+    // 1) Count proposals directly from app state
+    for item in st.db.app.iter() {
+        let Ok((k, v)) = item else { continue };
+
+        // proposal keys only
+        if k.len() != 1 + 32 || k[0] != b'P' {
+            continue;
+        }
+
+        let prop: Proposal = match c().deserialize(&v) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        *props_by_domain.entry(prop.domain).or_insert(0) += 1;
+    }
+
+    // 2) Count attestations by scanning recent canonical blocks
+    //    and mapping proposal_id -> proposal.domain from app state
+    const MAX_BACK: u64 = 100_000;
+
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
+    let mut scanned: u64 = 0;
+
+    while scanned < MAX_BACK {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            break;
+        };
+
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+
+        for tx in blk.txs.iter().skip(1) {
+            if let AppPayload::Attest { proposal_id, .. } = &tx.app {
+                let Some(pv) = st.db.app.get(k_proposal(proposal_id)).unwrap() else {
+                    continue;
+                };
+
+                let prop: Proposal = match c().deserialize(&pv) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                *atts_by_domain.entry(prop.domain).or_insert(0) += 1;
+            }
+        }
+
+        scanned += 1;
+
+        if blk.header.prev == [0u8; 32] || cur_height == 0 {
+            break;
+        }
+
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
+    }
+
+    // 3) Merge observed domains
+    let mut merged: HashMap<String, DomainItem> = HashMap::new();
+
+    for (domain, proposals) in props_by_domain {
+        merged
+            .entry(domain.clone())
+            .or_insert(DomainItem {
+                domain,
+                proposals: 0,
+                attestations: 0,
+            })
+            .proposals = proposals;
+    }
+
+    for (domain, attestations) in atts_by_domain {
+        merged
+            .entry(domain.clone())
+            .or_insert(DomainItem {
+                domain,
+                proposals: 0,
+                attestations: 0,
+            })
+            .attestations = attestations;
+    }
+
+    let mut domains: Vec<DomainItem> = merged.into_values().collect();
+
+    // Sort by attestations desc, then proposals desc, then domain asc
+    domains.sort_by(|a, b| {
+        b.attestations
+            .cmp(&a.attestations)
+            .then_with(|| b.proposals.cmp(&a.proposals))
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+
+    Json(DomainsResp {
+        ok: true,
+        tip: format!("0x{}", hex::encode(tip)),
+        height: hi.height,
+        count: domains.len(),
+        domains,
+    })
 }
 
 fn parse_addr20(s: &str) -> Result<[u8; 20], String> {
