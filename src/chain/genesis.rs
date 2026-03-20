@@ -2,7 +2,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::chain::index::{header_hash, index_header};
+use crate::chain::index::{get_hidx, header_hash, index_header};
 use crate::chain::mine::coinbase;
 use crate::chain::pow::pow_ok;
 use crate::params::{GENESIS_HASH, INITIAL_BITS, INITIAL_REWARD, GENESIS_EPIGRAPH};
@@ -75,12 +75,8 @@ pub fn make_genesis_block(burn_addr20: Hash20) -> Result<Block> {
 }
 
 /// Ensure genesis is stored + applied exactly once.
+/// Also self-heals partial genesis bootstrap where tip/header exist but raw genesis block is missing.
 pub fn ensure_genesis(db: Arc<Stores>, genesis: Block) -> Result<()> {
-    // Already bootstrapped
-    if get_tip(&db)?.is_some() {
-        return Ok(());
-    }
-
     let gh = header_hash(&genesis.header);
 
     // IMPORTANT: enforce that the genesis we are about to apply matches params::GENESIS_HASH
@@ -92,19 +88,54 @@ pub fn ensure_genesis(db: Arc<Stores>, genesis: Block) -> Result<()> {
         );
     }
 
-    // store raw block
-    db.blocks.insert(
-        k_block(&gh),
-        crate::codec::consensus_bincode().serialize(&genesis)?,
-    )?;
+    let genesis_bytes = crate::codec::consensus_bincode().serialize(&genesis)?;
+    let tip = get_tip(&db)?;
 
-    // index header (also enforces bits/PoW rules)
-    let _ = index_header(&db, &genesis.header, None)?;
+    match tip {
+        None => {
+            // Fresh DB: do full bootstrap.
+            db.blocks.insert(k_block(&gh), genesis_bytes)?;
 
-    // apply state
-    let epoch = current_epoch(0);
-    validate_and_apply_block(&db, &genesis, epoch, 0)?;
+            let _ = index_header(&db, &genesis.header, None)?;
 
-    set_tip(&db, &gh)?;
-    Ok(())
+            let epoch = current_epoch(0);
+            validate_and_apply_block(&db, &genesis, epoch, 0)?;
+
+            set_tip(&db, &gh)?;
+            println!("[genesis] installed fresh genesis {}", hex::encode(gh));
+            Ok(())
+        }
+
+        Some(t) if t == gh => {
+            // Partial bootstrap repair path:
+            // tip already points at genesis, but raw block and/or header index may be missing.
+            let mut repaired = false;
+
+            if db.blocks.get(k_block(&gh))?.is_none() {
+                db.blocks.insert(k_block(&gh), genesis_bytes)?;
+                println!("[genesis] repaired missing raw genesis block {}", hex::encode(gh));
+                repaired = true;
+            }
+
+            if get_hidx(&db, &gh)?.is_none() {
+                let _ = index_header(&db, &genesis.header, None)?;
+                println!("[genesis] repaired missing genesis header index {}", hex::encode(gh));
+                repaired = true;
+            }
+
+            // Harmless idempotent re-assertion of tip.
+            set_tip(&db, &gh)?;
+
+            if !repaired {
+                println!("[genesis] genesis already present {}", hex::encode(gh));
+            }
+
+            Ok(())
+        }
+
+        Some(_) => {
+            // Existing non-genesis tip: node is already bootstrapped beyond genesis.
+            Ok(())
+        }
+    }
 }
