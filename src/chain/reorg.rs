@@ -1207,6 +1207,7 @@ if !tip_is(db, &anc.hash)? {
     flush_state_step(db).context("flush_state_step(set ancestor)")?;
 }
 failpoints::hit("reorg:at_ancestor_post_flush");
+failpoints::hit("reorg:after_undo");
 
     // transition to apply (journal + flush)
     j.phase = Phase::Apply;
@@ -1222,21 +1223,25 @@ failpoints::hit("reorg:at_ancestor_post_flush");
     // APPLY: state, tip, journal, ONE flush
     // ----------------------
     let apply_result: Result<()> = (|| {
-        for (i, bh) in apply_path.iter().enumerate() {
-            failpoints::hit(&format!("apply:{}:pre", i));
-            last_applying = Some(*bh);
+for (i, bh) in apply_path.iter().enumerate() {
+    failpoints::hit(&format!("apply:{}:pre", i));
+    last_applying = Some(*bh);
 
-            let blk =
-                load_block(db, bh).with_context(|| format!("[reorg] load_block {}", hex32(bh)))?;
-            let hi = must_hidx(db, bh).with_context(|| format!("[reorg] must_hidx {}", hex32(bh)))?;
+    let blk =
+        load_block(db, bh).with_context(|| format!("[reorg] load_block {}", hex32(bh)))?;
+    let hi = must_hidx(db, bh).with_context(|| format!("[reorg] must_hidx {}", hex32(bh)))?;
 
-            validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height)
-                .with_context(|| format!("[reorg] validate_and_apply_block {}", hex32(bh)))?;
+    validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height)
+        .with_context(|| format!("[reorg] validate_and_apply_block {}", hex32(bh)))?;
 
-            mempool_remove_mined(mempool, &blk);
+    mempool_remove_mined(mempool, &blk);
 
-            // allow tip to point here (presence check)
-            set_tip_checked(db, bh, "apply")?;
+    if i == 0 {
+        failpoints::hit("reorg:mid_apply");
+    }
+
+    // allow tip to point here (presence check)
+    set_tip_checked(db, bh, "apply")?;
 
             applied_new.push(*bh);
 
@@ -1318,8 +1323,9 @@ if !tip_is(db, new_tip)? {
 }
 journal_clear(db).context("journal_clear(success)")?;
 flush_state_step(db).context("flush(final tip + journal_clear)")?;
+failpoints::hit("reorg:after_commit");
 
-    let final_tip = get_tip(db).context("get_tip(final)")?.unwrap_or([0u8; 32]);
+let final_tip = get_tip(db).context("get_tip(final)")?.unwrap_or([0u8; 32]);
     if final_tip != *new_tip {
         bail!(
             "[reorg] success but tip mismatch: expected {}, got {}",
