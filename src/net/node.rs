@@ -675,8 +675,40 @@ async fn run_p2p_loop(
 ) -> Result<()> {
 
     if let Ok(v) = std::env::var("CSD_CRASH_AT") {
-    eprintln!("[failpoint] CSD_CRASH_AT={}", v);
-}
+        eprintln!("[failpoint] CSD_CRASH_AT={}", v);
+    }
+
+    println!("[p2p] peer_id: {peer_id}");
+
+    let (boot_tip, boot_height, boot_work) = local_tip_and_work(&db);
+    let boot_tip_block_present = if boot_tip != [0u8; 32] {
+        db.blocks.get(k_block(&boot_tip))?.is_some()
+    } else {
+        false
+    };
+    let boot_tip_hidx_present = if boot_tip != [0u8; 32] {
+        get_hidx(&db, &boot_tip)?.is_some()
+    } else {
+        false
+    };
+
+    println!(
+        "[boot-check] tip={} height={} work={}",
+        hex32(&boot_tip),
+        boot_height,
+        boot_work
+    );
+    println!(
+        "[boot-check] tip_block_present={} tip_hidx_present={}",
+        boot_tip_block_present,
+        boot_tip_hidx_present
+    );
+
+    if boot_height == 0 && boot_tip != [0u8; 32] && !boot_tip_block_present {
+        println!(
+            "[boot-check] WARNING: tip is set but raw tip block is missing; fresh sync may stall"
+        );
+    }
     
     println!("[p2p] peer_id: {peer_id}");
 
