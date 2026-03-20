@@ -461,12 +461,18 @@ let txs_json: Vec<serde_json::Value> = blk
             // Your coinbase format is:
             // [height_le_bytes][0x00][memo...]
             // So decode printable text after the first 0x00, if present.
-            let script_sig_text = inp
-                .script_sig
-                .split(|b| *b == 0x00)
-                .nth(1)
-                .and_then(|tail| std::str::from_utf8(tail).ok())
-                .map(|s| s.to_string());
+
+let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX {
+    if inp.script_sig.len() > 9 {
+        std::str::from_utf8(&inp.script_sig[9..])
+            .ok()
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+} else {
+    None
+};
 
             serde_json::json!({
                 "prev_txid": format!("0x{}", hex::encode(inp.prevout.txid)),
