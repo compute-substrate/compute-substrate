@@ -11,9 +11,8 @@ use crate::state::db::{get_tip, k_block, set_tip, Stores};
 use crate::state::utxo::validate_and_apply_block;
 use crate::types::{Block, BlockHeader, Hash20, Transaction};
 
-/// CONSENSUS: fixed genesis timestamp (deterministic).
-/// Pick any constant you want, but DO NOT derive from wallclock.
-pub const GENESIS_TIME: u64 = 1700000000;
+
+pub const GENESIS_TIME: u64 = 1774108800;
 
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
