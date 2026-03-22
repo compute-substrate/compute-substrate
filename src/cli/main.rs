@@ -472,10 +472,6 @@ pub async fn run() -> Result<()> {
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
 
-            // If a mining node was started without any bootnodes, treat that as
-            // intentional solo mining (used by fork / failpoint tests).
-            let allow_solo_mining = mine && boots.is_empty();
-
                         let test_mode = match p2p_test_mode.as_str() {
                 "normal" => crate::net::node::TestPeerMode::Normal,
                 "stall-blocks" => crate::net::node::TestPeerMode::StallBlockResponses,
@@ -553,36 +549,13 @@ let peers = net2.connected_peers();
 let tip_fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
 let peer_stable = net2.is_peer_stable(PEER_STABLE_SECS);
 
-// Intentional solo mining is allowed when this miner was launched with no bootnodes.
-// In that case, treat peer quorum as satisfied and do not require peer-stability.
-let effective_peers = if allow_solo_mining {
-    std::cmp::max(peers, 1usize)
-} else {
-    peers
-};
-
-let peers_ok = effective_peers >= 1;
-let stability_ok = if allow_solo_mining {
-    true
-} else {
-    peer_stable
-};
-
-if !peers_ok || !stability_ok {
+if peers < 1 || !peer_stable {
     if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
-            "[miner] gate: NOT mining (peers={}, effective_peers={}, allow_solo_mining={}, tip_fresh={}, peer_stable={}, peers_ok={}, stability_ok={}, last_tip_seen_unix={}, last_peer_change_unix={})",
-            peers,
-            effective_peers,
-            allow_solo_mining,
-            tip_fresh,
-            peer_stable,
-            peers_ok,
-            stability_ok,
-            last_tip,
-            last_peer_change
+            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={} last_tip_seen_unix={} last_peer_change_unix={})",
+            peers, peers, tip_fresh, peer_stable, last_tip, last_peer_change
         );
         last_gate_log = std::time::Instant::now();
     }
