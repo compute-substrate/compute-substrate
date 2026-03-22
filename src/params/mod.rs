@@ -23,7 +23,7 @@ pub const TARGET_BLOCK_SECS: u64 = 60;
 
 // Initial difficulty target (compact bits).
 // This sets the starting difficulty at genesis; subsequent blocks follow the difficulty adjustment rules in code.
-pub const INITIAL_BITS: u32 = 0x1d00ffff;
+pub const INITIAL_BITS: u32 = 0x1d0ffff;
 
 // -----------------------------------------------------------------------------
 // Difficulty / PoW (LWMA per-block retarget)
