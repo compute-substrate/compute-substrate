@@ -530,48 +530,102 @@ fn try_apply_pending(
     chain_lock: &crate::chain::lock::ChainLock,
 ) {
     loop {
-        let (tip, _h, _w) = local_tip_and_work(db);
+        let mut progressed = false;
 
-        let next_hash = pending_apply.iter().find_map(|(h, blk)| {
-            if blk.header.prev == tip {
-                Some(*h)
-            } else {
-                None
+        // Snapshot current canonical tip/work once per pass.
+        let (cur_tip, _cur_h, cur_work) = local_tip_and_work(db);
+
+        // Collect candidate hashes so we can mutate pending_apply safely.
+        let candidate_hashes: Vec<Hash32> = pending_apply.keys().copied().collect();
+
+        for h in candidate_hashes {
+            let Some(blk) = pending_apply.get(&h) else { continue };
+
+            // Only consider blocks whose parent is already present/indexed.
+            let parent_ready = blk.header.prev == [0u8; 32]
+                || db.blocks.get(k_block(&blk.header.prev)).ok().flatten().is_some()
+                || pending_apply.contains_key(&blk.header.prev);
+
+            if !parent_ready {
+                continue;
             }
-        });
 
-        let Some(h) = next_hash else { break };
-        let blk = pending_apply.remove(&h).unwrap();
+            {
+                let _g = chain_lock.lock();
 
-        {
-            let _g = chain_lock.lock();
-
-            if db.blocks.get(k_block(&h)).ok().flatten().is_none() {
-                if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&blk) {
-                    if bytes.len() <= MAX_BLOCK_BYTES {
-                        let _ = db.blocks.insert(k_block(&h), bytes);
+                // Ensure raw block exists.
+                if db.blocks.get(k_block(&h)).ok().flatten().is_none() {
+                    if let Ok(bytes) = crate::codec::consensus_bincode().serialize(blk) {
+                        if bytes.len() <= MAX_BLOCK_BYTES {
+                            let _ = db.blocks.insert(k_block(&h), bytes);
+                        }
                     }
                 }
+
+                // Ensure header index exists.
+                let _ = get_hidx(db, &h).ok().flatten().or_else(|| {
+                    if is_genesis_header(&blk.header) {
+                        index_header(db, &blk.header, None).ok()?;
+                        get_hidx(db, &h).ok().flatten()
+                    } else {
+                        let parent = get_hidx(db, &blk.header.prev).ok().flatten()?;
+                        index_header(db, &blk.header, Some(&parent)).ok()?;
+                        get_hidx(db, &h).ok().flatten()
+                    }
+                });
             }
 
-            let _ = get_hidx(db, &h).ok().flatten().or_else(|| {
-                if is_genesis_header(&blk.header) {
-                    index_header(db, &blk.header, None).ok()?;
-                    get_hidx(db, &h).ok().flatten()
-                } else {
-                    let parent = get_hidx(db, &blk.header.prev).ok().flatten()?;
-                    index_header(db, &blk.header, Some(&parent)).ok()?;
-                    get_hidx(db, &h).ok().flatten()
+            let Some(new_hi) = get_hidx(db, &h).ok().flatten() else {
+                continue;
+            };
+
+            // Case 1: direct extension of current canonical tip.
+            if blk.header.prev == cur_tip {
+                let blk = pending_apply.remove(&h).unwrap();
+                drop(blk);
+
+                eprintln!(
+                    "[sync] applying direct-tip pending block {} h={} w={}",
+                    hex32(&h),
+                    new_hi.height,
+                    new_hi.chainwork
+                );
+
+                if let Err(e) = crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
+                    println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
                 }
-            });
+
+                progressed = true;
+                break;
+            }
+
+            // Case 2: stronger competing fork head was downloaded.
+            if new_hi.chainwork > cur_work {
+                let blk = pending_apply.remove(&h).unwrap();
+                drop(blk);
+
+                eprintln!(
+                    "[sync] stronger downloaded fork detected -> maybe_reorg_to({}) h={} w={} cur_w={}",
+                    hex32(&h),
+                    new_hi.height,
+                    new_hi.chainwork,
+                    cur_work
+                );
+
+                if let Err(e) = crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
+                    println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
+                }
+
+                progressed = true;
+                break;
+            }
         }
 
-        if let Err(e) = crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
-            println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
+        if !progressed {
+            break;
         }
     }
 }
-
 fn handle_gossipsub_event(event: &OutEvent) -> Option<(Option<PeerId>, Vec<u8>, String)> {
     match event {
         OutEvent::Gossipsub(gossipsub::Event::Message {
