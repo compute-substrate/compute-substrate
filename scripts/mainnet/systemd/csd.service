@@ -1,25 +1,36 @@
 [Unit]
-Description=Compute Substrate mainnet node
+Description=Compute Substrate Node
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/compute-substrate
-Environment=ROOT_DIR=/home/ubuntu/compute-substrate
-Environment=BIN_PATH=/home/ubuntu/compute-substrate/target/release/csd
-Environment=GENESIS_PATH=/home/ubuntu/compute-substrate/genesis.bin
-Environment=DATADIR=/home/ubuntu/.csd/mainnet-node
-Environment=RPC_ADDR=0.0.0.0:8789
+User=csd
+Group=csd
+WorkingDirectory=/var/lib/csd
+Environment=BIN=/usr/local/bin/csd
+Environment=DATADIR=/var/lib/csd/node
+Environment=RPC=0.0.0.0:8789
+Environment=GENESIS=/etc/csd/genesis.bin
 Environment=P2P_LISTEN=/ip4/0.0.0.0/tcp/17999
-Environment=RUST_LOG=info
-# Set BOOTNODES here before enabling on real mainnet:
 Environment=BOOTNODES=
-ExecStart=/home/ubuntu/compute-substrate/scripts/mainnet/run-node.sh
+ExecStart=/opt/compute-substrate/scripts/mainnet/run-node.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/csd
+ReadOnlyPaths=/etc/csd
+MemoryDenyWriteExecute=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
