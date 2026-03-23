@@ -45,36 +45,45 @@ const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 5000;
-const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 500;
-const RL_MAX_INVALID_PER_WINDOW: u32 = 50;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 256;
+const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 128;
+const RL_MAX_INVALID_PER_WINDOW: u32 = 12;
 
-const BAN_SECS: u64 = 60;
+const BAN_SECS: u64 = 10 * 60;
 
 // ----------------- production upgrades -----------------
 
-// score tuning (simple + stable)
 const SCORE_GOOD_TIP: i32 = 1;
 const SCORE_GOOD_HEADERS: i32 = 2;
 const SCORE_GOOD_BLOCK: i32 = 3;
-const SCORE_BAD_INVALID: i32 = -4;
-const SCORE_BAD_TIMEOUT: i32 = -2;
-const SCORE_BAD_UNKNOWN_BLOCK: i32 = -2;
+
+const SCORE_BAD_INVALID: i32 = -6;
+const SCORE_BAD_TIMEOUT: i32 = -3;
+const SCORE_BAD_UNKNOWN_BLOCK: i32 = -3;
+const SCORE_BAD_EMPTY_HEADERS: i32 = -1;
+const SCORE_BAD_UNREQUESTED_BLOCK: i32 = -8;
+const SCORE_BAD_OVERSIZED_HEADERS: i32 = -6;
 
 const TIP_POLL_SECS: u64 = 120;
-
 const REGULAR_TIP_POLL_SECS: u64 = 10;
-
 const GETTIP_LOG_EVERY_SECS: u64 = 60;
 
 // quarantine: soft-ban for a while when score too low
-const QUAR_SECS: u64 = 60;
-const QUAR_SCORE_THRESHOLD: i32 = -20;
+const QUAR_SECS: u64 = 5 * 60;
+const QUAR_SCORE_THRESHOLD: i32 = -12;
 
 // ----------------- dial backoff tuning -----------------
 
 const REDIAL_EVERY_SECS: u64 = 10;
 const DIAL_BACKOFF_SECS: u64 = 10;
+
+// ----------------- sync bounds -----------------
+
+const MAX_HEADERS_PER_SYNC: u64 = 1024;
+const MAX_LOCATOR_LEN: usize = 128;
+const MAX_INFLIGHT_BLOCKS: usize = 64;
+const MAX_WANT_QUEUE: usize = 20_000;
+const BLOCK_REQ_TIMEOUT_SECS: u64 = 10;
 
 // ----------------- time helpers -----------------
 
@@ -117,6 +126,17 @@ fn load_or_create_node_key(datadir: &str) -> anyhow::Result<identity::Keypair> {
 
 fn is_genesis_header(h: &BlockHeader) -> bool {
     h.prev == [0u8; 32]
+}
+
+fn prune_peer_state(
+    buckets: &mut HashMap<PeerId, RateBucket>,
+    bans: &mut HashMap<PeerId, Instant>,
+    quarantine: &mut HashMap<PeerId, Instant>,
+    connected: &HashSet<PeerId>,
+) {
+    bans.retain(|p, t| connected.contains(p) || t.elapsed().as_secs() < BAN_SECS);
+    quarantine.retain(|p, t| connected.contains(p) || t.elapsed().as_secs() < QUAR_SECS);
+    buckets.retain(|p, b| connected.contains(p) || b.window_start.elapsed() < RL_WINDOW);
 }
 
 fn hex32(h: &Hash32) -> String {
@@ -816,11 +836,6 @@ let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
         let _ = swarm.dial(a.clone());
     }
 
-    const MAX_HEADERS_PER_SYNC: u64 = 1024;
-    const MAX_INFLIGHT_BLOCKS: usize = 128;
-    const MAX_WANT_QUEUE: usize = 20_000;
-    const BLOCK_REQ_TIMEOUT_SECS: u64 = 10;
-
     let mut connected: HashSet<PeerId> = HashSet::new();
 
     // NEW: connection refcount to avoid duplicate “connected” spam
@@ -965,6 +980,11 @@ bad_providers.entry(h).or_default().insert(peer);
                     want_blocks.push_back(h);
                 }
                 println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
+
+if sync_peer == Some(peer) {
+    // handled by outer sync-peer chooser on next poll/event
+}
+
             }
 
 let mut scan_budget = want_blocks.len();
@@ -1066,6 +1086,9 @@ if hi.parent != [0u8; 32]
     loop {
         tokio::select! {
             _ = poll.tick() => {
+
+prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
+
                 // bootnode auto-redial (with backoff + connected-skip)
                 if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
                     for a in &cfg.bootnodes {
@@ -1408,6 +1431,32 @@ if !allow_rr_req(&mut buckets, &mut bans, peer) {
     continue;
 }
 
+match &request {
+    SyncRequest::GetHeadersByLocator { locator, max } => {
+        if locator.len() > MAX_LOCATOR_LEN || *max > MAX_HEADERS_PER_SYNC {
+            note_invalid(&mut buckets, &mut bans, peer, "oversized locator or max headers request");
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            let _ = swarm.behaviour_mut().rr.send_response(
+                channel,
+                SyncResponse::Err { msg: "invalid headers request".into() },
+            );
+            continue;
+        }
+    }
+    SyncRequest::GetHeaders { max, .. } => {
+        if *max > MAX_HEADERS_PER_SYNC {
+            note_invalid(&mut buckets, &mut bans, peer, "oversized GetHeaders request");
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            let _ = swarm.behaviour_mut().rr.send_response(
+                channel,
+                SyncResponse::Err { msg: "invalid headers request".into() },
+            );
+            continue;
+        }
+    }
+    _ => {}
+}
+
 
 
 match &request {
@@ -1558,6 +1607,17 @@ if should_log_tip_update(last_logged, height, chainwork, _dbg_w) {
 }
 
                                                 SyncResponse::Headers { headers } => {
+
+    if headers.len() as u64 > MAX_HEADERS_PER_SYNC {
+        note_invalid(&mut buckets, &mut bans, peer, "oversized headers response");
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_OVERSIZED_HEADERS);
+        continue;
+    }
+
+    if headers.is_empty() && sync_peer == Some(peer) {
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_EMPTY_HEADERS);
+    }
+
     println!(
         "[sync] got headers from {} count={}",
         peer,
@@ -1641,13 +1701,35 @@ let _ = pump_blocks(
                                                     }
                                                 }
 
-                                                SyncResponse::Block { block } => {
+SyncResponse::Block { block } => {
+    let bh = header_hash(&block.header);
+    println!("[sync] got block {} from {}", hex32(&bh), peer);
 
-let bh = header_hash(&block.header);
-println!("[sync] got block {} from {}", hex32(&bh), peer);
+    // Validate that this response matches an in-flight request
+    let Some(expected_h) = rid_to_hash.remove(&rid) else {
+        note_invalid(&mut buckets, &mut bans, peer, "unrequested block response");
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNREQUESTED_BLOCK);
+        continue;
+    };
 
-                                                    mark_tip_seen(&last_tip_seen_unix);
-                                                    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
+    // Ensure the block hash matches what we requested
+    if expected_h != bh {
+        inflight.remove(&expected_h);
+
+        note_invalid(&mut buckets, &mut bans, peer, "block response hash mismatch");
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNREQUESTED_BLOCK);
+
+        bad_providers.entry(expected_h).or_default().insert(peer);
+
+        if want_blocks.len() < MAX_WANT_QUEUE {
+            want_blocks.push_back(expected_h);
+        }
+
+        continue;
+    }
+
+    mark_tip_seen(&last_tip_seen_unix);
+    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
 
                                                     if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
                                                         if bytes.len() > MAX_BLOCK_BYTES {
@@ -1657,11 +1739,9 @@ println!("[sync] got block {} from {}", hex32(&bh), peer);
                                                         }
                                                     }
 
-let bh = header_hash(&block.header);
 providers.insert(bh, peer);
 
-if let Some((rid2, t0, asked_peer)) = inflight.remove(&bh) {
-    rid_to_hash.remove(&rid2);
+if let Some((_rid2, t0, asked_peer)) = inflight.remove(&bh) {
     if asked_peer == peer {
         let _elapsed = t0.elapsed().as_millis();
     }
@@ -1832,6 +1912,7 @@ Event::OutboundFailure { peer, request_id, error } => {
 
 Event::InboundFailure { peer, error, .. } => {
             println!("[sync] inbound failure from {}: {:?}", peer, error);
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
         }
 
         _ => {}
@@ -1874,6 +1955,8 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
         }
 
         SyncRequest::GetHeaders { from_height, max } => {
+            let max = max.min(MAX_HEADERS_PER_SYNC);
+
             let tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if tip == [0u8; 32] {
                 return Ok(SyncResponse::Headers { headers: vec![] });
@@ -1919,6 +2002,14 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
         }
 
         SyncRequest::GetHeadersByLocator { locator, max } => {
+            let max = max.min(MAX_HEADERS_PER_SYNC);
+
+            let locator = if locator.len() > MAX_LOCATOR_LEN {
+                locator.into_iter().take(MAX_LOCATOR_LEN).collect::<Vec<_>>()
+            } else {
+                locator
+            };
+
             let tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if tip == [0u8; 32] {
                 return Ok(SyncResponse::Headers { headers: vec![] });
