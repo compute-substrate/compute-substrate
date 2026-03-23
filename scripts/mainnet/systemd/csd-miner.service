@@ -1,0 +1,37 @@
+[Unit]
+Description=Compute Substrate Miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=csd
+Group=csd
+WorkingDirectory=/var/lib/csd
+Environment=BIN=/usr/local/bin/csd
+Environment=DATADIR=/var/lib/csd/miner
+Environment=RPC=0.0.0.0:8789
+Environment=GENESIS=/etc/csd/genesis.bin
+Environment=P2P_LISTEN=/ip4/0.0.0.0/tcp/17999
+Environment=BOOTNODES=
+Environment=MINER_ADDR20=
+ExecStart=/opt/compute-substrate/scripts/mainnet/run-miner.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/csd
+ReadOnlyPaths=/etc/csd
+MemoryDenyWriteExecute=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
