@@ -1,4 +1,4 @@
-# Compute Substrate — Getting Started
+# Compute Substrate: Getting Started
 
 This guide shows how to:
 
