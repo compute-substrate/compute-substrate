@@ -1076,7 +1076,7 @@ async fn window_domain(Path(domain): Path<String>, State(st): State<ApiState>) -
         .unwrap()
         .unwrap_or_else(|| zero_hidx(tip));
 
-let epoch = crate::state::app_state::epoch_of(hi.height);
+let epoch = crate::state::app_state::epoch_of(hi.height).saturating_sub(1);
     let rows = get_topk(&st.db, epoch, &domain).unwrap_or_default();
     let mut top: Vec<serde_json::Value> = vec![];
     for (pid, score) in rows {
@@ -1115,7 +1115,7 @@ async fn top_current(
         .unwrap()
         .unwrap_or_else(|| zero_hidx(tip));
 
-let epoch = crate::state::app_state::epoch_of(hi.height);
+let epoch = crate::state::app_state::epoch_of(hi.height).saturating_sub(1);
     top_for_epoch_impl(&st, domain, epoch)
 }
 
