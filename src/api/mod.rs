@@ -12,7 +12,7 @@ use crate::crypto::{sighash, txid};
 use crate::net::mempool::{Mempool, MempoolStats};
 use crate::net::GossipTxEvent;
 use crate::net::GossipTxEvent as _; // keep type visible even if optimized paths change
-use crate::state::app::{k_proposal, topk_snapshot, Proposal};
+use crate::state::app_state::{get_proposal, get_topk, k_proposal, Proposal};
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
 use crate::types::{AppPayload, Block, Hash32, OutPoint, Transaction, TxOut};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1077,8 +1077,7 @@ async fn window_domain(Path(domain): Path<String>, State(st): State<ApiState>) -
         .unwrap_or_else(|| zero_hidx(tip));
 
     let epoch = crate::state::app::current_epoch(hi.height);
-    let rows = topk_snapshot(&st.db, epoch, &domain).unwrap_or_default();
-
+let rows = get_topk(&st.db, epoch, &domain).unwrap_or_default();
     let mut top: Vec<serde_json::Value> = vec![];
     for (pid, score) in rows {
         let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else {
@@ -1128,8 +1127,8 @@ async fn top_epoch(
 }
 
 fn top_for_epoch_impl(st: &ApiState, domain: String, epoch: u64) -> Json<serde_json::Value> {
-    let rows = topk_snapshot(&st.db, epoch, &domain).unwrap_or_default();
-
+let rows = get_topk(&st.db, epoch, &domain).unwrap_or_default();
+    
     let out: Vec<serde_json::Value> = rows
         .into_iter()
         .filter_map(|(pid, score)| {
@@ -1158,14 +1157,9 @@ async fn proposal_get(
         Err(e) => return Json(serde_json::json!({ "ok": false, "err": e })),
     };
 
-    let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else {
-        return Json(serde_json::json!({ "ok": false, "err": "not found" }));
-    };
-
-    let prop: Proposal = match c().deserialize(&v) {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({ "ok": false, "err": format!("decode: {e}") })),
-    };
+let Some(prop) = get_proposal(&st.db, &pid).unwrap() else {
+    return Json(serde_json::json!({ "ok": false, "err": "not found" }));
+};
 
     Json(serde_json::json!({
         "ok": true,
