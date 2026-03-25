@@ -229,6 +229,23 @@ fn build_template_with_byte_cap(
         o => o,
     });
 
+    // Ensure proposals are always included before attests.
+    // Without this, attests can reference proposals not yet applied in the same block.
+    candidates.sort_by(|a, b| {
+        use std::cmp::Ordering;
+
+        let prio = |tx: &Transaction| match &tx.app {
+            AppPayload::Propose { .. } => 0u8,
+            AppPayload::Attest { .. } => 1u8,
+            _ => 2u8,
+        };
+
+        match prio(&a.2).cmp(&prio(&b.2)) {
+            Ordering::Equal => Ordering::Equal, // keep fee ordering within same class
+            o => o,
+        }
+    });
+
     let cb_placeholder = coinbase(miner_h160, reward, height, None);
     let cb_bytes = c.serialized_size(&cb_placeholder)? as usize;
 
