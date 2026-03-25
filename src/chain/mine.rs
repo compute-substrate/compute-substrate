@@ -11,7 +11,7 @@ use crate::net::mempool::Mempool;
 use crate::params::{
     block_reward, MAX_BLOCK_BYTES, MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS,
 };
-use crate::state::app::current_epoch;
+use crate::state::app_state::epoch_of;
 use crate::state::db::{get_tip, get_utxo, k_block, Stores};
 use crate::state::utxo::validate_tx_for_mempool;
 use crate::types::{
@@ -325,8 +325,7 @@ pub fn mine_one(
     };
 
     let mut height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
-    let mut _epoch = current_epoch(height);
-
+let mut _epoch = epoch_of(height);
     let (mut txs, mut included_ids, _fees) =
         build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
 
@@ -369,8 +368,7 @@ pub fn mine_one(
                 };
 
                 height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
-                _epoch = current_epoch(height);
-
+                _epoch = epoch_of(height);
                 let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
                 txs = built.0;
                 included_ids = built.1;
