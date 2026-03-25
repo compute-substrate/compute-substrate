@@ -1181,7 +1181,7 @@ async fn topk_get(
     Path((epoch, domain)): Path<(u64, String)>,
     State(st): State<ApiState>,
 ) -> Json<serde_json::Value> {
-    let rows = topk_snapshot(&st.db, epoch, &domain).unwrap_or_default();
+    let rows = get_topk(&st.db, epoch, &domain).unwrap_or_default();
     let out: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|(pid, score)| {
