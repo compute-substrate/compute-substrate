@@ -1395,5 +1395,6 @@ let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
         ok: inserted,
         txid: txid_hex,
         mempool_len: st.mempool.len(),
+        err: None,
     })
 }
