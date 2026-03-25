@@ -45,7 +45,7 @@ const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 256;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 4096;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 128;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 12;
 
@@ -81,7 +81,7 @@ const DIAL_BACKOFF_SECS: u64 = 10;
 
 const MAX_HEADERS_PER_SYNC: u64 = 1024;
 const MAX_LOCATOR_LEN: usize = 128;
-const MAX_INFLIGHT_BLOCKS: usize = 64;
+const MAX_INFLIGHT_BLOCKS: usize = 32;
 const MAX_WANT_QUEUE: usize = 20_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 10;
 
