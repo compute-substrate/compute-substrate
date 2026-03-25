@@ -9,7 +9,8 @@ use crate::state::db::Stores;
 #[command(
     name = "csd",
     version = "0.1.0",
-    about = "Compute Substrate daemon + wallet",
+    about = "Compute Substrate node and wallet CLI",
+    long_about = "Compute Substrate node and wallet CLI.\n\nUse `csd node` to run a node or miner.\nUse `csd wallet` to create keys, inspect balances, build transactions, and submit proposals or attestations.",
     arg_required_else_help = true
 )]
 pub struct Cmd {
@@ -19,41 +20,53 @@ pub struct Cmd {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Create a genesis block file
     Genesis {
+        /// Output path for the genesis file
         #[arg(long, default_value = "genesis.bin")]
         out: String,
 
+        /// 20-byte burn address used in genesis
         #[arg(long, default_value = "0x0000000000000000000000000000000000000000")]
         burn_addr20: String,
     },
 
+    /// Run a node or miner
     Node {
+        /// Database directory
         #[arg(long, default_value = "cs.db")]
         datadir: String,
 
+        /// RPC listen address
         #[arg(long, default_value = "127.0.0.1:8789")]
         rpc: String,
 
+        /// Enable mining
         #[arg(long)]
         mine: bool,
 
+        /// Miner payout address (required with --mine)
         #[arg(long, default_value = "")]
         miner_addr20: String,
 
-        // ---- P2P ----
+        /// Genesis block file
         #[arg(long, default_value = "genesis.bin")]
         genesis: String,
 
+        /// P2P listen multiaddr
         #[arg(long, default_value = "/ip4/0.0.0.0/tcp/17999")]
         p2p_listen: String,
 
+        /// Comma-separated bootnode multiaddrs
         #[arg(long, default_value = "")]
         bootnodes: String,
 
-        #[arg(long, default_value = "normal")]
+        /// P2P test mode (for staging/tests only)
+        #[arg(long, default_value = "normal", hide = true)]
         p2p_test_mode: String,
     },
 
+    /// Wallet and transaction tools
     Wallet {
         #[command(subcommand)]
         w: WalletCmd,
@@ -62,144 +75,269 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum WalletCmd {
+    /// Generate a new private key, pubkey, and addr20
     New,
-    Addr {
+
+    /// Recover pubkey and addr20 from a private key
+    Recover {
+        /// 32-byte private key hex
         #[arg(long)]
         privkey: String,
     },
-    Whoami {
-        #[arg(long)]
-        privkey: String,
-    },
+
+    /// Find a spendable input in the local UTXO set
     Input {
+        /// Private key to derive addr20 from
         #[arg(long)]
         privkey: Option<String>,
+
+        /// Addr20 to search for directly
         #[arg(long)]
         address: Option<String>,
+
+        /// Database directory
         #[arg(long, default_value = "cs.db")]
         datadir: String,
+
+        /// Minimum input value
         #[arg(long, default_value_t = 0)]
         min: u64,
+
+        /// Pick smallest sufficient UTXO instead of largest
         #[arg(long)]
         smallest: bool,
     },
+
+    /// Show balance summary for an addr20
     Balance {
+        /// 20-byte address hex
         #[arg(long)]
         address: String,
+
+        /// Database directory
         #[arg(long, default_value = "cs.db")]
         datadir: String,
     },
+
+    /// Build and sign a plain spend transaction
     Spend {
+        /// 32-byte private key hex
         #[arg(long)]
         privkey: String,
+
+        /// Input triple: <txid>:<vout>:<value>
         #[arg(long, action = ArgAction::Append)]
         input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet
         #[arg(long)]
         auto_input: bool,
+
+        /// Minimum value when using --auto-input
         #[arg(long, default_value_t = 0)]
         min_input: u64,
+
+        /// Database directory for --auto-input
         #[arg(long, default_value = "cs.db")]
         datadir: String,
+
+        /// Output pair: <addr20>:<value>
         #[arg(long, action = ArgAction::Append)]
         output: Vec<String>,
+
+        /// Fee in native units
         #[arg(long)]
         fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20
         #[arg(long)]
         change: Option<String>,
     },
-    Propose {
+
+    /// Build and sign a proposal transaction without submitting it
+    ProposeBuild {
+        /// 32-byte private key hex
         #[arg(long)]
         privkey: String,
+
+        /// Input triple: <txid>:<vout>:<value>
         #[arg(long, action = ArgAction::Append)]
         input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet
         #[arg(long)]
         auto_input: bool,
+
+        /// Minimum value when using --auto-input
         #[arg(long, default_value_t = 0)]
         min_input: u64,
+
+        /// Database directory for --auto-input
         #[arg(long, default_value = "cs.db")]
         datadir: String,
+
+        /// Fee in native units
         #[arg(long)]
         fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20
         #[arg(long)]
         change: Option<String>,
+
+        /// Proposal domain
         #[arg(long)]
         domain: String,
+
+        /// 32-byte payload hash
         #[arg(long)]
         payload_hash: String,
+
+        /// Payload URI
         #[arg(long)]
         uri: String,
+
+        /// Expiry epoch
         #[arg(long)]
         expires_epoch: u64,
     },
-    Attest {
+
+    /// Build and sign an attestation transaction without submitting it
+    AttestBuild {
+        /// 32-byte private key hex
         #[arg(long)]
         privkey: String,
+
+        /// Input triple: <txid>:<vout>:<value>
         #[arg(long, action = ArgAction::Append)]
         input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet
         #[arg(long)]
         auto_input: bool,
+
+        /// Minimum value when using --auto-input
         #[arg(long, default_value_t = 0)]
         min_input: u64,
+
+        /// Database directory for --auto-input
         #[arg(long, default_value = "cs.db")]
         datadir: String,
+
+        /// Fee in native units
         #[arg(long)]
         fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20
         #[arg(long)]
         change: Option<String>,
+
+        /// Proposal txid / proposal id
         #[arg(long)]
         proposal_id: String,
+
+        /// Attestation score
         #[arg(long)]
         score: u32,
+
+        /// Attestation confidence
         #[arg(long)]
         confidence: u32,
     },
-    ProposeSubmit {
+
+    /// Build, sign, and submit a proposal transaction
+    Propose {
+        /// 32-byte private key hex
         #[arg(long)]
         privkey: String,
+
+        /// Input triple: <txid>:<vout>:<value>
         #[arg(long, action = ArgAction::Append)]
         input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet
         #[arg(long)]
         auto_input: bool,
+
+        /// Minimum value when using --auto-input
         #[arg(long, default_value_t = 0)]
         min_input: u64,
+
+        /// Database directory for --auto-input
         #[arg(long, default_value = "cs.db")]
         datadir: String,
+
+        /// Fee in native units
         #[arg(long)]
         fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20
         #[arg(long)]
         change: Option<String>,
+
+        /// Proposal domain
         #[arg(long)]
         domain: String,
+
+        /// 32-byte payload hash
         #[arg(long)]
         payload_hash: String,
+
+        /// Payload URI
         #[arg(long)]
         uri: String,
+
+        /// Expiry epoch
         #[arg(long)]
         expires_epoch: u64,
+
+        /// Node RPC base URL
         #[arg(long, default_value = "http://127.0.0.1:8789")]
         rpc_url: String,
     },
-    AttestSubmit {
+
+    /// Build, sign, and submit an attestation transaction
+    Attest {
+        /// 32-byte private key hex
         #[arg(long)]
         privkey: String,
+
+        /// Input triple: <txid>:<vout>:<value>
         #[arg(long, action = ArgAction::Append)]
         input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet
         #[arg(long)]
         auto_input: bool,
+
+        /// Minimum value when using --auto-input
         #[arg(long, default_value_t = 0)]
         min_input: u64,
+
+        /// Database directory for --auto-input
         #[arg(long, default_value = "cs.db")]
         datadir: String,
+
+        /// Fee in native units
         #[arg(long)]
         fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20
         #[arg(long)]
         change: Option<String>,
+
+        /// Proposal txid / proposal id
         #[arg(long)]
         proposal_id: String,
+
+        /// Attestation score
         #[arg(long)]
         score: u32,
+
+        /// Attestation confidence
         #[arg(long)]
         confidence: u32,
+
+        /// Node RPC base URL
         #[arg(long, default_value = "http://127.0.0.1:8789")]
         rpc_url: String,
     },
@@ -222,178 +360,178 @@ pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
 
     match cmd.cmd {
-        Commands::Wallet { w } => {
-            use crate::cli::wallet::*;
 
-            match w {
-                WalletCmd::New => wallet_new()?,
+Commands::Wallet { w } => {
+    use crate::cli::wallet::*;
 
-                WalletCmd::Addr { privkey } => wallet_addr(&privkey)?,
-                WalletCmd::Whoami { privkey } => wallet_addr(&privkey)?,
+    match w {
+        WalletCmd::New => wallet_new()?,
 
-                WalletCmd::Input {
-                    privkey,
-                    address,
-                    datadir,
-                    min,
-                    smallest,
-                } => wallet_input(
-                    &datadir,
-                    privkey.as_deref(),
-                    address.as_deref(),
-                    min,
-                    smallest,
-                )?,
+        WalletCmd::Recover { privkey } => wallet_addr(&privkey)?,
 
-                WalletCmd::Balance { address, datadir } => wallet_balance(&datadir, &address)?,
+        WalletCmd::Input {
+            privkey,
+            address,
+            datadir,
+            min,
+            smallest,
+        } => wallet_input(
+            &datadir,
+            privkey.as_deref(),
+            address.as_deref(),
+            min,
+            smallest,
+        )?,
 
-                WalletCmd::Spend {
-                    privkey,
-                    mut input,
-                    auto_input,
-                    min_input,
-                    datadir,
-                    output,
-                    fee,
-                    change,
-                } => {
-                    if auto_input {
-                        if !input.is_empty() {
-                            anyhow::bail!("--auto-input cannot be combined with --input");
-                        }
-                        let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
-                        input.push(picked);
-                    }
-                    wallet_spend(&privkey, input, output, fee, change)?
+        WalletCmd::Balance { address, datadir } => wallet_balance(&datadir, &address)?,
+
+        WalletCmd::Spend {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            output,
+            fee,
+            change,
+        } => {
+            if auto_input {
+                if !input.is_empty() {
+                    anyhow::bail!("--auto-input cannot be combined with --input");
                 }
+                let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                input.push(picked);
+            }
+            wallet_spend(&privkey, input, output, fee, change)?
+        }
 
-                WalletCmd::Propose {
-                    privkey,
-                    mut input,
-                    auto_input,
-                    min_input,
-                    datadir,
-                    fee,
-                    change,
-                    domain,
-                    payload_hash,
-                    uri,
-                    expires_epoch,
-                } => {
-                    if auto_input {
-                        if !input.is_empty() {
-                            anyhow::bail!("--auto-input cannot be combined with --input");
-                        }
-                        let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
-                        input.push(picked);
-                    }
-
-                    wallet_propose(
-                        &privkey,
-                        input,
-                        fee,
-                        change,
-                        domain,
-                        payload_hash,
-                        uri,
-                        expires_epoch,
-                    )?
+        WalletCmd::ProposeBuild {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            fee,
+            change,
+            domain,
+            payload_hash,
+            uri,
+            expires_epoch,
+        } => {
+            if auto_input {
+                if !input.is_empty() {
+                    anyhow::bail!("--auto-input cannot be combined with --input");
                 }
-
-                WalletCmd::Attest {
-                    privkey,
-                    mut input,
-                    auto_input,
-                    min_input,
-                    datadir,
-                    fee,
-                    change,
-                    proposal_id,
-                    score,
-                    confidence,
-                } => {
-                    if auto_input {
-                        if !input.is_empty() {
-                            anyhow::bail!("--auto-input cannot be combined with --input");
-                        }
-                        let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
-                        input.push(picked);
-                    }
-
-                    wallet_attest(&privkey, input, fee, change, proposal_id, score, confidence)?
-                }
-
-                WalletCmd::ProposeSubmit {
-                    privkey,
-                    mut input,
-                    auto_input,
-                    min_input,
-                    datadir: _,
-                    fee,
-                    change,
-                    domain,
-                    payload_hash,
-                    uri,
-                    expires_epoch,
-                    rpc_url,
-                } => {
-                    if auto_input {
-                        if !input.is_empty() {
-                            anyhow::bail!("--auto-input cannot be combined with --input");
-                        }
-                        let picked = wallet_pick_input("cs.db", &privkey, min_input, false)?;
-                        input.push(picked);
-                    }
-
-                    wallet_propose_submit(
-                        &rpc_url,
-                        &privkey,
-                        input,
-                        fee,
-                        change,
-                        domain,
-                        payload_hash,
-                        uri,
-                        expires_epoch,
-                    )?
-                }
-
-                WalletCmd::AttestSubmit {
-                    privkey,
-                    mut input,
-                    auto_input,
-                    min_input,
-                    datadir: _,
-                    fee,
-                    change,
-                    proposal_id,
-                    score,
-                    confidence,
-                    rpc_url,
-                } => {
-                    if auto_input {
-                        if !input.is_empty() {
-                            anyhow::bail!("--auto-input cannot be combined with --input");
-                        }
-                        let picked = wallet_pick_input("cs.db", &privkey, min_input, false)?;
-                        input.push(picked);
-                    }
-
-                    wallet_attest_submit(
-                        &rpc_url,
-                        &privkey,
-                        input,
-                        fee,
-                        change,
-                        proposal_id,
-                        score,
-                        confidence,
-                    )?
-                }
+                let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                input.push(picked);
             }
 
-            Ok(())
+            wallet_propose(
+                &privkey,
+                input,
+                fee,
+                change,
+                domain,
+                payload_hash,
+                uri,
+                expires_epoch,
+            )?
         }
+
+        WalletCmd::AttestBuild {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            fee,
+            change,
+            proposal_id,
+            score,
+            confidence,
+        } => {
+            if auto_input {
+                if !input.is_empty() {
+                    anyhow::bail!("--auto-input cannot be combined with --input");
+                }
+                let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                input.push(picked);
+            }
+
+            wallet_attest(&privkey, input, fee, change, proposal_id, score, confidence)?
+        }
+
+        WalletCmd::Propose {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            fee,
+            change,
+            domain,
+            payload_hash,
+            uri,
+            expires_epoch,
+            rpc_url,
+        } => {
+            if auto_input {
+                if !input.is_empty() {
+                    anyhow::bail!("--auto-input cannot be combined with --input");
+                }
+                let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                input.push(picked);
+            }
+
+            wallet_propose_submit(
+                &rpc_url,
+                &privkey,
+                input,
+                fee,
+                change,
+                domain,
+                payload_hash,
+                uri,
+                expires_epoch,
+            )?
+        }
+
+        WalletCmd::Attest {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            fee,
+            change,
+            proposal_id,
+            score,
+            confidence,
+            rpc_url,
+        } => {
+            if auto_input {
+                if !input.is_empty() {
+                    anyhow::bail!("--auto-input cannot be combined with --input");
+                }
+                let picked = wallet_pick_input(&datadir, &privkey, min_input, false)?;
+                input.push(picked);
+            }
+
+            wallet_attest_submit(
+                &rpc_url,
+                &privkey,
+                input,
+                fee,
+                change,
+                proposal_id,
+                score,
+                confidence,
+            )?
+        }
+    }
+
+    Ok(())
+}
 
         Commands::Genesis { out, burn_addr20 } => {
             let s = burn_addr20.strip_prefix("0x").unwrap_or(&burn_addr20);
