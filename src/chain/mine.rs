@@ -409,7 +409,9 @@ let mut _epoch = epoch_of(height);
             }
 
             // Prevent mining empty/stale blocks when txs arrive mid-mine
-            if !mempool.is_empty() && included_ids.is_empty() {
+
+if mempool.len() > 0 && included_ids.is_empty() {
+
                 let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
                 txs = built.0;
                 included_ids = built.1;
