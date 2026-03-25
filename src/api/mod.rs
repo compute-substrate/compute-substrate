@@ -91,6 +91,7 @@ pub struct TxSubmitResp {
     pub ok: bool,
     pub txid: String,
     pub mempool_len: usize,
+    pub err: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1320,21 +1321,71 @@ async fn tx_submit(State(st): State<ApiState>, Json(req): Json<TxSubmitReq>) -> 
     let id = txid(&req.tx);
     let txid_hex = format!("0x{}", hex::encode(id));
 
+
+
+
     // Single source of truth for mempool acceptance:
     // - validates structure + sigs + fee floors
     // - ensures inputs exist in current canonical UTXO set (so it can mine "now")
     // - prevents in-mempool double-spends
-    let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
-        Ok(true) => true,
-        Ok(false) => false, // already present OR conflicts with current mempool spends
-        Err(_) => {
-            return Json(TxSubmitResp {
-                ok: false,
-                txid: txid_hex,
-                mempool_len: st.mempool.len(),
-            });
+
+let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
+    Ok(true) => {
+        if let Some(first_inp) = req.tx.inputs.first() {
+            println!(
+                "[tx_submit] ACCEPT txid={} first_input=0x{}:{}",
+                txid_hex,
+                hex::encode(first_inp.prevout.txid),
+                first_inp.prevout.vout
+            );
+        } else {
+            println!("[tx_submit] ACCEPT txid={} no-inputs", txid_hex);
         }
-    };
+
+        if let AppPayload::Propose { domain, .. } = &req.tx.app {
+            println!("[tx_submit] app=Propose domain={}", domain);
+        }
+        if let AppPayload::Attest { proposal_id, .. } = &req.tx.app {
+            println!(
+                "[tx_submit] app=Attest proposal_id=0x{}",
+                hex::encode(proposal_id)
+            );
+        }
+
+        if let Err(e) = st.tx_gossip.send(GossipTxEvent { tx: req.tx }) {
+            println!("[tx_submit] gossip send failed for {}: {}", txid_hex, e);
+        }
+
+        return Json(TxSubmitResp {
+            ok: true,
+            txid: txid_hex,
+            mempool_len: st.mempool.len(),
+            err: None,
+        });
+    }
+    Ok(false) => {
+        println!("[tx_submit] REJECT txid={} reason=already-present-or-conflict", txid_hex);
+        return Json(TxSubmitResp {
+            ok: false,
+            txid: txid_hex,
+            mempool_len: st.mempool.len(),
+            err: Some("already present or mempool conflict".to_string()),
+        });
+    }
+    Err(e) => {
+        println!("[tx_submit] REJECT txid={} err={}", txid_hex, e);
+        return Json(TxSubmitResp {
+            ok: false,
+            txid: txid_hex,
+            mempool_len: st.mempool.len(),
+            err: Some(e.to_string()),
+        });
+    }
+};
+
+
+
+
 
     if inserted {
         let _ = st.tx_gossip.send(GossipTxEvent { tx: req.tx });
