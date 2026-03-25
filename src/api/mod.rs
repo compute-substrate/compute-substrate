@@ -1076,8 +1076,8 @@ async fn window_domain(Path(domain): Path<String>, State(st): State<ApiState>) -
         .unwrap()
         .unwrap_or_else(|| zero_hidx(tip));
 
-    let epoch = crate::state::app::current_epoch(hi.height);
-let rows = get_topk(&st.db, epoch, &domain).unwrap_or_default();
+let epoch = crate::state::app_state::epoch_of(hi.height);
+    let rows = get_topk(&st.db, epoch, &domain).unwrap_or_default();
     let mut top: Vec<serde_json::Value> = vec![];
     for (pid, score) in rows {
         let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else {
@@ -1115,7 +1115,7 @@ async fn top_current(
         .unwrap()
         .unwrap_or_else(|| zero_hidx(tip));
 
-    let epoch = crate::state::app::current_epoch(hi.height);
+let epoch = crate::state::app_state::epoch_of(hi.height);
     top_for_epoch_impl(&st, domain, epoch)
 }
 
@@ -1164,7 +1164,7 @@ let Some(prop) = get_proposal(&st.db, &pid).unwrap() else {
     Json(serde_json::json!({
         "ok": true,
         "proposal": {
-            "proposal_id": format!("0x{}", hex::encode(pid)),
+            "proposal_id": prop.id,
             "domain": prop.domain,
             "payload_hash": format!("0x{}", hex::encode(prop.payload_hash)),
             "uri": prop.uri,
