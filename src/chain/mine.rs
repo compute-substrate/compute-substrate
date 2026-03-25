@@ -408,6 +408,22 @@ let mut _epoch = epoch_of(height);
                 );
             }
 
+            // Prevent mining empty/stale blocks when txs arrive mid-mine
+            if !mempool.is_empty() && included_ids.is_empty() {
+                let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
+                txs = built.0;
+                included_ids = built.1;
+
+                hdr.merkle = merkle_root(&txs);
+                hdr.nonce = 0;
+
+                println!(
+                    "[mine] template refresh (mempool update): height={} txs={}",
+                    height,
+                    included_ids.len()
+                );
+            }
+
 // Even if tip didn't change, refresh time so timestamps reflect real solve time.
 // Without this, LWMA thinks blocks are "fast" (small dt) and ramps difficulty upward.
 if let Some(p) = parent_hi_opt.as_ref() {
