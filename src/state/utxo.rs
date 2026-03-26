@@ -145,6 +145,14 @@ pub fn validate_tx_for_mempool(db: &Stores, tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+fn app_phase(tx: &Transaction) -> u8 {
+    match &tx.app {
+        AppPayload::Propose { .. } => 0,
+        AppPayload::Attest { .. } => 1,
+        AppPayload::None => 2,
+    }
+}
+
 /// Validate + apply a block.
 /// `height` must be the height of this block in the canonical chain when applied.
 pub fn validate_and_apply_block(
@@ -206,8 +214,17 @@ pub fn validate_and_apply_block(
         app_undo: vec![],
     };
 
+
     // Apply non-coinbase txs first (fees), then coinbase.
+    // UTXO spends/creates must still follow original tx order exactly.
+    // But app payloads must apply in deterministic semantic phases:
+    //     1) Propose
+    //     2) Attest
+    // This allows same-block Attest(tx2) to see Propose(tx1) even when both are mined together.
     let mut total_fees: u64 = 0;
+
+    // Cache canonical per-tx metadata while preserving original block order for UTXO application.
+    let mut applied_txs: Vec<(Transaction, Hash32, u64)> = Vec::with_capacity(block.txs.len().saturating_sub(1));
 
     for (i, tx) in block.txs.iter().enumerate() {
         if i == 0 {
@@ -261,9 +278,31 @@ pub fn validate_and_apply_block(
             undo.created.push(op);
         }
 
-        // App state (CONSENSUS)
-        let app_undos = apply_app_tx(db, tx, height, &txh, fee)?;
-        undo.app_undo.extend(app_undos);
+        applied_txs.push((tx.clone(), txh, fee));
+    }
+
+    // Phase 1: proposals
+    for (tx, txh, fee) in applied_txs.iter() {
+        if app_phase(tx) == 0 {
+            let app_undos = apply_app_tx(db, tx, height, txh, *fee)?;
+            undo.app_undo.extend(app_undos);
+        }
+    }
+
+    // Phase 2: attestations
+    for (tx, txh, fee) in applied_txs.iter() {
+        if app_phase(tx) == 1 {
+            let app_undos = apply_app_tx(db, tx, height, txh, *fee)?;
+            undo.app_undo.extend(app_undos);
+        }
+    }
+
+    // Phase 3: AppPayload::None (normally no-op, but keep deterministic structure explicit)
+    for (tx, txh, fee) in applied_txs.iter() {
+        if app_phase(tx) == 2 {
+            let app_undos = apply_app_tx(db, tx, height, txh, *fee)?;
+            undo.app_undo.extend(app_undos);
+        }
     }
 
     // Coinbase must equal reward(height) + fees.
