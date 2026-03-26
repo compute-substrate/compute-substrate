@@ -371,8 +371,7 @@ async fn oracle(State(st): State<ApiState>) -> Json<OracleResp> {
         .unwrap()
         .unwrap_or_else(|| zero_hidx(tip));
 
-    // Prefer the actual tip block header time if we can load the block.
-    // Fallback to hi.time if not.
+    // Prefer actual tip block header time; fall back to header index time.
     let last_block_time = if let Some(v) = st.db.blocks.get(k_block(&tip)).unwrap() {
         match c().deserialize::<Block>(&v) {
             Ok(blk) => blk.header.time,
@@ -384,16 +383,17 @@ async fn oracle(State(st): State<ApiState>) -> Json<OracleResp> {
 
     let last_block_age_s = now.saturating_sub(last_block_time);
 
-    // For 60s target:
-    // healthy   <= 3*T = 180s
-    // advancing <= 6*T = 360s
+    // 60s target:
+    // healthy   <= 180s
+    // advancing <= 360s
     let healthy_max = 3 * TARGET_BLOCK_SECS;
     let advancing_max = 6 * TARGET_BLOCK_SECS;
 
     let healthy = last_block_age_s <= healthy_max;
     let advancing = last_block_age_s <= advancing_max;
-    let connected = peer_count >= 3;
+
     let peer_count = st.connected_peers.load(Ordering::Relaxed);
+    let connected = peer_count >= 3;
 
     Json(OracleResp {
         ok: true,
