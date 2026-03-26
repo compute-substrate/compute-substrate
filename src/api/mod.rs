@@ -66,6 +66,19 @@ pub peer_count: usize,
 }
 
 #[derive(Serialize)]
+struct OracleResp {
+    pub ok: bool,
+    pub tip: String,
+    pub height: u64,
+    pub chainwork: String,
+    pub peer_count: usize,
+    pub connected: bool,
+    pub last_block_age_s: u64,
+    pub healthy: bool,
+    pub advancing: bool,
+}
+
+#[derive(Serialize)]
 pub struct DomainItem {
     pub domain: String,
     pub proposals: u64,
@@ -263,8 +276,9 @@ connected_peers,
 
     Router::new()
         .route("/health", get(health))
-  .route("/peers", get(peers))
+        .route("/peers", get(peers))
         .route("/metrics", get(metrics))
+        .route("/oracle", get(oracle))
         .route("/tip", get(tip))
         .route("/mempool", get(mempool_info))
         // Explorer-grade read endpoints:
@@ -340,6 +354,57 @@ peer_count: st.connected_peers.load(Ordering::Relaxed),
         mempool_bytes: s.total_bytes,
         mempool_min_feerate_ppm: s.min_feerate_ppm,
         mempool_max_feerate_ppm: s.max_feerate_ppm,
+    })
+}
+
+async fn oracle(State(st): State<ApiState>) -> Json<OracleResp> {
+    use crate::params::TARGET_BLOCK_SECS;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    // Prefer the actual tip block header time if we can load the block.
+    // Fallback to hi.time if not.
+    let last_block_time = if let Some(v) = st.db.blocks.get(k_block(&tip)).unwrap() {
+        match c().deserialize::<Block>(&v) {
+            Ok(blk) => blk.header.time,
+            Err(_) => hi.time,
+        }
+    } else {
+        hi.time
+    };
+
+    let last_block_age_s = now.saturating_sub(last_block_time);
+
+    // For 60s target:
+    // healthy   <= 3*T = 180s
+    // advancing <= 6*T = 360s
+    let healthy_max = 3 * TARGET_BLOCK_SECS;
+    let advancing_max = 6 * TARGET_BLOCK_SECS;
+
+    let healthy = last_block_age_s <= healthy_max;
+    let advancing = last_block_age_s <= advancing_max;
+    let connected = peer_count >= 3;
+    let peer_count = st.connected_peers.load(Ordering::Relaxed);
+
+    Json(OracleResp {
+        ok: true,
+        tip: format!("0x{}", hex::encode(tip)),
+        height: hi.height,
+        chainwork: hi.chainwork.to_string(),
+        peer_count,
+        connected,
+        last_block_age_s,
+        healthy,
+        advancing,
     })
 }
 
