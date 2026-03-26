@@ -13,7 +13,8 @@ use crate::state::db::{
     del_utxo, del_utxo_meta, get_utxo, get_utxo_meta, k_undo, put_utxo, put_utxo_meta, Stores,
     UtxoMeta,
 };
-use crate::types::{AppPayload, Block, Hash20, OutPoint, Transaction, TxOut};
+use crate::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxOut};
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UndoLog {
