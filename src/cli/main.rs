@@ -31,6 +31,18 @@ pub enum Commands {
         burn_addr20: String,
     },
 
+    /// Chain inspection helpers
+    Chain {
+        #[command(subcommand)]
+        c: ChainCmd,
+    },
+
+    /// Database inspection helpers
+    Db {
+        #[command(subcommand)]
+        d: DbCmd,
+    },
+
     /// Run a node or miner
     Node {
         /// Database directory
@@ -343,6 +355,26 @@ pub enum WalletCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ChainCmd {
+    /// Sum block rewards from height 0..=height
+    ExpectedSupply {
+        /// Inclusive chain height
+        #[arg(long)]
+        height: u64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DbCmd {
+    /// Sum all current UTXO values in a datadir
+    SumUtxos {
+        /// Database directory
+        #[arg(long, default_value = "cs.db")]
+        datadir: String,
+    },
+}
+
 /// Keep mempool consistent with the current canonical UTXO set.
 fn prune_mempool(db: &Arc<Stores>, mempool: &Arc<crate::net::mempool::Mempool>) {
     let n = mempool.prune(db.as_ref());
@@ -360,6 +392,43 @@ pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
 
     match cmd.cmd {
+
+        Commands::Chain { c } => {
+            match c {
+                ChainCmd::ExpectedSupply { height } => {
+                    let mut total: u128 = 0;
+                    for h in 0..=height {
+                        total = total
+                            .checked_add(crate::params::block_reward(h) as u128)
+                            .ok_or_else(|| anyhow::anyhow!("expected supply overflow"))?;
+                    }
+                    println!("{}", total);
+                    Ok(())
+                }
+            }
+        }
+
+        Commands::Db { d } => {
+            match d {
+                DbCmd::SumUtxos { datadir } => {
+                    let db = Stores::open(&datadir)?;
+                    let c = crate::codec::consensus_bincode();
+
+                    let mut total: u128 = 0;
+
+                    for item in db.utxo.iter() {
+                        let (_k, v) = item?;
+                        let out: crate::types::TxOut = c.deserialize(&v)?;
+                        total = total
+                            .checked_add(out.value as u128)
+                            .ok_or_else(|| anyhow::anyhow!("utxo sum overflow"))?;
+                    }
+
+                    println!("{}", total);
+                    Ok(())
+                }
+            }
+        }
 
 Commands::Wallet { w } => {
     use crate::cli::wallet::*;
