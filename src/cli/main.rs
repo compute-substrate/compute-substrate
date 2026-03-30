@@ -1,5 +1,5 @@
 // src/cli/main.rs
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand};
 use std::sync::Arc;
 
@@ -41,6 +41,143 @@ pub enum Commands {
     Db {
         #[command(subcommand)]
         d: DbCmd,
+    },
+
+    /// Build, sign, and submit a proposal transaction (easy path)
+    Propose {
+        /// 32-byte private key hex; falls back to wallet config if omitted
+        #[arg(long)]
+        privkey: Option<String>,
+
+        /// Input triple: <txid>:<vout>:<value>
+        #[arg(long, action = ArgAction::Append)]
+        input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet if no --input is provided
+        #[arg(long)]
+        auto_input: bool,
+
+        /// Minimum value when using auto input; defaults to fee when omitted
+        #[arg(long)]
+        min_input: Option<u64>,
+
+        /// Database directory for auto-input; falls back to wallet config if omitted
+        #[arg(long)]
+        datadir: Option<String>,
+
+        /// Fee in native units
+        #[arg(long)]
+        fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20 or wallet config
+        #[arg(long)]
+        change: Option<String>,
+
+        /// Proposal domain
+        #[arg(long)]
+        domain: String,
+
+        /// Raw payload text; if provided, payload_hash is computed automatically
+        #[arg(long)]
+        payload: Option<String>,
+
+        /// 32-byte payload hash
+        #[arg(long)]
+        payload_hash: Option<String>,
+
+        /// Payload URI; defaults to payload text if --payload is used and --uri is omitted
+        #[arg(long)]
+        uri: Option<String>,
+
+        /// Expiry epoch; if omitted, defaults to current_epoch + 1
+        #[arg(long)]
+        expires_epoch: Option<u64>,
+
+        /// Node RPC base URL; falls back to wallet config if omitted
+        #[arg(long)]
+        rpc_url: Option<String>,
+    },
+
+    /// Build, sign, and submit an attestation transaction (easy path)
+    Attest {
+        /// 32-byte private key hex; falls back to wallet config if omitted
+        #[arg(long)]
+        privkey: Option<String>,
+
+        /// Input triple: <txid>:<vout>:<value>
+        #[arg(long, action = ArgAction::Append)]
+        input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet if no --input is provided
+        #[arg(long)]
+        auto_input: bool,
+
+        /// Minimum value when using auto input; defaults to fee when omitted
+        #[arg(long)]
+        min_input: Option<u64>,
+
+        /// Database directory for auto-input; falls back to wallet config if omitted
+        #[arg(long)]
+        datadir: Option<String>,
+
+        /// Fee in native units
+        #[arg(long)]
+        fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20 or wallet config
+        #[arg(long)]
+        change: Option<String>,
+
+        /// Proposal txid / proposal id
+        #[arg(long)]
+        proposal_id: String,
+
+        /// Attestation score
+        #[arg(long)]
+        score: u32,
+
+        /// Attestation confidence
+        #[arg(long)]
+        confidence: u32,
+
+        /// Node RPC base URL; falls back to wallet config if omitted
+        #[arg(long)]
+        rpc_url: Option<String>,
+    },
+
+    /// Build and sign a plain spend transaction (easy path)
+    Spend {
+        /// 32-byte private key hex; falls back to wallet config if omitted
+        #[arg(long)]
+        privkey: Option<String>,
+
+        /// Input triple: <txid>:<vout>:<value>
+        #[arg(long, action = ArgAction::Append)]
+        input: Vec<String>,
+
+        /// Auto-pick one local input from the wallet if no --input is provided
+        #[arg(long)]
+        auto_input: bool,
+
+        /// Minimum value when using auto input
+        #[arg(long)]
+        min_input: Option<u64>,
+
+        /// Database directory for auto-input; falls back to wallet config if omitted
+        #[arg(long)]
+        datadir: Option<String>,
+
+        /// Output pair: <addr20>:<value>
+        #[arg(long, action = ArgAction::Append)]
+        output: Vec<String>,
+
+        /// Fee in native units
+        #[arg(long)]
+        fee: u64,
+
+        /// Optional change addr20; defaults to sender addr20 or wallet config
+        #[arg(long)]
+        change: Option<String>,
     },
 
     /// Run a node or miner
@@ -96,6 +233,36 @@ pub enum WalletCmd {
         #[arg(long)]
         privkey: String,
     },
+
+    /// Initialize wallet defaults with a private key
+    Init {
+        /// 32-byte private key hex
+        #[arg(long)]
+        privkey: String,
+
+        /// Optional default RPC URL
+        #[arg(long)]
+        rpc_url: Option<String>,
+
+        /// Optional default datadir
+        #[arg(long)]
+        datadir: Option<String>,
+    },
+
+    /// Set the default RPC URL
+    SetRpc {
+        #[arg(long)]
+        rpc_url: String,
+    },
+
+    /// Set the default datadir
+    SetDatadir {
+        #[arg(long)]
+        datadir: String,
+    },
+
+    /// Show current wallet config
+    Config,
 
     /// Find a spendable input in the local UTXO set
     Input {
@@ -388,8 +555,76 @@ fn prune_mempool(db: &Arc<Stores>, mempool: &Arc<crate::net::mempool::Mempool>) 
     }
 }
 
+fn require_value<T>(v: Option<T>, msg: &str) -> Result<T> {
+    v.ok_or_else(|| anyhow::anyhow!(msg))
+}
+
+fn resolve_rpc_url(
+    cli: Option<String>,
+    cfg: &crate::cli::config::CliConfig,
+) -> String {
+    cli.or_else(|| cfg.default_rpc_url.clone())
+        .unwrap_or_else(|| "http://127.0.0.1:8789".to_string())
+}
+
+fn resolve_datadir(
+    cli: Option<String>,
+    cfg: &crate::cli::config::CliConfig,
+) -> String {
+    cli.or_else(|| cfg.default_datadir.clone())
+        .unwrap_or_else(|| "cs.db".to_string())
+}
+
+fn resolve_privkey(
+    cli: Option<String>,
+    cfg: &crate::cli::config::CliConfig,
+) -> Result<String> {
+    cli.or_else(|| cfg.default_privkey.clone()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no private key provided and no default configured; run `csd wallet init --privkey ...` or pass --privkey"
+        )
+    })
+}
+
+fn resolve_change(
+    cli: Option<String>,
+    cfg: &crate::cli::config::CliConfig,
+) -> Option<String> {
+    cli.or_else(|| cfg.default_change_addr20.clone())
+}
+
+fn compute_payload_hash_hex(payload: &str) -> String {
+    let h = crate::crypto::sha256d(payload.as_bytes());
+    format!("0x{}", hex::encode(h))
+}
+
+fn current_epoch_from_rpc(rpc_url: &str) -> Result<u64> {
+    #[derive(serde::Deserialize)]
+    struct TipResp {
+        height: u64,
+    }
+
+    let url = format!("{}/tip", rpc_url.trim_end_matches('/'));
+    let resp = ureq::get(&url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed GET {}: {}", url, e))?;
+
+    let mut body = resp.into_body();
+    let bytes = body
+        .read_to_vec()
+        .map_err(|e| anyhow::anyhow!("failed reading {}: {}", url, e))?;
+
+    let tip: TipResp = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed parsing {} JSON: {}", url, e))?;
+
+    Ok(tip.height / crate::params::EPOCH_LEN)
+}
+
 pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
+
+    let cfg = crate::cli::config::load_config()
+        .context("failed to load CLI config")?;
 
     match cmd.cmd {
 
@@ -430,11 +665,193 @@ pub async fn run() -> Result<()> {
             }
         }
 
+        Commands::Spend {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            output,
+            fee,
+            change,
+        } => {
+            use crate::cli::wallet::*;
+
+            let privkey = resolve_privkey(privkey, &cfg)?;
+            let datadir = resolve_datadir(datadir, &cfg);
+            let change = resolve_change(change, &cfg);
+
+            if input.is_empty() || auto_input {
+                if !input.is_empty() && auto_input {
+                    anyhow::bail!("--auto-input cannot be combined with explicit --input");
+                }
+                let min_needed = min_input.unwrap_or(fee);
+                let picked = wallet_pick_input(&datadir, &privkey, min_needed, false)?;
+                input.push(picked);
+            }
+
+            wallet_spend(&privkey, input, output, fee, change)?;
+            Ok(())
+        }
+
+        Commands::Propose {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            fee,
+            change,
+            domain,
+            payload,
+            payload_hash,
+            uri,
+            expires_epoch,
+            rpc_url,
+        } => {
+            use crate::cli::wallet::*;
+
+            let privkey = resolve_privkey(privkey, &cfg)?;
+            let rpc_url = resolve_rpc_url(rpc_url, &cfg);
+            let datadir = resolve_datadir(datadir, &cfg);
+            let change = resolve_change(change, &cfg);
+
+            if input.is_empty() || auto_input {
+                if !input.is_empty() && auto_input {
+                    anyhow::bail!("--auto-input cannot be combined with explicit --input");
+                }
+                let min_needed = min_input.unwrap_or(fee);
+                let picked = wallet_pick_input(&datadir, &privkey, min_needed, false)?;
+                input.push(picked);
+            }
+
+            let payload_hash = match (payload.as_deref(), payload_hash.as_deref()) {
+                (Some(p), None) => compute_payload_hash_hex(p),
+                (None, Some(h)) => h.to_string(),
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("provide either --payload or --payload-hash, not both")
+                }
+                (None, None) => {
+                    anyhow::bail!("missing payload; provide --payload or --payload-hash")
+                }
+            };
+
+            let uri = match (uri, payload) {
+                (Some(u), _) => u,
+                (None, Some(p)) => p,
+                (None, None) => anyhow::bail!("missing uri; provide --uri or use --payload"),
+            };
+
+            let expires_epoch = match expires_epoch {
+                Some(e) => e,
+                None => current_epoch_from_rpc(&rpc_url)? + 1,
+            };
+
+            wallet_propose_submit(
+                &rpc_url,
+                &privkey,
+                input,
+                fee,
+                change,
+                domain,
+                payload_hash,
+                uri,
+                expires_epoch,
+            )?;
+            Ok(())
+        }
+
+
+        Commands::Attest {
+            privkey,
+            mut input,
+            auto_input,
+            min_input,
+            datadir,
+            fee,
+            change,
+            proposal_id,
+            score,
+            confidence,
+            rpc_url,
+        } => {
+            use crate::cli::wallet::*;
+
+            let privkey = resolve_privkey(privkey, &cfg)?;
+            let rpc_url = resolve_rpc_url(rpc_url, &cfg);
+            let datadir = resolve_datadir(datadir, &cfg);
+            let change = resolve_change(change, &cfg);
+
+            if input.is_empty() || auto_input {
+                if !input.is_empty() && auto_input {
+                    anyhow::bail!("--auto-input cannot be combined with explicit --input");
+                }
+                let min_needed = min_input.unwrap_or(fee);
+                let picked = wallet_pick_input(&datadir, &privkey, min_needed, false)?;
+                input.push(picked);
+            }
+
+            wallet_attest_submit(
+                &rpc_url,
+                &privkey,
+                input,
+                fee,
+                change,
+                proposal_id,
+                score,
+                confidence,
+            )?;
+            Ok(())
+        }
+
 Commands::Wallet { w } => {
     use crate::cli::wallet::*;
 
     match w {
         WalletCmd::New => wallet_new()?,
+
+        WalletCmd::Init {
+            privkey,
+            rpc_url,
+            datadir,
+        } => {
+            let mut next = cfg.clone();
+            next.default_privkey = Some(privkey);
+            if let Some(r) = rpc_url {
+                next.default_rpc_url = Some(r);
+            }
+            if let Some(d) = datadir {
+                next.default_datadir = Some(d);
+            }
+            crate::cli::config::save_config(&next)?;
+            println!("saved wallet config to {}", crate::cli::config::config_path()?.display());
+            Ok(())
+        }
+
+        WalletCmd::SetRpc { rpc_url } => {
+            let mut next = cfg.clone();
+            next.default_rpc_url = Some(rpc_url);
+            crate::cli::config::save_config(&next)?;
+            println!("updated wallet config");
+            Ok(())
+        }
+
+        WalletCmd::SetDatadir { datadir } => {
+            let mut next = cfg.clone();
+            next.default_datadir = Some(datadir);
+            crate::cli::config::save_config(&next)?;
+            println!("updated wallet config");
+            Ok(())
+        }
+
+        WalletCmd::Config => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cfg)
+                    .context("failed to serialize config")?
+            );
+            Ok(())
+        }
 
         WalletCmd::Recover { privkey } => wallet_addr(&privkey)?,
 
