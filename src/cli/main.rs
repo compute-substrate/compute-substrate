@@ -619,6 +619,100 @@ fn current_epoch_from_rpc(rpc_url: &str) -> Result<u64> {
     Ok(tip.height / crate::params::EPOCH_LEN)
 }
 
+fn privkey_to_addr20_hex(privkey: &str) -> Result<String> {
+    let s = privkey.strip_prefix("0x").unwrap_or(privkey);
+    let sk_bytes = hex::decode(s)
+        .map_err(|e| anyhow::anyhow!("invalid privkey hex: {}", e))?;
+    if sk_bytes.len() != 32 {
+        anyhow::bail!("privkey must be 32 bytes");
+    }
+
+    let mut sk = [0u8; 32];
+    sk.copy_from_slice(&sk_bytes);
+
+    let secp = secp256k1::Secp256k1::new();
+    let secret = secp256k1::SecretKey::from_byte_array(sk)
+        .map_err(|e| anyhow::anyhow!("invalid secp256k1 privkey: {}", e))?;
+    let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret);
+    let pub33 = pubkey.serialize();
+
+    let addr20 = crate::crypto::hash160(&pub33);
+    Ok(format!("0x{}", hex::encode(addr20)))
+}
+
+fn normalize_hex_0x(s: &str) -> String {
+    if s.starts_with("0x") || s.starts_with("0X") {
+        s.to_ascii_lowercase()
+    } else {
+        format!("0x{}", s.to_ascii_lowercase())
+    }
+}
+
+fn pick_input_from_rpc(
+    rpc_url: &str,
+    addr20: &str,
+    min_value: u64,
+    smallest: bool,
+) -> Result<String> {
+    #[derive(serde::Deserialize, Clone)]
+    struct RpcUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct UtxosResp {
+        utxos: Vec<RpcUtxo>,
+    }
+
+    let addr20 = normalize_hex_0x(addr20);
+    let url = format!(
+        "{}/utxos/{}",
+        rpc_url.trim_end_matches('/'),
+        addr20
+    );
+
+    let resp = ureq::get(&url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed GET {}: {}", url, e))?;
+
+    let body = resp
+        .into_string()
+        .map_err(|e| anyhow::anyhow!("failed reading {}: {}", url, e))?;
+
+    let parsed: UtxosResp = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("failed parsing {} JSON: {}", url, e))?;
+
+    let mut candidates: Vec<RpcUtxo> = parsed
+        .utxos
+        .into_iter()
+        .filter(|u| u.value >= min_value)
+        .collect();
+
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "no spendable input found via RPC for addr20={} min={}",
+            addr20,
+            min_value
+        );
+    }
+
+    if smallest {
+        candidates.sort_by_key(|u| u.value);
+    } else {
+        candidates.sort_by(|a, b| b.value.cmp(&a.value));
+    }
+
+    let picked = &candidates[0];
+    Ok(format!(
+        "{}:{}:{}",
+        normalize_hex_0x(&picked.txid),
+        picked.vout,
+        picked.value
+    ))
+}
+
 pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
 
@@ -677,7 +771,9 @@ pub async fn run() -> Result<()> {
             use crate::cli::wallet::*;
 
             let privkey = resolve_privkey(privkey, &cfg)?;
-            let datadir = resolve_datadir(datadir, &cfg);
+
+            let rpc_url = resolve_rpc_url(None, &cfg);
+            let _datadir = resolve_datadir(datadir, &cfg);
             let change = resolve_change(change, &cfg);
 
             if input.is_empty() || auto_input {
@@ -685,7 +781,8 @@ pub async fn run() -> Result<()> {
                     anyhow::bail!("--auto-input cannot be combined with explicit --input");
                 }
                 let min_needed = min_input.unwrap_or(fee);
-                let picked = wallet_pick_input(&datadir, &privkey, min_needed, false)?;
+                let addr20 = privkey_to_addr20_hex(&privkey)?;
+                let picked = pick_input_from_rpc(&rpc_url, &addr20, min_needed, false)?;
                 input.push(picked);
             }
 
@@ -711,8 +808,9 @@ pub async fn run() -> Result<()> {
             use crate::cli::wallet::*;
 
             let privkey = resolve_privkey(privkey, &cfg)?;
+
             let rpc_url = resolve_rpc_url(rpc_url, &cfg);
-            let datadir = resolve_datadir(datadir, &cfg);
+            let _datadir = resolve_datadir(datadir, &cfg);
             let change = resolve_change(change, &cfg);
 
             if input.is_empty() || auto_input {
@@ -720,7 +818,8 @@ pub async fn run() -> Result<()> {
                     anyhow::bail!("--auto-input cannot be combined with explicit --input");
                 }
                 let min_needed = min_input.unwrap_or(fee);
-                let picked = wallet_pick_input(&datadir, &privkey, min_needed, false)?;
+                let addr20 = privkey_to_addr20_hex(&privkey)?;
+                let picked = pick_input_from_rpc(&rpc_url, &addr20, min_needed, false)?;
                 input.push(picked);
             }
 
@@ -777,8 +876,9 @@ pub async fn run() -> Result<()> {
             use crate::cli::wallet::*;
 
             let privkey = resolve_privkey(privkey, &cfg)?;
+
             let rpc_url = resolve_rpc_url(rpc_url, &cfg);
-            let datadir = resolve_datadir(datadir, &cfg);
+            let _datadir = resolve_datadir(datadir, &cfg);
             let change = resolve_change(change, &cfg);
 
             if input.is_empty() || auto_input {
@@ -786,7 +886,8 @@ pub async fn run() -> Result<()> {
                     anyhow::bail!("--auto-input cannot be combined with explicit --input");
                 }
                 let min_needed = min_input.unwrap_or(fee);
-                let picked = wallet_pick_input(&datadir, &privkey, min_needed, false)?;
+                let addr20 = privkey_to_addr20_hex(&privkey)?;
+                let picked = pick_input_from_rpc(&rpc_url, &addr20, min_needed, false)?;
                 input.push(picked);
             }
 
@@ -859,13 +960,24 @@ Commands::Wallet { w } => {
             datadir,
             min,
             smallest,
-        } => wallet_input(
-            &datadir,
-            privkey.as_deref(),
-            address.as_deref(),
-            min,
-            smallest,
-        )?,
+        } => {
+            let datadir = if datadir == "cs.db" {
+                resolve_datadir(None, &cfg)
+            } else {
+                datadir
+            };
+
+            let privkey_owned = privkey.or_else(|| cfg.default_privkey.clone());
+            let address_owned = address.or_else(|| cfg.default_change_addr20.clone());
+
+            wallet_input(
+                &datadir,
+                privkey_owned.as_deref(),
+                address_owned.as_deref(),
+                min,
+                smallest,
+            )?
+        },
 
         WalletCmd::Balance { address, datadir } => wallet_balance(&datadir, &address)?,
 
@@ -1070,12 +1182,9 @@ Commands::Wallet { w } => {
                 db.flush_meta().expect("db.flush_meta failed");
             }
 
-            // ✅ SAFE PLACE to build explorer index:
-            // after recovery, outside consensus apply/undo loops.
             #[cfg(feature = "explorer-index")]
             {
-                // This can take some time on large chains; OK at startup.
-                crate::state::tx_index::rebuild_canonical_index_from_tip(db.as_ref())
+       crate::state::tx_index::rebuild_canonical_index_from_tip(db.as_ref())
                     .expect("tx index rebuild failed");
             }
 
