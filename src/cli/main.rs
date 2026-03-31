@@ -556,7 +556,7 @@ fn prune_mempool(db: &Arc<Stores>, mempool: &Arc<crate::net::mempool::Mempool>) 
 }
 
 fn require_value<T>(v: Option<T>, msg: &str) -> Result<T> {
-    v.ok_or_else(|| anyhow::anyhow!(msg))
+    v.ok_or_else(|| anyhow::anyhow!("{}", msg))
 }
 
 fn resolve_rpc_url(
@@ -609,12 +609,11 @@ fn current_epoch_from_rpc(rpc_url: &str) -> Result<u64> {
         .call()
         .map_err(|e| anyhow::anyhow!("failed GET {}: {}", url, e))?;
 
-    let mut body = resp.into_body();
-    let bytes = body
-        .read_to_vec()
+    let body = resp
+        .into_string()
         .map_err(|e| anyhow::anyhow!("failed reading {}: {}", url, e))?;
 
-    let tip: TipResp = serde_json::from_slice(&bytes)
+    let tip: TipResp = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("failed parsing {} JSON: {}", url, e))?;
 
     Ok(tip.height / crate::params::EPOCH_LEN)
@@ -824,8 +823,10 @@ Commands::Wallet { w } => {
                 next.default_datadir = Some(d);
             }
             crate::cli::config::save_config(&next)?;
-            println!("saved wallet config to {}", crate::cli::config::config_path()?.display());
-            Ok(())
+            println!(
+                "saved wallet config to {}",
+                crate::cli::config::config_path()?.display()
+            );
         }
 
         WalletCmd::SetRpc { rpc_url } => {
@@ -833,7 +834,6 @@ Commands::Wallet { w } => {
             next.default_rpc_url = Some(rpc_url);
             crate::cli::config::save_config(&next)?;
             println!("updated wallet config");
-            Ok(())
         }
 
         WalletCmd::SetDatadir { datadir } => {
@@ -841,7 +841,6 @@ Commands::Wallet { w } => {
             next.default_datadir = Some(datadir);
             crate::cli::config::save_config(&next)?;
             println!("updated wallet config");
-            Ok(())
         }
 
         WalletCmd::Config => {
@@ -850,7 +849,6 @@ Commands::Wallet { w } => {
                 serde_json::to_string_pretty(&cfg)
                     .context("failed to serialize config")?
             );
-            Ok(())
         }
 
         WalletCmd::Recover { privkey } => wallet_addr(&privkey)?,
