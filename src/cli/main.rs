@@ -664,10 +664,13 @@ fn pick_input_from_rpc(
     }
 
     let addr20 = normalize_hex_0x(addr20);
+
     let url = format!(
-        "{}/utxos/{}",
+        "{}/utxos/{}?available=true&min_value={}&smallest={}&limit=1",
         rpc_url.trim_end_matches('/'),
-        addr20
+        addr20,
+        min_value,
+        if smallest { "true" } else { "false" },
     );
 
     let resp = ureq::get(&url)
@@ -681,27 +684,14 @@ fn pick_input_from_rpc(
     let parsed: UtxosResp = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("failed parsing {} JSON: {}", url, e))?;
 
-    let mut candidates: Vec<RpcUtxo> = parsed
-        .utxos
-        .into_iter()
-        .filter(|u| u.value >= min_value)
-        .collect();
-
-    if candidates.is_empty() {
+    let Some(picked) = parsed.utxos.first() else {
         anyhow::bail!(
             "no spendable input found via RPC for addr20={} min={}",
             addr20,
             min_value
         );
-    }
+    };
 
-    if smallest {
-        candidates.sort_by_key(|u| u.value);
-    } else {
-        candidates.sort_by(|a, b| b.value.cmp(&a.value));
-    }
-
-    let picked = &candidates[0];
     Ok(format!(
         "{}:{}:{}",
         normalize_hex_0x(&picked.txid),
