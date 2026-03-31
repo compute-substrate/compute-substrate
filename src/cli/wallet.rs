@@ -306,7 +306,8 @@ fn pick_input_from_db(
 
     best.ok_or_else(|| {
         anyhow::anyhow!(
-            "no spendable input found for addr20=0x{} min={}",
+            "no spendable input found for addr20=0x{} min={} in datadir=/path/here
+hint: pass --datadir or run `csd wallet set-datadir --datadir <path>`",
             hex::encode(addr20),
             min_value
         )
