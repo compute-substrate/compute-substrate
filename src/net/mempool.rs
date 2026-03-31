@@ -1,3 +1,5 @@
+//mempool.rs
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
@@ -106,6 +108,28 @@ impl Mempool {
 
     pub fn spent_len(&self) -> usize {
         self.inner.read().unwrap().spent.len()
+    }
+
+    pub fn has_spent_outpoint(&self, op: &OutPoint) -> bool {
+        self.inner.read().unwrap().spent.contains_key(op)
+    }
+
+    pub fn has_spent_outpoint_hex(&self, txid_hex: &str, vout: u32) -> bool {
+        let s = txid_hex.strip_prefix("0x").unwrap_or(txid_hex);
+        let bytes = match hex::decode(s) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        if bytes.len() != 32 {
+            return false;
+        }
+
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&bytes);
+
+        let op = OutPoint { txid, vout };
+        self.has_spent_outpoint(&op)
     }
 
     pub fn spent_outpoints(&self) -> HashSet<OutPoint> {
