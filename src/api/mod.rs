@@ -1,9 +1,11 @@
 // src/api/mod.rs
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -131,6 +133,14 @@ pub struct UtxosResp {
     pub addr20: String,
     pub count: usize,
     pub utxos: Vec<UtxoItem>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct UtxosQuery {
+    pub available: Option<bool>,
+    pub min_value: Option<u64>,
+    pub smallest: Option<bool>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -709,6 +719,7 @@ let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u3
 /// GET /utxos/:addr20
 async fn utxos_for_addr20(
     Path(addr20): Path<String>,
+    Query(q): Query<UtxosQuery>,
     State(st): State<ApiState>,
 ) -> Json<UtxosResp> {
     let a = match parse_addr20(&addr20) {
@@ -787,7 +798,23 @@ async fn utxos_for_addr20(
         });
     }
 
-    out.sort_by(|a, b| b.value.cmp(&a.value));
+    if q.available.unwrap_or(false) {
+        out.retain(|u| !st.mempool.has_spent_outpoint_hex(&u.txid, u.vout));
+    }
+
+    if let Some(min) = q.min_value {
+        out.retain(|u| u.value >= min);
+    }
+
+    if q.smallest.unwrap_or(false) {
+        out.sort_by_key(|u| u.value);
+    } else {
+        out.sort_by(|a, b| b.value.cmp(&a.value));
+    }
+
+    if let Some(limit) = q.limit {
+        out.truncate(limit);
+    }
 
     Json(UtxosResp {
         ok: true,
@@ -795,6 +822,7 @@ async fn utxos_for_addr20(
         count: out.len(),
         utxos: out,
     })
+
 }
 
 // ===========================
