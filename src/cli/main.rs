@@ -627,11 +627,8 @@ fn privkey_to_addr20_hex(privkey: &str) -> Result<String> {
         anyhow::bail!("privkey must be 32 bytes");
     }
 
-    let mut sk = [0u8; 32];
-    sk.copy_from_slice(&sk_bytes);
-
     let secp = secp256k1::Secp256k1::new();
-    let secret = secp256k1::SecretKey::from_byte_array(sk)
+    let secret = secp256k1::SecretKey::from_slice(&sk_bytes)
         .map_err(|e| anyhow::anyhow!("invalid secp256k1 privkey: {}", e))?;
     let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret);
     let pub33 = pubkey.serialize();
