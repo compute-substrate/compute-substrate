@@ -1267,13 +1267,24 @@ let peers = net2.connected_peers();
 let tip_fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
 let peer_stable = net2.is_peer_stable(PEER_STABLE_SECS);
 
-if peers < 1 || !peer_stable {
+let local_tip = crate::state::db::get_tip(db2.as_ref())
+    .ok()
+    .flatten()
+    .unwrap_or([0u8; 32]);
+
+let local_hi = crate::chain::index::get_hidx(db2.as_ref(), &local_tip)
+    .ok()
+    .flatten();
+
+let local_height = local_hi.map(|h| h.height).unwrap_or(0);
+
+if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 {
     if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
-            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={} last_tip_seen_unix={} last_peer_change_unix={})",
-            peers, peers, tip_fresh, peer_stable, last_tip, last_peer_change
+            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, last_tip_seen_unix={}, last_peer_change_unix={})",
+            peers, peers, tip_fresh, peer_stable, local_height, last_tip, last_peer_change
         );
         last_gate_log = std::time::Instant::now();
     }
