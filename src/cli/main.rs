@@ -1279,7 +1279,7 @@ let local_hi = crate::chain::index::get_hidx(db2.as_ref(), &local_tip)
 let local_height = local_hi.map(|h| h.height).unwrap_or(0);
 
 if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 {
-    if last_gate_log.elapsed() >= std::time::Duration::from_secs(10) {
+    if last_gate_log.elapsed() >= std::time::Duration::from_secs(30) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
