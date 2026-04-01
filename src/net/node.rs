@@ -2015,12 +2015,18 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
                 return Ok(SyncResponse::Headers { headers: vec![] });
             }
 
+            // Find the first locator hash we actually know.
+            let mut anchor_hash: Option<Hash32> = None;
             let mut anchor_height: Option<u64> = None;
+
             for h in locator {
                 if h == [0u8; 32] {
+                    anchor_hash = Some([0u8; 32]);
+                    anchor_height = Some(0);
                     break;
                 }
                 if let Ok(Some(hi)) = get_hidx(db, &h) {
+                    anchor_hash = Some(h);
                     anchor_height = Some(hi.height);
                     break;
                 }
@@ -2030,16 +2036,14 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
                 return Ok(SyncResponse::Headers { headers: vec![] });
             };
 
-            let mut out: Vec<BlockHeader> = vec![];
+            // Build canonical path from tip back to anchor, then reverse it so we can
+            // return the NEXT contiguous chunk after the anchor.
+            let mut rev_path: Vec<(Hash32, BlockHeader, u64)> = Vec::new();
             let mut cur = tip;
 
             while cur != [0u8; 32] {
                 let hi = get_hidx(db, &cur)?
                     .ok_or_else(|| anyhow::anyhow!("missing idx for {}", hex32(&cur)))?;
-
-                if hi.height <= anchor_h {
-                    break;
-                }
 
                 let Some(bv) = db.blocks.get(k_block(&cur))? else {
                     break;
@@ -2056,23 +2060,34 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
                     bail!("db corruption: header hash mismatch for {}", hex32(&cur));
                 }
 
-                out.push(blk.header.clone());
+                rev_path.push((cur, blk.header.clone(), hi.height));
 
-                if out.len() as u64 >= max {
+                if hi.height <= anchor_h {
                     break;
                 }
 
                 cur = hi.parent;
             }
 
-            out.reverse();
+            rev_path.reverse();
 
-println!(
-    "[sync-serve] GetHeadersByLocator: anchor_h={} returning={} tip={}",
-    anchor_h,
-    out.len(),
-    hex32(&tip),
-);
+            let mut out: Vec<BlockHeader> = Vec::new();
+            for (_h, hdr, hgt) in rev_path {
+                if hgt <= anchor_h {
+                    continue;
+                }
+                out.push(hdr);
+                if out.len() as u64 >= max {
+                    break;
+                }
+            }
+
+            println!(
+                "[sync-serve] GetHeadersByLocator: anchor_h={} returning={} tip={}",
+                anchor_h,
+                out.len(),
+                hex32(&tip),
+            );
 
             Ok(SyncResponse::Headers { headers: out })
         }
