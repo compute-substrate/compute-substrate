@@ -8,7 +8,7 @@ use crate::state::db::Stores;
 #[derive(Parser)]
 #[command(
     name = "csd",
-    version = "0.1.0",
+    version = "1.0",
     about = "Compute Substrate node and wallet CLI",
     long_about = "Compute Substrate node and wallet CLI.\n\nUse `csd node` to run a node or miner.\nUse `csd wallet` to create keys, inspect balances, build transactions, and submit proposals or attestations.",
     arg_required_else_help = true
@@ -1279,7 +1279,7 @@ let local_hi = crate::chain::index::get_hidx(db2.as_ref(), &local_tip)
 let local_height = local_hi.map(|h| h.height).unwrap_or(0);
 
 if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 {
-    if last_gate_log.elapsed() >= std::time::Duration::from_secs(1) {
+    if last_gate_log.elapsed() >= std::time::Duration::from_secs(10) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
