@@ -1,10 +1,6 @@
 // src/crypto/mod.rs
 //
-// Consensus hashing + signature rules (FROZEN).
-//
-// IMPORTANT:
-// - All consensus-critical serialization MUST use crate::codec::consensus_bincode().
-// - Treat Cargo.lock + exact crate versions as consensus-critical once mainnet launches.
+// Consensus hashing + signature rules
 
 use anyhow::{bail, Result};
 use ripemd::Ripemd160;
