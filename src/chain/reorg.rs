@@ -841,7 +841,7 @@ return recover_journal_less(db, mempool);
 
     // meta_tip=None (true cold start) -> fall through to journal-less recovery
 } else {
-        // 1) ALIGNMENT CHECK (the "new logic"):
+        // 1) ALIGNMENT CHECK:
         // The durable meta_tip must correspond to the journal's (phase,cursor) semantics.
         // If not, the journal is unsafe to replay -> clear and fall through to journal-less.
         let meta_tip_opt = get_tip(db).context("recover get_tip(meta_tip)")?;
@@ -902,7 +902,7 @@ return recover_journal_less(db, mempool);
     // meta_tip=None (true cold start) -> fall through to journal-less recovery
 } else {
     // ------------------------------
-    // ALIGNED: continue with your existing journal replay logic
+    // ALIGNED: continue with journal replay logic
     // ------------------------------
 
             // 2) If already at new_tip, clear stale journal
@@ -955,7 +955,6 @@ return recover_journal_less(db, mempool);
 
 
 
-            // If we got here with j still present, continue with your existing replay code:
             // --- UNDO remainder ---
             if matches!(j.phase, Phase::Undo) {
                 for i in (j.cursor as usize)..j.undo_path.len() {
