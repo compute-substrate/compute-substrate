@@ -1,6 +1,6 @@
 // src/crypto/mod.rs
 //
-// Consensus hashing + signature rules
+// Consensus hashing + signature rules. DO NOT TOUCH
 
 use anyhow::{bail, Result};
 use ripemd::Ripemd160;
