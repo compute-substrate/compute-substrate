@@ -3,10 +3,7 @@ use crate::types::Hash32;
 
 // -------------------- chain identity (CONSENSUS) --------------------
 //
-// We keep a human-readable string for display,
-// but we FREEZE the hash used in consensus sighash tagging.
-//
-// CHAIN_ID_HASH = sha256("compute-substrate-mainnet")
+// keep a human-readable string for display, hash is sha256(string)
 pub const CHAIN_ID: &str = "compute-substrate-mainnet";
 pub const CHAIN_ID_HASH: Hash32 = [
     0x1b, 0x17, 0xc7, 0xb0, 0x4d, 0x05, 0x39, 0x46, 0x74, 0xca, 0x2c, 0x8e, 0x24, 0xf7, 0x43, 0x3e,
@@ -64,7 +61,6 @@ pub const MTP_WINDOW: usize = 11;
 pub const MIN_BLOCK_SPACING_SECS: u64 = 30;
 
 // App-layer epoching (consensus-critical only insofar as app rules are consensus)
-// (You currently use epoch_of(height) in consensus app state application.)
 pub const EPOCH_LEN: u64 = 60;
 pub const TOP_K: usize = 25;
 
