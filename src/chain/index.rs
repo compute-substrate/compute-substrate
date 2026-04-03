@@ -105,16 +105,7 @@ pub fn index_header(
     };
 
     // ----------------- time guardrails (CONSENSUS, OBJECTIVE) -----------------
-    //
-    // We intentionally DO NOT use SystemTime::now() here, because that makes
-    // consensus depend on wall-clock skew across nodes.
-    //
-    // Rules (non-genesis):
-    // 1) MIN_BLOCK_SPACING relative to parent.time
-    // 2) MTP: time must be > median_time_past(parent_window)
-    // 3) "future drift" bounded relative to chain history (mtp + MAX_FUTURE_DRIFT_SECS)
-    //
-    // This keeps validity purely a function of chain data.
+    
     if let Some(p) = parent_hi {
         let min_allowed = p.time.saturating_add(MIN_BLOCK_SPACING_SECS);
         if hdr.time < min_allowed {
