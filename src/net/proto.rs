@@ -53,6 +53,5 @@ pub struct GossipTx {
 pub const TOPIC_HDR: &str = "csd/hdr/1";
 pub const TOPIC_TX: &str = "csd/tx/1";
 
-// Protocol id already bumped.
-// Keep /csd/sync/2 (or bump to /3 if you already shipped /2 broadly).
+
 pub const SYNC_PROTO: &str = "/csd/sync/2";
