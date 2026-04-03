@@ -81,9 +81,9 @@ const DIAL_BACKOFF_SECS: u64 = 10;
 
 const MAX_HEADERS_PER_SYNC: u64 = 1024;
 const MAX_LOCATOR_LEN: usize = 128;
-const MAX_INFLIGHT_BLOCKS: usize = 32;
+const MAX_INFLIGHT_BLOCKS: usize = 64;
 const MAX_WANT_QUEUE: usize = 20_000;
-const BLOCK_REQ_TIMEOUT_SECS: u64 = 10;
+const BLOCK_REQ_TIMEOUT_SECS: u64 = 30;
 
 // ----------------- time helpers -----------------
 
