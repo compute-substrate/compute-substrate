@@ -11,7 +11,7 @@ use crate::crypto::{hash160, sha256d, sighash};
 use crate::state::db::Stores;
 use crate::types::{AppPayload, Hash32, OutPoint, Transaction, TxIn, TxOut};
 
-const DUST_LIMIT: u64 = 546; // bitcoin-ish default. adjust for your unit economics.
+const DUST_LIMIT: u64 = 546; // bitcoin-ish
 const TX_SUBMIT_PATH: &str = "/tx/submit";
 
 fn c() -> crate::codec::ConsensusBincode {
