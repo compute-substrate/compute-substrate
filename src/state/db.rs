@@ -12,9 +12,7 @@ pub struct UtxoMeta {
 
 /// Sled trees (physical separation) + key prefixes (logical separation).
 ///
-/// MAINNET FREEZE RULE:
-/// - Tree names and key prefixes below are consensus-adjacent and must not change
-///   without a coordinated migration plan.
+
 pub struct Stores {
     pub db: Db,
 
