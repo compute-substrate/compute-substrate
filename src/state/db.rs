@@ -11,7 +11,6 @@ pub struct UtxoMeta {
 }
 
 /// Sled trees (physical separation) + key prefixes (logical separation).
-///
 
 pub struct Stores {
     pub db: Db,
@@ -41,7 +40,6 @@ pub struct Stores {
     pub app: Tree, // keyspace described in app_state.rs
 
     // explorer index (height->hash, txid->locator, block->txids)
-    // Not consensus-adjacent; safe to evolve, but keep stable once public.
     pub idx: Tree,
 }
 
@@ -62,8 +60,7 @@ impl Stores {
         })
     }
 
-    /// Explicit flush boundary. Avoid calling flush on every tip write.
-    ///
+    /// Explicit flush boundary. Avoid calling flush on every tip write
     /// IMPORTANT:
     /// - Tree::flush() is not a cross-tree durability fence.
     /// - Db::flush() is the single durability barrier for all trees.
@@ -84,7 +81,7 @@ impl Stores {
 }
 
 // -----------------------------------------------------------------------------
-// Key builders (CONSENSUS-ADJACENT: keep stable)
+// Key builders (keep stable)
 // -----------------------------------------------------------------------------
 
 pub fn k_block(hash: &Hash32) -> Vec<u8> {
@@ -146,7 +143,7 @@ pub fn k_bad(hash: &Hash32) -> Vec<u8> {
     k
 }
 
-// Legacy key (kept for compatibility / not used by your new double-buffer journal)
+// Legacy key (kept for compatibility)
 pub fn k_reorg_in_progress() -> &'static [u8] {
     b"reorg:in_progress"
 }
@@ -204,11 +201,7 @@ pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
 // -----------------------------------------------------------------------------
 // Explorer indexing helpers (NOT CONSENSUS)
 // -----------------------------------------------------------------------------
-//
-// Keep your existing behavior, but call it ONLY from non-consensus paths
 // (explorer sync, background maintenance, RPC handlers), not from reorg/apply/undo.
-//
-// If you call this during crash-fuzz, you re-introduce the same nondeterminism.
 
 pub fn update_explorer_index_for_tip_transition(db: &Stores, old: &Hash32, new: &Hash32) {
     // Determine old/new heights (best-effort)
