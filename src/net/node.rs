@@ -973,7 +973,6 @@ let pump_blocks =
 bad_providers.entry(h).or_default().insert(peer);
 
                 if providers.get(&h) == Some(&peer) {
-                    // leave provider stale in map if you want, but do not trust it for this hash anymore
                 }
 
                 if want_blocks.len() < MAX_WANT_QUEUE {
@@ -1919,7 +1918,7 @@ Event::InboundFailure { peer, error, .. } => {
     }
 }
 
-                        // Penalize timeouts (production upgrade)
+                        // Penalize timeouts
                         // Scan inflight and mark peers that keep timing out.
                         // (Lightweight: done here since we are already in event loop.)
                   
