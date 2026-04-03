@@ -15,7 +15,7 @@ use crate::types::{Block, Hash32, OutPoint, Transaction};
 /// Mainnet hardening limits
 /// -------------------------
 ///
-/// Non-consensus policy limits. Safe to change later.
+/// Safe to change later.
 /// These are conservative defaults for mainnet stability.
 ///
 /// Notes:
@@ -24,7 +24,7 @@ use crate::types::{Block, Hash32, OutPoint, Transaction};
 /// - That property dramatically reduces complexity and DoS surface.
 ///
 /// IMPORTANT:
-/// - Per-tx caps must NOT exceed consensus caps (or you'll accept txs you can't mine).
+/// - Per-tx caps must NOT exceed consensus caps (or unminable txes will be accepted).
 const MAX_MEMPOOL_TXS: usize = 50_000;
 const MAX_MEMPOOL_BYTES: usize = 64 * 1024 * 1024; // 64 MiB total tx bytes (serialized)
 const MAX_MEMPOOL_SPENT: usize = 200_000; // cap spent-outpoint index growth (DoS guard)
