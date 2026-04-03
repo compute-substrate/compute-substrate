@@ -159,7 +159,7 @@ fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&Header
 /// - Only includes txs that are valid AND connectable *right now*
 /// - Skips anything that fails validate_tx_for_mempool or has missing inputs
 /// - Sorts by fee (desc) so miners converge under load
-/// - NEW: also respects MAX_BLOCK_BYTES (consensus) so we never build an unmineable block
+/// - also respects MAX_BLOCK_BYTES (consensus) so we never build an unmineable block
 
 fn build_template(
     db: &Stores,
@@ -456,8 +456,6 @@ if let Some(p) = parent_hi_opt.as_ref() {
 
             let block_bytes = crate::codec::consensus_bincode().serialize(&block)?;
             if block_bytes.len() > MAX_BLOCK_BYTES {
-                // This *should* be rare now that template packing respects MAX_BLOCK_BYTES,
-                // but keep the guard in case encoding overhead changes.
                 println!(
                     "[mine] refusing to store oversized block ({} > MAX_BLOCK_BYTES={})",
                     block_bytes.len(),
