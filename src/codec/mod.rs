@@ -3,7 +3,7 @@
 // Consensus serialization settings.
 // One place to lock bincode options so they cannot drift between modules.
 //
-// WARNING: Changing these settings after mainnet launch can split consensus or
+// WARNING: Changing these settings can split consensus or
 // corrupt DB compatibility. Treat as consensus-critical.
 
 use bincode::Options;
