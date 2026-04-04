@@ -1266,6 +1266,8 @@ Commands::Wallet { w } => {
 let peers = net2.connected_peers();
 let tip_fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
 let peer_stable = net2.is_peer_stable(PEER_STABLE_SECS);
+let best_peer_height = net2.best_peer_height();
+let best_peer_work_lo = net2.best_peer_work_lo();
 
 let local_tip = crate::state::db::get_tip(db2.as_ref())
     .ok()
@@ -1276,15 +1278,33 @@ let local_hi = crate::chain::index::get_hidx(db2.as_ref(), &local_tip)
     .ok()
     .flatten();
 
-let local_height = local_hi.map(|h| h.height).unwrap_or(0);
+let local_height = local_hi.as_ref().map(|h| h.height).unwrap_or(0);
+let local_work_lo = local_hi
+    .as_ref()
+    .map(|h| (h.chainwork & (u64::MAX as u128)) as u64)
+    .unwrap_or(0);
 
-if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 {
+let sync_lag = best_peer_height.saturating_sub(local_height);
+let sync_close_enough = best_peer_height > 0 && sync_lag <= 1;
+
+if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 || !sync_close_enough {
     if last_gate_log.elapsed() >= std::time::Duration::from_secs(30) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
-            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, last_tip_seen_unix={}, last_peer_change_unix={})",
-            peers, peers, tip_fresh, peer_stable, local_height, last_tip, last_peer_change
+            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, sync_close_enough={}, local_work_lo={}, best_peer_work_lo={}, last_tip_seen_unix={}, last_peer_change_unix={})",
+            peers,
+            peers,
+            tip_fresh,
+            peer_stable,
+            local_height,
+            best_peer_height,
+            sync_lag,
+            sync_close_enough,
+            local_work_lo,
+            best_peer_work_lo,
+            last_tip,
+            last_peer_change
         );
         last_gate_log = std::time::Instant::now();
     }
