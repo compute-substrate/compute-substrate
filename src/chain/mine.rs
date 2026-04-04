@@ -325,6 +325,7 @@ pub fn build_template_for_tests(
 ///
 /// CRITICAL: Do NOT apply blocks here.
 /// Only persist + index, then call maybe_reorg_to() (single source of truth for apply/undo/tip).
+
 pub fn mine_one(
     db: &Stores,
     mempool: &Mempool,
@@ -332,17 +333,18 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-    const TIP_CHECK_EVERY_NONCES: u64 = 4096;
+    const TIP_CHECK_EVERY_NONCES: u64 = 256;
 
-    let mut parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
-    let mut parent_hi_opt = if parent_tip != [0u8; 32] {
+    let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
+    let parent_hi_opt = if parent_tip != [0u8; 32] {
         get_hidx(db, &parent_tip)?
     } else {
         None
     };
 
-    let mut height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
-let mut _epoch = epoch_of(height);
+    let height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
+    let _epoch = epoch_of(height);
+
     let (mut txs, mut included_ids, _fees) =
         build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
 
@@ -376,42 +378,20 @@ let mut _epoch = epoch_of(height);
             n_since_check = 0;
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
-            if cur_tip != [0u8; 32] && cur_tip != hdr.prev {
-                parent_tip = cur_tip;
-                parent_hi_opt = if parent_tip != [0u8; 32] {
-                    get_hidx(db, &parent_tip)?
-                } else {
-                    None
-                };
 
-                height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
-                _epoch = epoch_of(height);
-                let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
-                txs = built.0;
-                included_ids = built.1;
-
-                hdr = BlockHeader {
-                    version: 1,
-                    prev: parent_tip,
-                    merkle: merkle_root(&txs),
-                    time: choose_block_time(db, &parent_tip, parent_hi_opt.as_ref()),
-                    bits: expected_bits(db, height, parent_hi_opt.as_ref())?,
-                    nonce: 0u32,
-                };
-
+            // Hard stale-work cancellation:
+            // if canonical tip changed under us, abandon this attempt immediately.
+            if cur_tip != hdr.prev {
                 println!(
-                    "[mine] rebase: height={} prev=0x{} bits=0x{:08x} time={}",
-                    height,
+                    "[mine] stale-template abort: started_prev=0x{} current_tip=0x{}",
                     hex::encode(hdr.prev),
-                    hdr.bits,
-                    hdr.time
+                    hex::encode(cur_tip),
                 );
+                return Err(anyhow!("stale template"));
             }
 
-            // Prevent mining empty/stale blocks when txs arrive mid-mine
-
-if mempool.len() > 0 && included_ids.is_empty() {
-
+            // Refresh template if mempool gained txs while we were mining an empty block.
+            if mempool.len() > 0 && included_ids.is_empty() {
                 let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
                 txs = built.0;
                 included_ids = built.1;
@@ -426,27 +406,30 @@ if mempool.len() > 0 && included_ids.is_empty() {
                 );
             }
 
-// Even if tip didn't change, refresh time so timestamps reflect real solve time.
-// Without this, LWMA thinks blocks are "fast" (small dt) and ramps difficulty upward.
-if let Some(p) = parent_hi_opt.as_ref() {
-    let new_time = choose_block_time(db, &parent_tip, Some(p));
-    if new_time != hdr.time {
-        hdr.time = new_time;
-        // Optional: reset nonce to avoid doing extra work on an old header shape.
-        // hdr.nonce = 0;
-    }
-}
-
+            // Refresh timestamp so long-running work does not keep an old header time.
+            if let Some(p) = parent_hi_opt.as_ref() {
+                let new_time = choose_block_time(db, &parent_tip, Some(p));
+                if new_time != hdr.time {
+                    hdr.time = new_time;
+                    hdr.nonce = 0;
+                }
+            }
         }
 
         let h = header_hash(&hdr);
 
         if pow_ok(&h, hdr.bits) {
+
             let _g = chain_lock.lock();
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
             if cur_tip != hdr.prev {
-                continue;
+                println!(
+                    "[mine] solved stale block: solved_prev=0x{} current_tip=0x{}",
+                    hex::encode(hdr.prev),
+                    hex::encode(cur_tip),
+                );
+                return Err(anyhow!("solved stale block"));
             }
 
             let block = Block {
@@ -455,28 +438,14 @@ if let Some(p) = parent_hi_opt.as_ref() {
             };
 
             let block_bytes = crate::codec::consensus_bincode().serialize(&block)?;
+
             if block_bytes.len() > MAX_BLOCK_BYTES {
                 println!(
                     "[mine] refusing to store oversized block ({} > MAX_BLOCK_BYTES={})",
                     block_bytes.len(),
                     MAX_BLOCK_BYTES
                 );
-                // Force template rebuild on next loop iteration.
-                parent_tip = get_tip(db)?.unwrap_or([0u8; 32]);
-                parent_hi_opt = if parent_tip != [0u8; 32] { get_hidx(db, &parent_tip)? } else { None };
-                height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
-                let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
-                txs = built.0;
-                included_ids = built.1;
-                hdr = BlockHeader {
-                    version: 1,
-                    prev: parent_tip,
-                    merkle: merkle_root(&txs),
-                    time: choose_block_time(db, &parent_tip, parent_hi_opt.as_ref()),
-                    bits: expected_bits(db, height, parent_hi_opt.as_ref())?,
-                    nonce: 0u32,
-                };
-                continue;
+                return Err(anyhow!("oversized block template"));
             }
 
             db.blocks.insert(k_block(&h), block_bytes)?;
