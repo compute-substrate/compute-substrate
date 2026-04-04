@@ -1341,6 +1341,15 @@ if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 || !sync_close_e
                         let bh = match mined_res {
                             Ok(h) => h,
                             Err(e) => {
+                                let msg = e.to_string();
+                                if msg.contains("stale template")
+                                    || msg.contains("solved stale block")
+                                    || msg.contains("oversized block template")
+                                {
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                    continue;
+                                }
+
                                 eprintln!("[miner] mine_one ERR: {:?}", e);
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                                 continue;
