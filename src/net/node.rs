@@ -320,6 +320,8 @@ pub struct NetHandle {
     pub connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
+    best_peer_height: Arc<AtomicU64>,
+    best_peer_work_lo: Arc<AtomicU64>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 }
 
@@ -350,6 +352,14 @@ impl NetHandle {
         let now = unix_now();
         let last = self.last_peer_change_unix();
         now.saturating_sub(last) >= min_stable_secs
+    }
+
+    pub fn best_peer_height(&self) -> u64 {
+        self.best_peer_height.load(Ordering::Relaxed)
+    }
+
+    pub fn best_peer_work_lo(&self) -> u64 {
+        self.best_peer_work_lo.load(Ordering::Relaxed)
     }
 }
 
@@ -680,23 +690,27 @@ pub async fn spawn_p2p(
     let local_key = load_or_create_node_key(&cfg.datadir)?;
     let peer_id = PeerId::from(local_key.public());
 
-    let connected_peers = Arc::new(AtomicUsize::new(0));
-    let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
-    let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
+let connected_peers = Arc::new(AtomicUsize::new(0));
+let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
+let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
+let best_peer_height = Arc::new(AtomicU64::new(0));
+let best_peer_work_lo = Arc::new(AtomicU64::new(0));
 
 let listen_addr = Arc::new(RwLock::new(None));
-
 
 let handle = NetHandle {
     peer_id,
     connected_peers: connected_peers.clone(),
     last_tip_seen_unix: last_tip_seen_unix.clone(),
     last_peer_change_unix: last_peer_change_unix.clone(),
+    best_peer_height: best_peer_height.clone(),
+    best_peer_work_lo: best_peer_work_lo.clone(),
     listen_addr: listen_addr.clone(),
 };
 
     tokio::spawn(async move {
-        if let Err(e) = run_p2p_loop(
+
+if let Err(e) = run_p2p_loop(
     db,
     mempool,
     cfg,
@@ -705,11 +719,14 @@ let handle = NetHandle {
     connected_peers,
     last_tip_seen_unix,
     last_peer_change_unix,
+    best_peer_height,
+    best_peer_work_lo,
     listen_addr,
     mined_rx,
     tx_gossip_rx,
     chain_lock,
 )
+
         .await
         {
             eprintln!("[p2p] fatal: {e}");
@@ -741,6 +758,8 @@ async fn run_p2p_loop(
     connected_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
+    best_peer_height_atomic: Arc<AtomicU64>,
+    best_peer_work_lo_atomic: Arc<AtomicU64>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 
     mut mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
@@ -1539,12 +1558,24 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
 
                                         Message::Response { request_id: rid, response } => {
                                             match response {
- SyncResponse::Tip { hash: _hash, height, chainwork } => {
+
+SyncResponse::Tip { hash: _hash, height, chainwork } => {
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
-peer_heights.insert(peer, height);
-peer_work.insert(peer, chainwork);
+    peer_heights.insert(peer, height);
+    peer_work.insert(peer, chainwork);
+
+    let cur_best_h = best_peer_height_atomic.load(Ordering::Relaxed);
+    if height > cur_best_h {
+        best_peer_height_atomic.store(height, Ordering::Relaxed);
+    }
+
+    let chainwork_lo = (chainwork & (u64::MAX as u128)) as u64;
+    let cur_best_w = best_peer_work_lo_atomic.load(Ordering::Relaxed);
+    if chainwork_lo > cur_best_w || height >= cur_best_h {
+        best_peer_work_lo_atomic.store(chainwork_lo, Ordering::Relaxed);
+    }
 
 let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
 let last_logged = last_logged_tip.get(&peer).copied();
