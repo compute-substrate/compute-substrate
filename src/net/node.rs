@@ -643,6 +643,49 @@ fn block_parent_ready(
     pending_apply.contains_key(&hdr.prev)
 }
 
+fn enqueue_missing_ancestor_for_hash(
+    db: &Stores,
+    pending_apply: &HashMap<Hash32, Block>,
+    want_blocks: &mut VecDeque<Hash32>,
+    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+    h: Hash32,
+) -> Result<()> {
+    let mut cur = h;
+
+    loop {
+        let Some(hi) = get_hidx(db, &cur)? else {
+            return Ok(());
+        };
+
+        // If we already have raw bytes for this block, no need to backfill further here.
+        if db.blocks.get(k_block(&cur))?.is_some() {
+            return Ok(());
+        }
+
+        // If parent is ready, then cur itself is the earliest requestable missing block.
+        let parent_ready =
+            hi.parent == [0u8; 32]
+            || db.blocks.get(k_block(&hi.parent))?.is_some()
+            || pending_apply.contains_key(&hi.parent);
+
+        if parent_ready {
+            let already_queued = want_blocks.iter().any(|x| *x == cur);
+            let already_inflight = inflight.contains_key(&cur);
+
+            if !already_queued && !already_inflight && want_blocks.len() < MAX_WANT_QUEUE {
+                want_blocks.push_front(cur);
+            }
+            return Ok(());
+        }
+
+        // Otherwise walk backward to the parent and keep searching.
+        cur = hi.parent;
+        if cur == [0u8; 32] {
+            return Ok(());
+        }
+    }
+}
+
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
@@ -1098,6 +1141,17 @@ if sync_peer == Some(peer) {
 
             }
 
+want_blocks.retain(|h| {
+    if inflight.contains_key(h) {
+        return true;
+    }
+    match db.blocks.get(k_block(h)) {
+        Ok(Some(_)) => false,
+        _ => true,
+    }
+});
+
+
 while inflight.len() < MAX_INFLIGHT_BLOCKS {
     let mut best_idx: Option<usize> = None;
     let mut best_hash: Option<Hash32> = None;
@@ -1116,14 +1170,21 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
             continue;
         };
 
-        let parent_ready =
-            hi.parent == [0u8; 32]
-            || db.blocks.get(k_block(&hi.parent))?.is_some()
-            || pending_apply.contains_key(&hi.parent);
+let parent_ready =
+    hi.parent == [0u8; 32]
+    || db.blocks.get(k_block(&hi.parent))?.is_some()
+    || pending_apply.contains_key(&hi.parent);
 
-        if !parent_ready {
-            continue;
-        }
+if !parent_ready {
+    enqueue_missing_ancestor_for_hash(
+        db,
+        pending_apply,
+        want_blocks,
+        inflight,
+        h,
+    )?;
+    continue;
+}
 
         let mut target: Option<PeerId> = None;
 
@@ -1333,6 +1394,22 @@ let _ = pump_blocks(
 
                 try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
             }
+
+let _ = pump_blocks(
+    &mut swarm,
+    sync_peer,
+    &connected,
+    &providers,
+    &mut bad_providers,
+    &bans,
+    &mut peer_score,
+    &mut quarantine,
+    &mut rid_to_hash,
+    &db,
+    &pending_apply,
+    &mut want_blocks,
+    &mut inflight,
+);
 
             Some(ev) = mined_rx.recv() => {
                 let gh = GossipHeader { header: ev.header };
