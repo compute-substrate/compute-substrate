@@ -1158,7 +1158,10 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
     let mut best_peer: Option<PeerId> = None;
     let mut best_height: u64 = u64::MAX;
 
-    for (idx, h) in want_blocks.iter().copied().enumerate() {
+let snapshot: Vec<Hash32> = want_blocks.iter().copied().collect();
+
+for (idx, h) in snapshot.into_iter().enumerate() {
+
         if db.blocks.get(k_block(&h))?.is_some() {
             continue;
         }
@@ -1247,7 +1250,9 @@ if !parent_ready {
         break;
     };
 
-    let _ = want_blocks.remove(idx);
+if let Some(pos) = want_blocks.iter().position(|x| *x == h) {
+    let _ = want_blocks.remove(pos);
+}
 
     let rid = swarm
         .behaviour_mut()
