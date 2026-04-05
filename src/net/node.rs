@@ -1098,108 +1098,110 @@ if sync_peer == Some(peer) {
 
             }
 
-let mut scan_budget = want_blocks.len();
+while inflight.len() < MAX_INFLIGHT_BLOCKS {
+    let mut best_idx: Option<usize> = None;
+    let mut best_hash: Option<Hash32> = None;
+    let mut best_peer: Option<PeerId> = None;
+    let mut best_height: u64 = u64::MAX;
 
-while inflight.len() < MAX_INFLIGHT_BLOCKS && scan_budget > 0 {
-    scan_budget -= 1;
+    for (idx, h) in want_blocks.iter().copied().enumerate() {
+        if db.blocks.get(k_block(&h))?.is_some() {
+            continue;
+        }
+        if inflight.contains_key(&h) {
+            continue;
+        }
 
-                let Some(h) = want_blocks.pop_front() else { break };
-                if db.blocks.get(k_block(&h))?.is_some() {
-                    continue;
+        let Some(hi) = get_hidx(db, &h)? else {
+            continue;
+        };
+
+        let parent_ready =
+            hi.parent == [0u8; 32]
+            || db.blocks.get(k_block(&hi.parent))?.is_some()
+            || pending_apply.contains_key(&hi.parent);
+
+        if !parent_ready {
+            continue;
+        }
+
+        let mut target: Option<PeerId> = None;
+
+        // 1) Prefer the recorded provider for this hash, but only if still eligible.
+        if let Some(p) = providers.get(&h) {
+            if connected.contains(p)
+                && !is_banned(bans, p)
+                && !is_quarantined(quarantine, p)
+                && !is_bad(bad_providers, &h, p)
+            {
+                target = Some(*p);
+            }
+        }
+
+        // 2) Fall back to sync_peer if eligible.
+        if target.is_none() {
+            if let Some(sp) = sync_peer {
+                if connected.contains(&sp)
+                    && !is_banned(bans, &sp)
+                    && !is_quarantined(quarantine, &sp)
+                    && !is_bad(bad_providers, &h, &sp)
+                {
+                    target = Some(sp);
                 }
-                if inflight.contains_key(&h) {
-                    continue;
-                }
+            }
+        }
 
-let Some(hi) = get_hidx(db, &h)? else {
-    if want_blocks.len() < MAX_WANT_QUEUE {
-        want_blocks.push_back(h);
-    }
-    continue;
-};
-
-if hi.parent != [0u8; 32]
-    && db.blocks.get(k_block(&hi.parent))?.is_none()
-    && !pending_apply.contains_key(&hi.parent)
-{
-    if want_blocks.len() < MAX_WANT_QUEUE {
-        want_blocks.push_back(h);
-    }
-    continue;
-}
-
-
-
-                let mut target: Option<PeerId> = None;
-
-                let mut target: Option<PeerId> = None;
-
-                // 1) If we know a provider for this hash, stay sticky to that peer.
-                if let Some(p) = providers.get(&h) {
-                    if connected.contains(p)
-                        && !is_banned(bans, p)
+        // 3) Fall back to any connected eligible peer.
+        if target.is_none() {
+            target = connected
+                .iter()
+                .find(|p| {
+                    !is_banned(bans, p)
                         && !is_quarantined(quarantine, p)
                         && !is_bad(bad_providers, &h, p)
-                    {
-                        target = Some(*p);
-                    } else {
-                        // Known provider exists but is currently unusable.
-                        // Requeue and wait until it times out / disconnects / is marked bad,
-                        // or until another provider is learned explicitly.
-                        if want_blocks.len() < MAX_WANT_QUEUE {
-                            want_blocks.push_back(h);
-                        }
-                        continue;
-                    }
-                }
+                })
+                .cloned();
+        }
 
-                // 2) Only if we do NOT know a provider yet, fall back to sync_peer.
-                if target.is_none() {
-                    if let Some(sp) = sync_peer {
-                        if connected.contains(&sp)
-                            && !is_banned(bans, &sp)
-                            && !is_quarantined(quarantine, &sp)
-                            && !is_bad(bad_providers, &h, &sp)
-                        {
-                            target = Some(sp);
-                        }
-                    }
-                }
+        let Some(peer) = target else {
+            continue;
+        };
 
-                // 3) Last resort only when there is no known provider at all.
-                if target.is_none() {
-                    target = connected
-                        .iter()
-                        .find(|p| {
-                            !is_banned(bans, p)
-                                && !is_quarantined(quarantine, p)
-                                && !is_bad(bad_providers, &h, p)
-                        })
-                        .cloned();
-                }
+        // Pick the LOWEST-HEIGHT requestable block.
+        if hi.height < best_height {
+            best_height = hi.height;
+            best_idx = Some(idx);
+            best_hash = Some(h);
+            best_peer = Some(peer);
+        }
+    }
 
-                // 4) Nobody eligible yet: requeue and wait.
-                if target.is_none() {
-                    if want_blocks.len() < MAX_WANT_QUEUE {
-                        want_blocks.push_back(h);
-                    }
-                    continue;
-                }
+    let Some(idx) = best_idx else {
+        break;
+    };
+    let Some(h) = best_hash else {
+        break;
+    };
+    let Some(peer) = best_peer else {
+        break;
+    };
 
+    let _ = want_blocks.remove(idx);
 
+    let rid = swarm
+        .behaviour_mut()
+        .rr
+        .send_request(&peer, SyncRequest::GetBlock { hash: h });
+    println!(
+        "[sync] request block {} from {} (height={})",
+        hex32(&h),
+        peer,
+        best_height
+    );
 
-
-                let Some(peer) = target else { break };
-
-                let rid = swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer, SyncRequest::GetBlock { hash: h });
-                println!("[sync] request block {} from {}", hex32(&h), peer);
-
-                rid_to_hash.insert(rid, h);
-                inflight.insert(h, (rid, Instant::now(), peer));
-            }
+    rid_to_hash.insert(rid, h);
+    inflight.insert(h, (rid, Instant::now(), peer));
+}
 
             Ok(())
         };
@@ -1991,6 +1993,7 @@ SyncResponse::Block { block } => {
                                                     }
 
 providers.insert(bh, peer);
+want_blocks.retain(|x| *x != bh);
 
 if let Some((_rid2, t0, asked_peer)) = inflight.remove(&bh) {
     if asked_peer == peer {
