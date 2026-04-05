@@ -527,6 +527,96 @@ fn local_tip_and_work(db: &Stores) -> (Hash32, u64, u128) {
     }
 }
 
+fn peer_is_eligible(
+    p: &PeerId,
+    connected: &HashSet<PeerId>,
+    bans: &HashMap<PeerId, Instant>,
+    quarantine: &HashMap<PeerId, Instant>,
+) -> bool {
+    connected.contains(p)
+        && !is_banned(bans, p)
+        && !quarantine
+            .get(p)
+            .map(|t| t.elapsed().as_secs() < QUAR_SECS)
+            .unwrap_or(false)
+}
+
+fn recompute_best_peer_metrics(
+    connected: &HashSet<PeerId>,
+    peer_heights: &HashMap<PeerId, u64>,
+    peer_work: &HashMap<PeerId, u128>,
+    bans: &HashMap<PeerId, Instant>,
+    quarantine: &HashMap<PeerId, Instant>,
+) -> (u64, u64) {
+    let mut best_h: u64 = 0;
+    let mut best_w_lo: u64 = 0;
+
+    for p in connected.iter() {
+        if !peer_is_eligible(p, connected, bans, quarantine) {
+            continue;
+        }
+
+        let h = *peer_heights.get(p).unwrap_or(&0);
+        let w_lo = (*peer_work.get(p).unwrap_or(&0) & (u64::MAX as u128)) as u64;
+
+        if h > best_h {
+            best_h = h;
+            best_w_lo = w_lo;
+        } else if h == best_h && w_lo > best_w_lo {
+            best_w_lo = w_lo;
+        }
+    }
+
+    (best_h, best_w_lo)
+}
+
+fn maybe_switch_sync_peer(
+    current: Option<PeerId>,
+    candidate: Option<PeerId>,
+    connected: &HashSet<PeerId>,
+    peer_work: &HashMap<PeerId, u128>,
+    peer_score: &HashMap<PeerId, i32>,
+    bans: &HashMap<PeerId, Instant>,
+    quarantine: &HashMap<PeerId, Instant>,
+) -> Option<PeerId> {
+    match (current, candidate) {
+        (Some(cur), Some(cand)) => {
+            let cur_ok = peer_is_eligible(&cur, connected, bans, quarantine);
+            if !cur_ok {
+                return Some(cand);
+            }
+
+            if cur == cand {
+                return Some(cur);
+            }
+
+            let cur_w = *peer_work.get(&cur).unwrap_or(&0);
+            let cur_s = *peer_score.get(&cur).unwrap_or(&0);
+
+            let cand_w = *peer_work.get(&cand).unwrap_or(&0);
+            let cand_s = *peer_score.get(&cand).unwrap_or(&0);
+
+            let cand_strictly_better =
+                (cand_w > cur_w) || (cand_w == cur_w && cand_s > cur_s);
+
+            if cand_strictly_better {
+                Some(cand)
+            } else {
+                Some(cur)
+            }
+        }
+        (None, Some(cand)) => Some(cand),
+        (Some(cur), None) => {
+            if peer_is_eligible(&cur, connected, bans, quarantine) {
+                Some(cur)
+            } else {
+                None
+            }
+        }
+        (None, None) => None,
+    }
+}
+
 
 fn should_log_tip_update(
     last_logged: Option<(u64, u128, u128)>,
@@ -918,37 +1008,40 @@ let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
         }
     };
 
-    let choose_best_sync_peer = |connected: &HashSet<PeerId>,
-                                 peer_work: &HashMap<PeerId, u128>,
-                                 peer_score: &HashMap<PeerId, i32>,
-                                 bans: &HashMap<PeerId, Instant>,
-                                 quarantine: &HashMap<PeerId, Instant>|
-     -> Option<PeerId> {
-        let mut best: Option<(PeerId, u128, i32)> = None;
-        for p in connected.iter() {
-            if is_banned(bans, p) { continue; }
-            if is_quarantined(quarantine, p) { continue; }
+let choose_best_sync_peer = |connected: &HashSet<PeerId>,
+                             peer_work: &HashMap<PeerId, u128>,
+                             peer_score: &HashMap<PeerId, i32>,
+                             bans: &HashMap<PeerId, Instant>,
+                             quarantine: &HashMap<PeerId, Instant>|
+ -> Option<PeerId> {
+    let mut best: Option<(PeerId, u128, i32, String)> = None;
 
-            let w = *peer_work.get(p).unwrap_or(&0);
-            let s = *peer_score.get(p).unwrap_or(&0);
+    for p in connected.iter() {
+        if !peer_is_eligible(p, connected, bans, quarantine) {
+            continue;
+        }
 
-            match best {
-                None => best = Some((*p, w, s)),
-                Some((_bp, bw, bs)) => {
-                    // Primary: chainwork
-                    if w > bw {
-                        best = Some((*p, w, s));
-                    } else if w == bw {
-                        // Tie-break: score
-                        if s > bs {
-                            best = Some((*p, w, s));
-                        }
-                    }
+        let w = *peer_work.get(p).unwrap_or(&0);
+        let s = *peer_score.get(p).unwrap_or(&0);
+        let pid = p.to_string();
+
+        match &best {
+            None => best = Some((*p, w, s, pid)),
+            Some((_bp, bw, bs, bpid)) => {
+                let better =
+                    (w > *bw)
+                    || (w == *bw && s > *bs)
+                    || (w == *bw && s == *bs && pid < *bpid);
+
+                if better {
+                    best = Some((*p, w, s, pid));
                 }
             }
         }
-        best.map(|(p, _w, _s)| p)
-    };
+    }
+
+    best.map(|(p, _, _, _)| p)
+};
 
     let mark_tip_seen = |last_tip_seen_unix: &Arc<AtomicU64>| {
         last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
@@ -1158,8 +1251,19 @@ for p in connected.iter().cloned() {
     }
 }
 
-// Re-pick best peer every poll based on latest known work/score.
-sync_peer = choose_best_sync_peer(
+// Recompute live best-peer metrics from current eligible peers.
+let (best_h, best_w_lo) = recompute_best_peer_metrics(
+    &connected,
+    &peer_heights,
+    &peer_work,
+    &bans,
+    &quarantine,
+);
+best_peer_height_atomic.store(best_h, Ordering::Relaxed);
+best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
+
+// Pick best candidate, but keep current sync_peer unless the candidate is strictly better.
+let candidate_sync_peer = choose_best_sync_peer(
     &connected,
     &peer_work,
     &peer_score,
@@ -1169,9 +1273,26 @@ sync_peer = choose_best_sync_peer(
 .or_else(|| {
     connected
         .iter()
-        .find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p))
+        .find(|p| peer_is_eligible(p, &connected, &bans, &quarantine))
         .cloned()
 });
+
+let next_sync_peer = maybe_switch_sync_peer(
+    sync_peer,
+    candidate_sync_peer,
+    &connected,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+);
+
+if next_sync_peer != sync_peer {
+    if let Some(p) = next_sync_peer {
+        println!("[sync] switching sync_peer -> {}", p);
+    }
+}
+sync_peer = next_sync_peer;
 
 let _ = pump_blocks(
     &mut swarm,
@@ -1280,6 +1401,16 @@ if !is_quarantined(&quarantine, &peer_id) {
                         peer_heights.remove(&peer_id);
                         peer_work.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
+
+let (best_h, best_w_lo) = recompute_best_peer_metrics(
+    &connected,
+    &peer_heights,
+    &peer_work,
+    &bans,
+    &quarantine,
+);
+best_peer_height_atomic.store(best_h, Ordering::Relaxed);
+best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
 
 last_gettip_log_at.remove(&peer_id);
 
@@ -1561,27 +1692,19 @@ SyncResponse::Tip { hash: _hash, height, chainwork } => {
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
-    peer_heights.insert(peer, height);
-    peer_work.insert(peer, chainwork);
+peer_heights.insert(peer, height);
+peer_work.insert(peer, chainwork);
 
-    let cur_best_h = best_peer_height_atomic.load(Ordering::Relaxed);
-    if height > cur_best_h {
-        best_peer_height_atomic.store(height, Ordering::Relaxed);
-    }
-
-    let chainwork_lo = (chainwork & (u64::MAX as u128)) as u64;
-    let cur_best_w = best_peer_work_lo_atomic.load(Ordering::Relaxed);
-
-let cur_best_h = best_peer_height_atomic.load(Ordering::Relaxed);
-let cur_best_w = best_peer_work_lo_atomic.load(Ordering::Relaxed);
-let chainwork_lo = (chainwork & (u64::MAX as u128)) as u64;
-
-if height > cur_best_h {
-    best_peer_height_atomic.store(height, Ordering::Relaxed);
-    best_peer_work_lo_atomic.store(chainwork_lo, Ordering::Relaxed);
-} else if height == cur_best_h && chainwork_lo > cur_best_w {
-    best_peer_work_lo_atomic.store(chainwork_lo, Ordering::Relaxed);
-}
+// Recompute live best-peer metrics from current eligible peers.
+let (best_h, best_w_lo) = recompute_best_peer_metrics(
+    &connected,
+    &peer_heights,
+    &peer_work,
+    &bans,
+    &quarantine,
+);
+best_peer_height_atomic.store(best_h, Ordering::Relaxed);
+best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
 
 let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
 let last_logged = last_logged_tip.get(&peer).copied();
@@ -1594,7 +1717,17 @@ if should_log_tip_update(last_logged, height, chainwork, _dbg_w) {
     last_logged_tip.insert(peer, (height, chainwork, _dbg_w));
 }
 
-let best = choose_best_sync_peer(
+let candidate_sync_peer = choose_best_sync_peer(
+    &connected,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+).or_else(|| Some(peer));
+
+let next_sync_peer = maybe_switch_sync_peer(
+    sync_peer,
+    candidate_sync_peer,
     &connected,
     &peer_work,
     &peer_score,
@@ -1602,46 +1735,12 @@ let best = choose_best_sync_peer(
     &quarantine,
 );
 
-// Keep current sync_peer unless another peer is STRICTLY better.
-match (sync_peer, best) {
-    (Some(cur), Some(candidate)) => {
-        if cur != candidate {
-            let cur_w = *peer_work.get(&cur).unwrap_or(&0);
-            let cur_s = *peer_score.get(&cur).unwrap_or(&0);
-
-            let cand_w = *peer_work.get(&candidate).unwrap_or(&0);
-            let cand_s = *peer_score.get(&candidate).unwrap_or(&0);
-
-            let cur_ok = connected.contains(&cur)
-                && !is_banned(&bans, &cur)
-                && !is_quarantined(&quarantine, &cur);
-
-            let cand_strictly_better =
-                (cand_w > cur_w) || (cand_w == cur_w && cand_s > cur_s);
-
-            if !cur_ok || cand_strictly_better {
-                println!("[sync] switching sync_peer -> {}", candidate);
-                sync_peer = Some(candidate);
-            }
-        }
-    }
-    (None, Some(candidate)) => {
-        println!("[sync] switching sync_peer -> {}", candidate);
-        sync_peer = Some(candidate);
-    }
-    (None, None) => {
-        sync_peer = Some(peer);
-    }
-    (Some(cur), None) => {
-        let cur_ok = connected.contains(&cur)
-            && !is_banned(&bans, &cur)
-            && !is_quarantined(&quarantine, &cur);
-
-        if !cur_ok {
-            sync_peer = Some(peer);
-        }
+if next_sync_peer != sync_peer {
+    if let Some(p) = next_sync_peer {
+        println!("[sync] switching sync_peer -> {}", p);
     }
 }
+sync_peer = next_sync_peer;
 
     let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
 
