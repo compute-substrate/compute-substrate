@@ -1393,7 +1393,6 @@ let _ = pump_blocks(
 );
 
                 try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
-            }
 
 let _ = pump_blocks(
     &mut swarm,
@@ -1402,7 +1401,7 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
-    &mut peer_score,
+&mut peer_score,
     &mut quarantine,
     &mut rid_to_hash,
     &db,
@@ -1410,6 +1409,8 @@ let _ = pump_blocks(
     &mut want_blocks,
     &mut inflight,
 );
+
+            }
 
             Some(ev) = mined_rx.recv() => {
                 let gh = GossipHeader { header: ev.header };
