@@ -467,6 +467,11 @@ pub fn mine_one(
                     mempool.remove(id);
                 }
             } else {
+println!(
+    "[mine] orphaned local win: 0x{} (tip_after=0x{})",
+    hex::encode(h),
+    hex::encode(tip_after),
+);
                 println!(
                     "[mine] block {} was not selected as tip (tip_after={}); keeping {} txs in mempool",
                     hex::encode(h),
