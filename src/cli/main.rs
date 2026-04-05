@@ -1285,14 +1285,21 @@ let local_work_lo = local_hi
     .unwrap_or(0);
 
 let sync_lag = best_peer_height.saturating_sub(local_height);
-let sync_close_enough = best_peer_height > 0 && sync_lag <= 1;
 
-if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 || !sync_close_enough {
+// Fresh-network bootstrap:
+// if nobody is past genesis yet, allow mining to begin.
+let bootstrap_genesis = best_peer_height == 0;
+
+// Normal steady-state rule:
+// once the network has progressed, only mine when essentially caught up.
+let sync_close_enough = bootstrap_genesis || sync_lag <= 1;
+
+if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
     if last_gate_log.elapsed() >= std::time::Duration::from_secs(30) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
-            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, sync_close_enough={}, local_work_lo={}, best_peer_work_lo={}, last_tip_seen_unix={}, last_peer_change_unix={})",
+            "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, bootstrap_genesis={}, sync_close_enough={}, local_work_lo={}, best_peer_work_lo={}, last_tip_seen_unix={}, last_peer_change_unix={})",
             peers,
             peers,
             tip_fresh,
@@ -1300,6 +1307,7 @@ if peers < 1 || !peer_stable || !tip_fresh || local_height == 0 || !sync_close_e
             local_height,
             best_peer_height,
             sync_lag,
+            bootstrap_genesis,
             sync_close_enough,
             local_work_lo,
             best_peer_work_lo,
