@@ -1134,46 +1134,44 @@ prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
 // regular tip polling + stale fallback
 let tip_age = unix_now().saturating_sub(last_tip_seen_unix.load(Ordering::Relaxed));
 
-if sync_peer.is_none() {
-    sync_peer = choose_best_sync_peer(
-        &connected,
-        &peer_work,
-        &peer_score,
-        &bans,
-        &quarantine,
-    )
-    .or_else(|| {
-        connected
-            .iter()
-            .find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p))
-            .cloned()
-    });
-}
+// Poll ALL connected eligible peers, not just sync_peer.
+// Otherwise one stale bootnode can trap us on old peer_work.
+for p in connected.iter().cloned() {
+    if is_banned(&bans, &p) || is_quarantined(&quarantine, &p) {
+        continue;
+    }
 
-if let Some(sp) = sync_peer {
-    if !is_banned(&bans, &sp) && !is_quarantined(&quarantine, &sp) {
-        let regular_due = last_tip_req_at
-            .get(&sp)
-            .map(|t| t.elapsed() >= Duration::from_secs(REGULAR_TIP_POLL_SECS))
-            .unwrap_or(true);
+    let regular_due = last_tip_req_at
+        .get(&p)
+        .map(|t| t.elapsed() >= Duration::from_secs(REGULAR_TIP_POLL_SECS))
+        .unwrap_or(true);
 
-        let stale_due = tip_age >= TIP_POLL_SECS;
+    let stale_due = tip_age >= TIP_POLL_SECS;
 
-        if regular_due || stale_due {
-            let _ = swarm.behaviour_mut().rr.send_request(&sp, SyncRequest::GetTip);
-            last_tip_req_at.insert(sp, Instant::now());
+    if regular_due || stale_due {
+        let _ = swarm.behaviour_mut().rr.send_request(&p, SyncRequest::GetTip);
+        last_tip_req_at.insert(p, Instant::now());
 
-            if stale_due {
-                println!("[sync] stale-tip poll to {} (tip_age={}s)", sp, tip_age);
-            }
+        if stale_due {
+            println!("[sync] stale-tip poll to {} (tip_age={}s)", p, tip_age);
         }
     }
 }
 
-                if sync_peer.is_none() {
-                    sync_peer = choose_best_sync_peer(&connected, &peer_work, &peer_score, &bans, &quarantine)
-                        .or_else(|| connected.iter().find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p)).cloned());
-                }
+// Re-pick best peer every poll based on latest known work/score.
+sync_peer = choose_best_sync_peer(
+    &connected,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+)
+.or_else(|| {
+    connected
+        .iter()
+        .find(|p| !is_banned(&bans, p) && !is_quarantined(&quarantine, p))
+        .cloned()
+});
 
 let _ = pump_blocks(
     &mut swarm,
@@ -1588,19 +1586,22 @@ if should_log_tip_update(last_logged, height, chainwork, _dbg_w) {
     last_logged_tip.insert(peer, (height, chainwork, _dbg_w));
 }
 
-    let best = choose_best_sync_peer(
-        &connected,
-        &peer_work,
-        &peer_score,
-        &bans,
-        &quarantine,
-    );
+let best = choose_best_sync_peer(
+    &connected,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+);
 
-    if best.is_some() && sync_peer != best {
-        sync_peer = best;
-    } else if sync_peer.is_none() {
-        sync_peer = Some(peer);
+if let Some(best_peer) = best {
+    if sync_peer != Some(best_peer) {
+        println!("[sync] switching sync_peer -> {}", best_peer);
     }
+    sync_peer = Some(best_peer);
+} else if sync_peer.is_none() {
+    sync_peer = Some(peer);
+}
 
     let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
 
@@ -1659,58 +1660,64 @@ if should_log_tip_update(last_logged, height, chainwork, _dbg_w) {
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
     }
 
-                                                    if sync_peer.is_some() && sync_peer != Some(peer) {
-                                                        // ignore racing peers
-                                                    } else {
-                                                        if sync_peer.is_none() {
-                                                            sync_peer = Some(peer);
-                                                        }
-
-                                                        for hdr in headers {
-                                                            let h = header_hash(&hdr);
-
-                                                            if !accept_header_universe_pow(&cfg, &hdr, &h) {
-                                                                note_invalid(&mut buckets, &mut bans, peer, "headers: invalid pow/limit/universe");
-                                                                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-                                                                continue;
-                                                            }
-
-                                                          
-
-                                                            let idx_res = {
-                                                                let _g = chain_lock.lock();
-                                                                if hdr.prev == [0u8;32] {
-                                                                    index_header(&db, &hdr, None)
-                                                                } else {
-                                                                    let parent = get_hidx(&db, &hdr.prev)?;
-                                                                    let Some(p) = parent else { continue; };
-                                                                    index_header(&db, &hdr, Some(&p))
-                                                                }
-                                                            };
-
-                                                            if idx_res.is_err() {
-                                                                note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
-                                                                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-                                                                continue;
-                                                            }
-
-                                                            if let Ok(Some(hi2)) = get_hidx(&db, &h) {
-                                                                if hi2.chainwork > best_hdr_work {
-                                                                    best_hdr_tip = h;
-                                                                    best_hdr_height = hi2.height;
-                                                                    best_hdr_work = hi2.chainwork;
-                                                                }
-                                                            }
-
-                                                            if db.blocks.get(k_block(&h))?.is_none()
-    && !inflight.contains_key(&h)
-    && !pending_apply.contains_key(&h)
-    && !want_blocks.iter().any(|x| x == &h)
-    && want_blocks.len() < MAX_WANT_QUEUE
-{
-    want_blocks.push_back(h);
+// Do NOT ignore "racing" peers.
+// A stale sync_peer can otherwise blind us to the actually best chain.
+if sync_peer.is_none() {
+    sync_peer = Some(peer);
 }
-                                                        }
+
+for hdr in headers {
+    let h = header_hash(&hdr);
+
+    if !accept_header_universe_pow(&cfg, &hdr, &h) {
+        note_invalid(&mut buckets, &mut bans, peer, "headers: invalid pow/limit/universe");
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+        continue;
+    }
+
+    let idx_res = {
+        let _g = chain_lock.lock();
+        if hdr.prev == [0u8;32] {
+            index_header(&db, &hdr, None)
+        } else {
+            let parent = get_hidx(&db, &hdr.prev)?;
+            let Some(p) = parent else { continue; };
+            index_header(&db, &hdr, Some(&p))
+        }
+    };
+
+    if idx_res.is_err() {
+        note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+        continue;
+    }
+
+    if let Ok(Some(hi2)) = get_hidx(&db, &h) {
+        if hi2.chainwork > best_hdr_work {
+            best_hdr_tip = h;
+            best_hdr_height = hi2.height;
+            best_hdr_work = hi2.chainwork;
+        }
+    }
+
+    if db.blocks.get(k_block(&h))?.is_none()
+        && !inflight.contains_key(&h)
+        && !pending_apply.contains_key(&h)
+        && !want_blocks.iter().any(|x| x == &h)
+        && want_blocks.len() < MAX_WANT_QUEUE
+    {
+        want_blocks.push_back(h);
+    }
+}
+
+sync_peer = choose_best_sync_peer(
+    &connected,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+)
+.or_else(|| Some(peer));
 
 let _ = pump_blocks(
     &mut swarm,
@@ -1719,7 +1726,7 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
-&mut peer_score,
+    &mut peer_score,
     &mut quarantine,
     &mut rid_to_hash,
     &db,
@@ -1728,7 +1735,6 @@ let _ = pump_blocks(
     &mut inflight,
 );
 
-                                                    }
                                                 }
 
 SyncResponse::Block { block } => {
