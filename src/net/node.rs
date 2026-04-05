@@ -1304,6 +1304,15 @@ if next_sync_peer != sync_peer {
 }
 sync_peer = next_sync_peer;
 
+if !want_blocks.is_empty() || !inflight.is_empty() {
+    println!(
+        "[sync] queue status: want_blocks={} inflight={} pending_apply={}",
+        want_blocks.len(),
+        inflight.len(),
+        pending_apply.len(),
+    );
+}
+
 let _ = pump_blocks(
     &mut swarm,
     sync_peer,
@@ -1778,7 +1787,6 @@ sync_peer = next_sync_peer;
 }
 
                                                 SyncResponse::Headers { headers } => {
-
     if headers.len() as u64 > MAX_HEADERS_PER_SYNC {
         note_invalid(&mut buckets, &mut bans, peer, "oversized headers response");
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_OVERSIZED_HEADERS);
@@ -1800,86 +1808,149 @@ sync_peer = next_sync_peer;
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
     }
 
-// Do NOT ignore "racing" peers.
-// A stale sync_peer can otherwise blind us to the actually best chain.
-if sync_peer.is_none() {
-    sync_peer = Some(peer);
-}
-
-for hdr in headers {
-    let h = header_hash(&hdr);
-
-    if !accept_header_universe_pow(&cfg, &hdr, &h) {
-        note_invalid(&mut buckets, &mut bans, peer, "headers: invalid pow/limit/universe");
-        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-        continue;
+    if sync_peer.is_none() {
+        sync_peer = Some(peer);
     }
 
-    // Header provider hint: this peer advertised this hash to us.
-    providers.entry(h).or_insert(peer);
+    let mut first_requestable_from_batch: Option<Hash32> = None;
 
-    let idx_res = {
+    for hdr in headers {
+        let h = header_hash(&hdr);
 
-        let _g = chain_lock.lock();
-        if hdr.prev == [0u8;32] {
-            index_header(&db, &hdr, None)
-        } else {
-            let parent = get_hidx(&db, &hdr.prev)?;
-            let Some(p) = parent else { continue; };
-            index_header(&db, &hdr, Some(&p))
+        if !accept_header_universe_pow(&cfg, &hdr, &h) {
+            note_invalid(&mut buckets, &mut bans, peer, "headers: invalid pow/limit/universe");
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            continue;
         }
-    };
 
-    if idx_res.is_err() {
-        note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
-        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-        continue;
-    }
+        // Remember which peer advertised this hash first.
+        providers.entry(h).or_insert(peer);
 
-    if let Ok(Some(hi2)) = get_hidx(&db, &h) {
-        if hi2.chainwork > best_hdr_work {
-            best_hdr_tip = h;
-            best_hdr_height = hi2.height;
-            best_hdr_work = hi2.chainwork;
+        let idx_res = {
+            let _g = chain_lock.lock();
+            if hdr.prev == [0u8; 32] {
+                index_header(&db, &hdr, None)
+            } else {
+                let parent = get_hidx(&db, &hdr.prev)?;
+                let Some(p) = parent else { continue; };
+                index_header(&db, &hdr, Some(&p))
+            }
+        };
+
+        if idx_res.is_err() {
+            note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            continue;
+        }
+
+        if let Ok(Some(hi2)) = get_hidx(&db, &h) {
+            if hi2.chainwork > best_hdr_work {
+                best_hdr_tip = h;
+                best_hdr_height = hi2.height;
+                best_hdr_work = hi2.chainwork;
+            }
+        }
+
+        let already_have_block = db.blocks.get(k_block(&h))?.is_some();
+        let already_inflight = inflight.contains_key(&h);
+        let already_pending = pending_apply.contains_key(&h);
+        let already_queued = want_blocks.iter().any(|x| x == &h);
+
+        if !already_have_block && !already_inflight && !already_pending && !already_queued {
+            if want_blocks.len() < MAX_WANT_QUEUE {
+                want_blocks.push_back(h);
+            }
+        }
+
+        // Immediate progress heuristic:
+        // if this block's parent raw bytes are already present (or pending),
+        // it is directly requestable now.
+        let parent_ready =
+            hdr.prev == [0u8; 32]
+            || db.blocks.get(k_block(&hdr.prev))?.is_some()
+            || pending_apply.contains_key(&hdr.prev);
+
+        if first_requestable_from_batch.is_none()
+            && !already_have_block
+            && !already_inflight
+            && parent_ready
+        {
+            first_requestable_from_batch = Some(h);
         }
     }
 
-    if db.blocks.get(k_block(&h))?.is_none()
-        && !inflight.contains_key(&h)
-        && !pending_apply.contains_key(&h)
-        && !want_blocks.iter().any(|x| x == &h)
-        && want_blocks.len() < MAX_WANT_QUEUE
-    {
-        want_blocks.push_back(h);
+    // Recompute live best-peer metrics.
+    let (best_h, best_w_lo) = recompute_best_peer_metrics(
+        &connected,
+        &peer_heights,
+        &peer_work,
+        &bans,
+        &quarantine,
+    );
+    best_peer_height_atomic.store(best_h, Ordering::Relaxed);
+    best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
+
+    let candidate_sync_peer = choose_best_sync_peer(
+        &connected,
+        &peer_work,
+        &peer_score,
+        &bans,
+        &quarantine,
+    ).or_else(|| Some(peer));
+
+    let next_sync_peer = maybe_switch_sync_peer(
+        sync_peer,
+        candidate_sync_peer,
+        &connected,
+        &peer_work,
+        &peer_score,
+        &bans,
+        &quarantine,
+    );
+
+    if next_sync_peer != sync_peer {
+        if let Some(p) = next_sync_peer {
+            println!("[sync] switching sync_peer -> {}", p);
+        }
     }
+    sync_peer = next_sync_peer;
+
+    // IMPORTANT:
+    // Request the first requestable block from this batch immediately.
+    if let Some(h) = first_requestable_from_batch {
+        if !inflight.contains_key(&h) && db.blocks.get(k_block(&h))?.is_none() {
+            let rid = swarm
+                .behaviour_mut()
+                .rr
+                .send_request(&peer, SyncRequest::GetBlock { hash: h });
+
+            println!(
+                "[sync] immediate request block {} from {}",
+                hex32(&h),
+                peer
+            );
+
+            rid_to_hash.insert(rid, h);
+            inflight.insert(h, (rid, Instant::now(), peer));
+        }
+    }
+
+    let _ = pump_blocks(
+        &mut swarm,
+        sync_peer,
+        &connected,
+        &providers,
+        &mut bad_providers,
+        &bans,
+        &mut peer_score,
+        &mut quarantine,
+        &mut rid_to_hash,
+        &db,
+        &pending_apply,
+        &mut want_blocks,
+        &mut inflight,
+    );
 }
-
-sync_peer = choose_best_sync_peer(
-    &connected,
-    &peer_work,
-    &peer_score,
-    &bans,
-    &quarantine,
-)
-.or_else(|| Some(peer));
-
-let _ = pump_blocks(
-    &mut swarm,
-    sync_peer,
-    &connected,
-    &providers,
-    &mut bad_providers,
-    &bans,
-    &mut peer_score,
-    &mut quarantine,
-    &mut rid_to_hash,
-    &db,
-    &pending_apply,
-    &mut want_blocks,
-    &mut inflight,
-);
-
-                                                }
 
 SyncResponse::Block { block } => {
     let bh = header_hash(&block.header);
