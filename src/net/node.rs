@@ -1132,7 +1132,9 @@ if hi.parent != [0u8; 32]
 
                 let mut target: Option<PeerId> = None;
 
-                // 1) Prefer the recorded provider for this hash, but only if still eligible.
+                let mut target: Option<PeerId> = None;
+
+                // 1) If we know a provider for this hash, stay sticky to that peer.
                 if let Some(p) = providers.get(&h) {
                     if connected.contains(p)
                         && !is_banned(bans, p)
@@ -1140,10 +1142,18 @@ if hi.parent != [0u8; 32]
                         && !is_bad(bad_providers, &h, p)
                     {
                         target = Some(*p);
+                    } else {
+                        // Known provider exists but is currently unusable.
+                        // Requeue and wait until it times out / disconnects / is marked bad,
+                        // or until another provider is learned explicitly.
+                        if want_blocks.len() < MAX_WANT_QUEUE {
+                            want_blocks.push_back(h);
+                        }
+                        continue;
                     }
                 }
 
-                // 2) Fall back to sync_peer if eligible.
+                // 2) Only if we do NOT know a provider yet, fall back to sync_peer.
                 if target.is_none() {
                     if let Some(sp) = sync_peer {
                         if connected.contains(&sp)
@@ -1156,7 +1166,7 @@ if hi.parent != [0u8; 32]
                     }
                 }
 
-                // 3) Fall back to any connected eligible peer.
+                // 3) Last resort only when there is no known provider at all.
                 if target.is_none() {
                     target = connected
                         .iter()
@@ -1744,17 +1754,8 @@ sync_peer = next_sync_peer;
 
     let (applied_tip, _applied_h, applied_w) = local_tip_and_work(&db);
 
-    let local_w = if best_hdr_work > 0 {
-        best_hdr_work
-    } else {
-        applied_w
-    };
-
-    let locator_tip = if best_hdr_tip != [0u8; 32] {
-        best_hdr_tip
-    } else {
-        applied_tip
-    };
+    let local_w = applied_w;
+    let locator_tip = applied_tip;
 
     if chainwork > local_w && sync_peer == Some(peer) {
         let locator = build_locator(&db, &locator_tip);
@@ -1814,7 +1815,11 @@ for hdr in headers {
         continue;
     }
 
+    // Header provider hint: this peer advertised this hash to us.
+    providers.entry(h).or_insert(peer);
+
     let idx_res = {
+
         let _g = chain_lock.lock();
         if hdr.prev == [0u8;32] {
             index_header(&db, &hdr, None)
@@ -1991,12 +1996,19 @@ let _ = pump_blocks(
                                                 SyncResponse::Ack => {}
 
 SyncResponse::Err { msg } => {
-    println!("[sync] error response from {peer}: {msg}");
 
     if msg.contains("unknown block") {
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNKNOWN_BLOCK);
 
         if let Some(h) = rid_to_hash.remove(&rid) {
+            println!(
+                "[sync] unknown block from {} for hash={} provider={:?} sync_peer={:?}",
+                peer,
+                hex32(&h),
+                providers.get(&h),
+                sync_peer
+            );
+
             inflight.remove(&h);
             bad_providers.entry(h).or_default().insert(peer);
 
@@ -2031,7 +2043,10 @@ SyncResponse::Err { msg } => {
                     .cloned()
             });
         }
+    } else {
+        println!("[sync] error response from {peer}: {msg}");
     }
+
 }
 
                                             }
