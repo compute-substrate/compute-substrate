@@ -1186,6 +1186,15 @@ if !parent_ready {
         inflight,
         h,
     )?;
+
+if inflight.is_empty() {
+        println!("[sync] forcing ancestor request for {}", hex32(&h));
+
+        request_block(..., h); // your existing send_request path
+        inflight.insert(h, peer);
+        continue;
+}
+
     continue;
 }
 
