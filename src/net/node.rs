@@ -643,45 +643,41 @@ fn block_parent_ready(
     pending_apply.contains_key(&hdr.prev)
 }
 
-fn enqueue_missing_ancestor_for_hash(
+fn resolve_requestable_ancestor(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
-    want_blocks: &mut VecDeque<Hash32>,
     inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
     h: Hash32,
-) -> Result<()> {
+) -> Result<Option<Hash32>> {
     let mut cur = h;
 
     loop {
         let Some(hi) = get_hidx(db, &cur)? else {
-            return Ok(());
+            return Ok(None);
         };
 
-        // If we already have raw bytes for this block, no need to backfill further here.
+        // Already have raw bytes for this block -> nothing to request for this path.
         if db.blocks.get(k_block(&cur))?.is_some() {
-            return Ok(());
+            return Ok(None);
         }
 
-        // If parent is ready, then cur itself is the earliest requestable missing block.
+        // Already being fetched.
+        if inflight.contains_key(&cur) {
+            return Ok(None);
+        }
+
         let parent_ready =
             hi.parent == [0u8; 32]
             || db.blocks.get(k_block(&hi.parent))?.is_some()
             || pending_apply.contains_key(&hi.parent);
 
         if parent_ready {
-            let already_queued = want_blocks.iter().any(|x| *x == cur);
-            let already_inflight = inflight.contains_key(&cur);
-
-            if !already_queued && !already_inflight && want_blocks.len() < MAX_WANT_QUEUE {
-                want_blocks.push_front(cur);
-            }
-            return Ok(());
+            return Ok(Some(cur));
         }
 
-        // Otherwise walk backward to the parent and keep searching.
         cur = hi.parent;
         if cur == [0u8; 32] {
-            return Ok(());
+            return Ok(None);
         }
     }
 }
@@ -1151,107 +1147,76 @@ want_blocks.retain(|h| {
     }
 });
 
-
 while inflight.len() < MAX_INFLIGHT_BLOCKS {
-    let mut best_idx: Option<usize> = None;
+    let snapshot: Vec<Hash32> = want_blocks.iter().copied().collect();
+
     let mut best_hash: Option<Hash32> = None;
     let mut best_peer: Option<PeerId> = None;
     let mut best_height: u64 = u64::MAX;
 
-let snapshot: Vec<Hash32> = want_blocks.iter().copied().collect();
-
-for (idx, h) in snapshot.into_iter().enumerate() {
-
-        if db.blocks.get(k_block(&h))?.is_some() {
-            continue;
-        }
-        if inflight.contains_key(&h) {
-            continue;
-        }
-
-        let Some(hi) = get_hidx(db, &h)? else {
+    for queued_h in snapshot {
+        let Some(target_h) = resolve_requestable_ancestor(
+            db,
+            pending_apply,
+            inflight,
+            queued_h,
+        )? else {
             continue;
         };
 
-let parent_ready =
-    hi.parent == [0u8; 32]
-    || db.blocks.get(k_block(&hi.parent))?.is_some()
-    || pending_apply.contains_key(&hi.parent);
+        let Some(hi) = get_hidx(db, &target_h)? else {
+            continue;
+        };
 
-if !parent_ready {
-    enqueue_missing_ancestor_for_hash(
-        db,
-        pending_apply,
-        want_blocks,
-        inflight,
-        h,
-    )?;
+        let mut target_peer: Option<PeerId> = None;
 
-if inflight.is_empty() {
-        println!("[sync] forcing ancestor request for {}", hex32(&h));
-
-        request_block(..., h); // your existing send_request path
-        inflight.insert(h, peer);
-        continue;
-}
-
-    continue;
-}
-
-        let mut target: Option<PeerId> = None;
-
-        // 1) Prefer the recorded provider for this hash, but only if still eligible.
-        if let Some(p) = providers.get(&h) {
+        // 1) Prefer the recorded provider for the ACTUAL target hash.
+        if let Some(p) = providers.get(&target_h) {
             if connected.contains(p)
                 && !is_banned(bans, p)
                 && !is_quarantined(quarantine, p)
-                && !is_bad(bad_providers, &h, p)
+                && !is_bad(bad_providers, &target_h, p)
             {
-                target = Some(*p);
+                target_peer = Some(*p);
             }
         }
 
         // 2) Fall back to sync_peer if eligible.
-        if target.is_none() {
+        if target_peer.is_none() {
             if let Some(sp) = sync_peer {
                 if connected.contains(&sp)
                     && !is_banned(bans, &sp)
                     && !is_quarantined(quarantine, &sp)
-                    && !is_bad(bad_providers, &h, &sp)
+                    && !is_bad(bad_providers, &target_h, &sp)
                 {
-                    target = Some(sp);
+                    target_peer = Some(sp);
                 }
             }
         }
 
         // 3) Fall back to any connected eligible peer.
-        if target.is_none() {
-            target = connected
+        if target_peer.is_none() {
+            target_peer = connected
                 .iter()
                 .find(|p| {
                     !is_banned(bans, p)
                         && !is_quarantined(quarantine, p)
-                        && !is_bad(bad_providers, &h, p)
+                        && !is_bad(bad_providers, &target_h, p)
                 })
                 .cloned();
         }
 
-        let Some(peer) = target else {
+        let Some(peer) = target_peer else {
             continue;
         };
 
-        // Pick the LOWEST-HEIGHT requestable block.
         if hi.height < best_height {
             best_height = hi.height;
-            best_idx = Some(idx);
-            best_hash = Some(h);
+            best_hash = Some(target_h);
             best_peer = Some(peer);
         }
     }
 
-    let Some(idx) = best_idx else {
-        break;
-    };
     let Some(h) = best_hash else {
         break;
     };
@@ -1259,14 +1224,14 @@ if inflight.is_empty() {
         break;
     };
 
-if let Some(pos) = want_blocks.iter().position(|x| *x == h) {
-    let _ = want_blocks.remove(pos);
-}
+    // Remove every queued copy of the actual target hash.
+    want_blocks.retain(|x| *x != h);
 
     let rid = swarm
         .behaviour_mut()
         .rr
         .send_request(&peer, SyncRequest::GetBlock { hash: h });
+
     println!(
         "[sync] request block {} from {} (height={})",
         hex32(&h),
