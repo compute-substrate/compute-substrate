@@ -1986,8 +1986,6 @@ sync_peer = next_sync_peer;
     // Immediate request rule:
     // pick the FIRST missing block in this batch whose parent block is already grounded
     // locally (raw db) or already downloaded into pending_apply.
-    //
-    // This is intentionally simple and directly matches the good sync behavior seen in logs.
     let mut immediate_req: Option<Hash32> = None;
 
     for (h, hdr) in &indexed_batch {
@@ -2012,19 +2010,56 @@ sync_peer = next_sync_peer;
     }
 
     if let Some(h) = immediate_req {
-        let rid = swarm
-            .behaviour_mut()
-            .rr
-            .send_request(&peer, SyncRequest::GetBlock { hash: h });
+        if !has_raw_or_pending(&db, &pending_apply, &h) && !inflight.contains_key(&h) {
+            let request_peer = if let Some(p) = providers.get(&h) {
+                if connected.contains(p)
+                    && !is_banned(&bans, p)
+                    && !is_quarantined(&quarantine, p)
+                    && !bad_providers.get(&h).map(|s| s.contains(p)).unwrap_or(false)
+                {
+                    Some(*p)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            .or_else(|| {
+                if connected.contains(&peer)
+                    && !is_banned(&bans, &peer)
+                    && !is_quarantined(&quarantine, &peer)
+                    && !bad_providers.get(&h).map(|s| s.contains(&peer)).unwrap_or(false)
+                {
+                    Some(peer)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                sync_peer.filter(|sp| {
+                    connected.contains(sp)
+                        && !is_banned(&bans, sp)
+                        && !is_quarantined(&quarantine, sp)
+                        && !bad_providers.get(&h).map(|s| s.contains(sp)).unwrap_or(false)
+                })
+            });
 
-        println!(
-            "[sync] immediate request block {} from {}",
-            hex32(&h),
-            peer
-        );
+            if let Some(req_peer) = request_peer {
+                let rid = swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_request(&req_peer, SyncRequest::GetBlock { hash: h });
 
-        rid_to_hash.insert(rid, h);
-        inflight.insert(h, (rid, Instant::now(), peer));
+                println!(
+                    "[sync] immediate request block {} from {}",
+                    hex32(&h),
+                    req_peer
+                );
+
+                rid_to_hash.insert(rid, h);
+                inflight.insert(h, (rid, Instant::now(), req_peer));
+            }
+        }
     }
 
     let _ = pump_blocks(
