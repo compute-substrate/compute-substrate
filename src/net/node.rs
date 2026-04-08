@@ -629,69 +629,77 @@ fn should_log_tip_update(
     last_logged != Some((new_height, new_work, local_work))
 }
 
-fn block_parent_ready(
+fn has_raw_or_pending(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
-    hdr: &BlockHeader,
+    h: &Hash32,
 ) -> bool {
-    if hdr.prev == [0u8; 32] {
-        return true;
-    }
-
-    if db.blocks.get(k_block(&hdr.prev)).ok().flatten().is_some() {
-        return true;
-    }
-
-    pending_apply.contains_key(&hdr.prev)
+    db.blocks.get(k_block(h)).ok().flatten().is_some() || pending_apply.contains_key(h)
 }
 
-fn resolve_requestable_ancestor(
+fn is_requestable_missing_block(
+    db: &Stores,
+    pending_apply: &HashMap<Hash32, Block>,
+    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+    h: &Hash32,
+) -> Result<bool> {
+    if has_raw_or_pending(db, pending_apply, h) {
+        return Ok(false);
+    }
+    if inflight.contains_key(h) {
+        return Ok(false);
+    }
+
+    let Some(hi) = get_hidx(db, h)? else {
+        return Ok(false);
+    };
+
+    Ok(
+        hi.parent == [0u8; 32]
+            || has_raw_or_pending(db, pending_apply, &hi.parent)
+    )
+}
+
+fn earliest_requestable_missing_ancestor(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
     inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
     h: Hash32,
 ) -> Result<Option<Hash32>> {
     let mut cur = h;
-    let mut last_missing: Option<Hash32> = None;
+    let mut path: Vec<Hash32> = Vec::new();
 
     loop {
         let Some(hi) = get_hidx(db, &cur)? else {
             return Ok(None);
         };
 
-        let have_raw = db.blocks.get(k_block(&cur))?.is_some();
-        let in_pending = pending_apply.contains_key(&cur);
-        let in_flight = inflight.contains_key(&cur);
+        path.push(cur);
 
-        // If we hit a block we already have locally, then the first requestable block
-        // is the missing child immediately above it that we remembered while walking back.
-        if have_raw || in_pending {
-            return Ok(last_missing);
-        }
-
-        // If this exact block is already being fetched, don't request further descendants yet.
-        if in_flight {
-            return Ok(None);
-        }
-
-        // This block is missing, so remember it as the current best candidate.
-        last_missing = Some(cur);
-
-        let parent_ready =
-            hi.parent == [0u8; 32]
-            || db.blocks.get(k_block(&hi.parent))?.is_some()
-            || pending_apply.contains_key(&hi.parent);
-
-        if parent_ready {
-            return Ok(Some(cur));
+        if hi.parent == [0u8; 32] {
+            break;
         }
 
         cur = hi.parent;
-        if cur == [0u8; 32] {
-            return Ok(last_missing);
+    }
+
+    path.reverse();
+
+    for x in path {
+        if is_requestable_missing_block(db, pending_apply, inflight, &x)? {
+            return Ok(Some(x));
+        }
+
+        // Stop as soon as we hit a missing-but-not-requestable block.
+        // Its parent chain is not locally grounded yet.
+        if !has_raw_or_pending(db, pending_apply, &x) && !inflight.contains_key(&x) {
+            return Ok(None);
         }
     }
+
+    Ok(None)
 }
+
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
@@ -942,7 +950,6 @@ async fn run_p2p_loop(
         );
     }
     
-    println!("[p2p] peer_id: {peer_id}");
 
     let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
         .upgrade(upgrade::Version::V1)
@@ -1164,19 +1171,20 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
     let mut best_peer: Option<PeerId> = None;
     let mut best_height: u64 = u64::MAX;
 
-    for queued_h in snapshot {
-        let Some(target_h) = resolve_requestable_ancestor(
-            db,
-            pending_apply,
-            inflight,
-            queued_h,
-        )? else {
-            continue;
-        };
 
-        let Some(hi) = get_hidx(db, &target_h)? else {
-            continue;
-        };
+for queued_h in snapshot {
+    let Some(target_h) = earliest_requestable_missing_ancestor(
+        db,
+        pending_apply,
+        inflight,
+        queued_h,
+    )? else {
+        continue;
+    };
+
+    let Some(hi) = get_hidx(db, &target_h)? else {
+        continue;
+    };
 
         let mut target_peer: Option<PeerId> = None;
 
@@ -1881,12 +1889,11 @@ sync_peer = next_sync_peer;
         sync_peer = Some(peer);
     }
 
-    // We will track the earliest actually-requestable missing block
-    // directly from this ordered contiguous batch.
-    let mut first_requestable_from_batch: Option<Hash32> = None;
-    let mut prev_ready = true;
 
-    for (i, hdr) in headers.into_iter().enumerate() {
+
+    let mut batch_hashes: Vec<Hash32> = Vec::new();
+
+    for hdr in headers.into_iter() {
         let h = header_hash(&hdr);
 
         if !accept_header_universe_pow(&cfg, &hdr, &h) {
@@ -1897,6 +1904,7 @@ sync_peer = next_sync_peer;
 
         // Remember who advertised this hash.
         providers.entry(h).or_insert(peer);
+        batch_hashes.push(h);
 
         let idx_res = {
             let _g = chain_lock.lock();
@@ -1939,30 +1947,6 @@ sync_peer = next_sync_peer;
             }
         }
 
-        // Determine whether THIS header is directly requestable.
-        // For the first header in the batch, parent readiness depends on local raw storage.
-        // For later headers in the same contiguous batch, parent readiness depends on whether
-        // all earlier missing headers in this batch were already present.
-        let this_parent_ready = if i == 0 {
-            hdr.prev == [0u8; 32]
-                || db.blocks.get(k_block(&hdr.prev))?.is_some()
-                || pending_apply.contains_key(&hdr.prev)
-        } else {
-            prev_ready
-        };
-
-        if first_requestable_from_batch.is_none()
-            && this_parent_ready
-            && !already_have_block
-            && !already_inflight
-            && !already_pending
-        {
-            first_requestable_from_batch = Some(h);
-        }
-
-        // Once we encounter a missing block, later blocks in this batch are not directly
-        // requestable until that missing one is downloaded.
-        prev_ready = this_parent_ready && already_have_block;
     }
 
     // Recompute best-peer metrics.
@@ -2001,9 +1985,35 @@ sync_peer = next_sync_peer;
     }
     sync_peer = next_sync_peer;
 
-    // Request the first actually-requestable block from this contiguous batch immediately.
-    if let Some(h) = first_requestable_from_batch {
-        if !inflight.contains_key(&h) && db.blocks.get(k_block(&h))?.is_none() {
+    // After indexing the batch, immediately request the earliest missing indexed ancestor
+    // we can actually ground locally.
+    let mut best_immediate: Option<(u64, Hash32)> = None;
+
+    for h in batch_hashes {
+        let Some(req_h) = earliest_requestable_missing_ancestor(
+            &db,
+            &pending_apply,
+            &inflight,
+            h,
+        )? else {
+            continue;
+        };
+
+        let Some(hi) = get_hidx(&db, &req_h)? else {
+            continue;
+        };
+
+        match best_immediate {
+            None => best_immediate = Some((hi.height, req_h)),
+            Some((best_height, _)) if hi.height < best_height => {
+                best_immediate = Some((hi.height, req_h));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((_, h)) = best_immediate {
+        if !inflight.contains_key(&h) && !has_raw_or_pending(&db, &pending_apply, &h) {
             let rid = swarm
                 .behaviour_mut()
                 .rr
