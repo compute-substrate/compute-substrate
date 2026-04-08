@@ -618,6 +618,8 @@ fn maybe_switch_sync_peer(
 }
 
 
+
+
 fn should_log_tip_update(
     last_logged: Option<(u64, u128, u128)>,
     new_height: u64,
@@ -650,21 +652,30 @@ fn resolve_requestable_ancestor(
     h: Hash32,
 ) -> Result<Option<Hash32>> {
     let mut cur = h;
+    let mut last_missing: Option<Hash32> = None;
 
     loop {
         let Some(hi) = get_hidx(db, &cur)? else {
             return Ok(None);
         };
 
-        // Already have raw bytes for this block -> nothing to request for this path.
-        if db.blocks.get(k_block(&cur))?.is_some() {
+        let have_raw = db.blocks.get(k_block(&cur))?.is_some();
+        let in_pending = pending_apply.contains_key(&cur);
+        let in_flight = inflight.contains_key(&cur);
+
+        // If we hit a block we already have locally, then the first requestable block
+        // is the missing child immediately above it that we remembered while walking back.
+        if have_raw || in_pending {
+            return Ok(last_missing);
+        }
+
+        // If this exact block is already being fetched, don't request further descendants yet.
+        if in_flight {
             return Ok(None);
         }
 
-        // Already being fetched.
-        if inflight.contains_key(&cur) {
-            return Ok(None);
-        }
+        // This block is missing, so remember it as the current best candidate.
+        last_missing = Some(cur);
 
         let parent_ready =
             hi.parent == [0u8; 32]
@@ -677,11 +688,10 @@ fn resolve_requestable_ancestor(
 
         cur = hi.parent;
         if cur == [0u8; 32] {
-            return Ok(None);
+            return Ok(last_missing);
         }
     }
 }
-
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
