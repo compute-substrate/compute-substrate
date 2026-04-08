@@ -1871,9 +1871,12 @@ sync_peer = next_sync_peer;
         sync_peer = Some(peer);
     }
 
+    // We will track the earliest actually-requestable missing block
+    // directly from this ordered contiguous batch.
     let mut first_requestable_from_batch: Option<Hash32> = None;
+    let mut prev_ready = true;
 
-    for hdr in headers {
+    for (i, hdr) in headers.into_iter().enumerate() {
         let h = header_hash(&hdr);
 
         if !accept_header_universe_pow(&cfg, &hdr, &h) {
@@ -1882,7 +1885,7 @@ sync_peer = next_sync_peer;
             continue;
         }
 
-        // Remember which peer advertised this hash first.
+        // Remember who advertised this hash.
         providers.entry(h).or_insert(peer);
 
         let idx_res = {
@@ -1891,7 +1894,11 @@ sync_peer = next_sync_peer;
                 index_header(&db, &hdr, None)
             } else {
                 let parent = get_hidx(&db, &hdr.prev)?;
-                let Some(p) = parent else { continue; };
+                let Some(p) = parent else {
+                    // Parent header not indexed yet -> this batch is not usable past here.
+                    prev_ready = false;
+                    continue;
+                };
                 index_header(&db, &hdr, Some(&p))
             }
         };
@@ -1899,6 +1906,7 @@ sync_peer = next_sync_peer;
         if idx_res.is_err() {
             note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
             bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            prev_ready = false;
             continue;
         }
 
@@ -1921,24 +1929,33 @@ sync_peer = next_sync_peer;
             }
         }
 
-        // Immediate progress heuristic:
-        // if this block's parent raw bytes are already present (or pending),
-        // it is directly requestable now.
-        let parent_ready =
+        // Determine whether THIS header is directly requestable.
+        // For the first header in the batch, parent readiness depends on local raw storage.
+        // For later headers in the same contiguous batch, parent readiness depends on whether
+        // all earlier missing headers in this batch were already present.
+        let this_parent_ready = if i == 0 {
             hdr.prev == [0u8; 32]
-            || db.blocks.get(k_block(&hdr.prev))?.is_some()
-            || pending_apply.contains_key(&hdr.prev);
+                || db.blocks.get(k_block(&hdr.prev))?.is_some()
+                || pending_apply.contains_key(&hdr.prev)
+        } else {
+            prev_ready
+        };
 
         if first_requestable_from_batch.is_none()
+            && this_parent_ready
             && !already_have_block
             && !already_inflight
-            && parent_ready
+            && !already_pending
         {
             first_requestable_from_batch = Some(h);
         }
+
+        // Once we encounter a missing block, later blocks in this batch are not directly
+        // requestable until that missing one is downloaded.
+        prev_ready = this_parent_ready && already_have_block;
     }
 
-    // Recompute live best-peer metrics.
+    // Recompute best-peer metrics.
     let (best_h, best_w_lo) = recompute_best_peer_metrics(
         &connected,
         &peer_heights,
@@ -1974,8 +1991,7 @@ sync_peer = next_sync_peer;
     }
     sync_peer = next_sync_peer;
 
-    // IMPORTANT:
-    // Request the first requestable block from this batch immediately.
+    // Request the first actually-requestable block from this contiguous batch immediately.
     if let Some(h) = first_requestable_from_batch {
         if !inflight.contains_key(&h) && db.blocks.get(k_block(&h))?.is_none() {
             let rid = swarm
@@ -2010,7 +2026,6 @@ sync_peer = next_sync_peer;
         &mut inflight,
     );
 }
-
 SyncResponse::Block { block } => {
     let bh = header_hash(&block.header);
     println!("[sync] got block {} from {}", hex32(&bh), peer);
