@@ -1913,8 +1913,6 @@ sync_peer = next_sync_peer;
             } else {
                 let parent = get_hidx(&db, &hdr.prev)?;
                 let Some(p) = parent else {
-                    // Parent header not indexed yet -> this batch is not usable past here.
-                    prev_ready = false;
                     continue;
                 };
                 index_header(&db, &hdr, Some(&p))
@@ -1924,7 +1922,6 @@ sync_peer = next_sync_peer;
         if idx_res.is_err() {
             note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
             bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-            prev_ready = false;
             continue;
         }
 
