@@ -1889,9 +1889,8 @@ sync_peer = next_sync_peer;
         sync_peer = Some(peer);
     }
 
-
-
-    let mut batch_hashes: Vec<Hash32> = Vec::new();
+    // Store headers from this batch in order, keeping parent linkage visible.
+    let mut indexed_batch: Vec<(Hash32, BlockHeader)> = Vec::new();
 
     for hdr in headers.into_iter() {
         let h = header_hash(&hdr);
@@ -1904,15 +1903,16 @@ sync_peer = next_sync_peer;
 
         // Remember who advertised this hash.
         providers.entry(h).or_insert(peer);
-        batch_hashes.push(h);
 
         let idx_res = {
             let _g = chain_lock.lock();
+
             if hdr.prev == [0u8; 32] {
                 index_header(&db, &hdr, None)
             } else {
                 let parent = get_hidx(&db, &hdr.prev)?;
                 let Some(p) = parent else {
+                    // Can't index this header yet because its parent header is unknown locally.
                     continue;
                 };
                 index_header(&db, &hdr, Some(&p))
@@ -1924,6 +1924,8 @@ sync_peer = next_sync_peer;
             bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
             continue;
         }
+
+        indexed_batch.push((h, hdr.clone()));
 
         if let Ok(Some(hi2)) = get_hidx(&db, &h) {
             if hi2.chainwork > best_hdr_work {
@@ -1943,7 +1945,6 @@ sync_peer = next_sync_peer;
                 want_blocks.push_back(h);
             }
         }
-
     }
 
     // Recompute best-peer metrics.
@@ -1982,49 +1983,48 @@ sync_peer = next_sync_peer;
     }
     sync_peer = next_sync_peer;
 
-    // After indexing the batch, immediately request the earliest missing indexed ancestor
-    // we can actually ground locally.
-    let mut best_immediate: Option<(u64, Hash32)> = None;
+    // Immediate request rule:
+    // pick the FIRST missing block in this batch whose parent block is already grounded
+    // locally (raw db) or already downloaded into pending_apply.
+    //
+    // This is intentionally simple and directly matches the good sync behavior seen in logs.
+    let mut immediate_req: Option<Hash32> = None;
 
-    for h in batch_hashes {
-        let Some(req_h) = earliest_requestable_missing_ancestor(
-            &db,
-            &pending_apply,
-            &inflight,
-            h,
-        )? else {
+    for (h, hdr) in &indexed_batch {
+        let already_have_block = db.blocks.get(k_block(h))?.is_some();
+        let already_inflight = inflight.contains_key(h);
+        let already_pending = pending_apply.contains_key(h);
+
+        if already_have_block || already_inflight || already_pending {
             continue;
+        }
+
+        let parent_grounded = if hdr.prev == [0u8; 32] {
+            true
+        } else {
+            db.blocks.get(k_block(&hdr.prev))?.is_some() || pending_apply.contains_key(&hdr.prev)
         };
 
-        let Some(hi) = get_hidx(&db, &req_h)? else {
-            continue;
-        };
-
-        match best_immediate {
-            None => best_immediate = Some((hi.height, req_h)),
-            Some((best_height, _)) if hi.height < best_height => {
-                best_immediate = Some((hi.height, req_h));
-            }
-            _ => {}
+        if parent_grounded {
+            immediate_req = Some(*h);
+            break;
         }
     }
 
-    if let Some((_, h)) = best_immediate {
-        if !inflight.contains_key(&h) && !has_raw_or_pending(&db, &pending_apply, &h) {
-            let rid = swarm
-                .behaviour_mut()
-                .rr
-                .send_request(&peer, SyncRequest::GetBlock { hash: h });
+    if let Some(h) = immediate_req {
+        let rid = swarm
+            .behaviour_mut()
+            .rr
+            .send_request(&peer, SyncRequest::GetBlock { hash: h });
 
-            println!(
-                "[sync] immediate request block {} from {}",
-                hex32(&h),
-                peer
-            );
+        println!(
+            "[sync] immediate request block {} from {}",
+            hex32(&h),
+            peer
+        );
 
-            rid_to_hash.insert(rid, h);
-            inflight.insert(h, (rid, Instant::now(), peer));
-        }
+        rid_to_hash.insert(rid, h);
+        inflight.insert(h, (rid, Instant::now(), peer));
     }
 
     let _ = pump_blocks(
