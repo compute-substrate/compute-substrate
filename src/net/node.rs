@@ -83,7 +83,7 @@ const MAX_HEADERS_PER_SYNC: u64 = 1024;
 const MAX_LOCATOR_LEN: usize = 128;
 const MAX_INFLIGHT_BLOCKS: usize = 64;
 const MAX_WANT_QUEUE: usize = 20_000;
-const BLOCK_REQ_TIMEOUT_SECS: u64 = 30;
+const BLOCK_REQ_TIMEOUT_SECS: u64 = 12;
 
 // ----------------- time helpers -----------------
 
@@ -659,6 +659,7 @@ fn is_requestable_missing_block(
             || has_raw_or_pending(db, pending_apply, &hi.parent)
     )
 }
+
 fn earliest_requestable_missing_ancestor(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
@@ -666,25 +667,73 @@ fn earliest_requestable_missing_ancestor(
     h: Hash32,
 ) -> Result<Option<Hash32>> {
     let mut cur = h;
+    let mut path: Vec<Hash32> = Vec::new();
 
     loop {
-        let have_raw = db.blocks.get(k_block(&cur))?.is_some();
-        let in_pending = pending_apply.contains_key(&cur);
-        let in_flight = inflight.contains_key(&cur);
-
-        if !have_raw && !in_pending && !in_flight {
-            return Ok(Some(cur));
-        }
-
         let Some(hi) = get_hidx(db, &cur)? else {
             return Ok(None);
         };
 
-        if hi.height == 0 {
-            return Ok(None);
+        path.push(cur);
+
+        if hi.parent == [0u8; 32] {
+            break;
         }
 
         cur = hi.parent;
+    }
+
+    path.reverse();
+
+    for x in path {
+        if has_raw_or_pending(db, pending_apply, &x) {
+            continue;
+        }
+
+        if inflight.contains_key(&x) {
+            return Ok(None);
+        }
+
+        let Some(hi) = get_hidx(db, &x)? else {
+            return Ok(None);
+        };
+
+        let parent_grounded =
+            hi.parent == [0u8; 32] || has_raw_or_pending(db, pending_apply, &hi.parent);
+
+        if parent_grounded {
+            return Ok(Some(x));
+        } else {
+            return Ok(None);
+        }
+    }
+
+    Ok(None)
+}
+
+fn scrub_stale_inflight(
+    inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+    rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
+    want_blocks: &mut VecDeque<Hash32>,
+) {
+    let mut stale: Vec<(Hash32, request_response::OutboundRequestId)> = Vec::new();
+
+    for (h, (rid, _t0, _peer)) in inflight.iter() {
+        match rid_to_hash.get(rid) {
+            Some(mapped_h) if *mapped_h == *h => {}
+            _ => stale.push((*h, *rid)),
+        }
+    }
+
+    for (h, rid) in stale {
+        inflight.remove(&h);
+        rid_to_hash.remove(&rid);
+
+        if !want_blocks.iter().any(|x| *x == h) && want_blocks.len() < MAX_WANT_QUEUE {
+            want_blocks.push_back(h);
+        }
+
+        println!("[sync] scrubbed stale inflight {}", hex32(&h));
     }
 }
 
@@ -1367,9 +1416,16 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
 
     loop {
         tokio::select! {
-            _ = poll.tick() => {
+
+_ = poll.tick() => {
 
 prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
+
+scrub_stale_inflight(
+    &mut inflight,
+    &mut rid_to_hash,
+    &mut want_blocks,
+);
 
                 // bootnode auto-redial (with backoff + connected-skip)
                 if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
@@ -2220,7 +2276,7 @@ SyncResponse::Block { block } => {
 providers.insert(bh, peer);
 want_blocks.retain(|x| *x != bh);
 
-if let Some((_rid2, t0, asked_peer)) = inflight.remove(&bh) {
+if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
     if asked_peer == peer {
         let _elapsed = t0.elapsed().as_millis();
     }
