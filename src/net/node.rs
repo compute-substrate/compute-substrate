@@ -659,11 +659,10 @@ fn is_requestable_missing_block(
             || has_raw_or_pending(db, pending_apply, &hi.parent)
     )
 }
-
 fn earliest_requestable_missing_ancestor(
     db: &Stores,
-    pending_apply: &HashMap<Hash32, _>,
-    inflight: &HashMap<Hash32, _>,
+    pending_apply: &HashMap<Hash32, Block>,
+    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
     h: Hash32,
 ) -> Result<Option<Hash32>> {
     let mut cur = h;
@@ -688,6 +687,7 @@ fn earliest_requestable_missing_ancestor(
         cur = hi.parent;
     }
 }
+
 fn short_peer(p: &PeerId) -> String {
     let s = p.to_string();
     if s.len() <= 12 { s } else { format!("{}..{}", &s[..6], &s[s.len()-4..]) }
