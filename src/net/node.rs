@@ -662,44 +662,32 @@ fn is_requestable_missing_block(
 
 fn earliest_requestable_missing_ancestor(
     db: &Stores,
-    pending_apply: &HashMap<Hash32, Block>,
-    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+    pending_apply: &HashMap<Hash32, _>,
+    inflight: &HashMap<Hash32, _>,
     h: Hash32,
 ) -> Result<Option<Hash32>> {
     let mut cur = h;
-    let mut path: Vec<Hash32> = Vec::new();
 
     loop {
+        let have_raw = db.blocks.get(k_block(&cur))?.is_some();
+        let in_pending = pending_apply.contains_key(&cur);
+        let in_flight = inflight.contains_key(&cur);
+
+        if !have_raw && !in_pending && !in_flight {
+            return Ok(Some(cur));
+        }
+
         let Some(hi) = get_hidx(db, &cur)? else {
             return Ok(None);
         };
 
-        path.push(cur);
-
-        if hi.parent == [0u8; 32] {
-            break;
+        if hi.height == 0 {
+            return Ok(None);
         }
 
         cur = hi.parent;
     }
-
-    path.reverse();
-
-    for x in path {
-        if is_requestable_missing_block(db, pending_apply, inflight, &x)? {
-            return Ok(Some(x));
-        }
-
-        // Stop as soon as we hit a missing-but-not-requestable block.
-        // Its parent chain is not locally grounded yet.
-        if !has_raw_or_pending(db, pending_apply, &x) && !inflight.contains_key(&x) {
-            return Ok(None);
-        }
-    }
-
-    Ok(None)
 }
-
 fn short_peer(p: &PeerId) -> String {
     let s = p.to_string();
     if s.len() <= 12 { s } else { format!("{}..{}", &s[..6], &s[s.len()-4..]) }
