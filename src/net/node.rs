@@ -1154,15 +1154,29 @@ if sync_peer == Some(peer) {
 
             }
 
+
+
 want_blocks.retain(|h| {
-    if inflight.contains_key(h) {
+    // Keep if actively being processed
+    if inflight.contains_key(h) || pending_apply.contains_key(h) {
         return true;
     }
-    match db.blocks.get(k_block(h)) {
-        Ok(Some(_)) => false,
-        _ => true,
+
+    // Drop if we already have it
+    if db.blocks.get(k_block(h)).ok().flatten().is_some() {
+        return false;
     }
+
+    // Drop if header no longer exists (defensive)
+    if get_hidx(db, h).ok().flatten().is_none() {
+        return false;
+    }
+
+    true
 });
+
+
+
 
 while inflight.len() < MAX_INFLIGHT_BLOCKS {
     let snapshot: Vec<Hash32> = want_blocks.iter().copied().collect();
