@@ -700,6 +700,16 @@ fn earliest_requestable_missing_ancestor(
     Ok(None)
 }
 
+fn short_peer(p: &PeerId) -> String {
+    let s = p.to_string();
+    if s.len() <= 12 { s } else { format!("{}..{}", &s[..6], &s[s.len()-4..]) }
+}
+
+fn short_hash(h: &Hash32) -> String {
+    let s = hex32(h);
+    if s.len() <= 18 { s } else { format!("{}..{}", &s[..10], &s[s.len()-6..]) }
+}
+
 fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
@@ -1157,24 +1167,20 @@ if sync_peer == Some(peer) {
 
 
 want_blocks.retain(|h| {
-    // Keep if actively being processed
     if inflight.contains_key(h) || pending_apply.contains_key(h) {
         return true;
     }
 
-    // Drop if we already have it
     if db.blocks.get(k_block(h)).ok().flatten().is_some() {
         return false;
     }
 
-    // Drop if header no longer exists (defensive)
     if get_hidx(db, h).ok().flatten().is_none() {
         return false;
     }
 
     true
 });
-
 
 
 
@@ -1185,48 +1191,106 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
     let mut best_peer: Option<PeerId> = None;
     let mut best_height: u64 = u64::MAX;
 
+    let mut skip_no_requestable = 0usize;
+    let mut skip_no_hidx = 0usize;
+    let mut skip_no_peer = 0usize;
 
-for queued_h in snapshot {
-    let Some(target_h) = earliest_requestable_missing_ancestor(
-        db,
-        pending_apply,
-        inflight,
-        queued_h,
-    )? else {
-        continue;
-    };
+    let mut sample_reasons: Vec<String> = Vec::new();
 
-    let Some(hi) = get_hidx(db, &target_h)? else {
-        continue;
-    };
+    for queued_h in snapshot {
+        let Some(target_h) = earliest_requestable_missing_ancestor(
+            db,
+            pending_apply,
+            inflight,
+            queued_h,
+        )? else {
+            skip_no_requestable += 1;
+
+            if sample_reasons.len() < 8 {
+                let have_raw = db.blocks.get(k_block(&queued_h)).ok().flatten().is_some();
+                let in_pending = pending_apply.contains_key(&queued_h);
+                let in_flight = inflight.contains_key(&queued_h);
+                let hidx = get_hidx(db, &queued_h)?.is_some();
+
+                sample_reasons.push(format!(
+                    "queued={} no_requestable (have_raw={} pending={} inflight={} hidx={})",
+                    short_hash(&queued_h),
+                    have_raw,
+                    in_pending,
+                    in_flight,
+                    hidx
+                ));
+            }
+
+            continue;
+        };
+
+        let Some(hi) = get_hidx(db, &target_h)? else {
+            skip_no_hidx += 1;
+
+            if sample_reasons.len() < 8 {
+                sample_reasons.push(format!(
+                    "queued={} target={} missing_hidx",
+                    short_hash(&queued_h),
+                    short_hash(&target_h),
+                ));
+            }
+
+            continue;
+        };
 
         let mut target_peer: Option<PeerId> = None;
+        let mut peer_reason = String::new();
 
-        // 1) Prefer the recorded provider for the ACTUAL target hash.
+        // 1) Prefer recorded provider for target hash
         if let Some(p) = providers.get(&target_h) {
-            if connected.contains(p)
-                && !is_banned(bans, p)
-                && !is_quarantined(quarantine, p)
-                && !is_bad(bad_providers, &target_h, p)
-            {
+            let connected_ok = connected.contains(p);
+            let banned = is_banned(bans, p);
+            let quarantined = is_quarantined(quarantine, p);
+            let bad = is_bad(bad_providers, &target_h, p);
+
+            if connected_ok && !banned && !quarantined && !bad {
                 target_peer = Some(*p);
+            } else {
+                peer_reason = format!(
+                    "provider={} connected={} banned={} quarantined={} bad={}",
+                    short_peer(p),
+                    connected_ok,
+                    banned,
+                    quarantined,
+                    bad
+                );
             }
+        } else {
+            peer_reason = "no_provider".to_string();
         }
 
-        // 2) Fall back to sync_peer if eligible.
+        // 2) Fallback to sync_peer
         if target_peer.is_none() {
             if let Some(sp) = sync_peer {
-                if connected.contains(&sp)
-                    && !is_banned(bans, &sp)
-                    && !is_quarantined(quarantine, &sp)
-                    && !is_bad(bad_providers, &target_h, &sp)
-                {
+                let connected_ok = connected.contains(&sp);
+                let banned = is_banned(bans, &sp);
+                let quarantined = is_quarantined(quarantine, &sp);
+                let bad = is_bad(bad_providers, &target_h, &sp);
+
+                if connected_ok && !banned && !quarantined && !bad {
                     target_peer = Some(sp);
+                } else if peer_reason.is_empty() {
+                    peer_reason = format!(
+                        "sync_peer={} connected={} banned={} quarantined={} bad={}",
+                        short_peer(&sp),
+                        connected_ok,
+                        banned,
+                        quarantined,
+                        bad
+                    );
                 }
+            } else if peer_reason.is_empty() {
+                peer_reason = "no_sync_peer".to_string();
             }
         }
 
-        // 3) Fall back to any connected eligible peer.
+        // 3) Fallback to any eligible connected peer
         if target_peer.is_none() {
             target_peer = connected
                 .iter()
@@ -1236,9 +1300,24 @@ for queued_h in snapshot {
                         && !is_bad(bad_providers, &target_h, p)
                 })
                 .cloned();
+
+            if target_peer.is_none() && peer_reason.is_empty() {
+                peer_reason = "no_fallback_peer".to_string();
+            }
         }
 
         let Some(peer) = target_peer else {
+            skip_no_peer += 1;
+
+            if sample_reasons.len() < 8 {
+                sample_reasons.push(format!(
+                    "queued={} target={} no_peer ({})",
+                    short_hash(&queued_h),
+                    short_hash(&target_h),
+                    peer_reason
+                ));
+            }
+
             continue;
         };
 
@@ -1250,13 +1329,33 @@ for queued_h in snapshot {
     }
 
     let Some(h) = best_hash else {
-        break;
-    };
-    let Some(peer) = best_peer else {
+        if !want_blocks.is_empty() {
+            println!(
+                "[sync-debug] pump_blocks stalled: want={} inflight={} pending={} connected={} no_requestable={} no_hidx={} no_peer={}",
+                want_blocks.len(),
+                inflight.len(),
+                pending_apply.len(),
+                connected.len(),
+                skip_no_requestable,
+                skip_no_hidx,
+                skip_no_peer,
+            );
+
+            for line in &sample_reasons {
+                println!("[sync-debug] {}", line);
+            }
+        }
         break;
     };
 
-    // Remove every queued copy of the actual target hash.
+    let Some(peer) = best_peer else {
+        println!(
+            "[sync-debug] pump_blocks internal inconsistency: best_hash but no best_peer for {}",
+            short_hash(&h)
+        );
+        break;
+    };
+
     want_blocks.retain(|x| *x != h);
 
     let rid = swarm
