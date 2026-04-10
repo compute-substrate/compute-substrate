@@ -660,7 +660,6 @@ fn is_requestable_missing_block(
     )
 }
 
-
 fn earliest_requestable_missing_ancestor(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
