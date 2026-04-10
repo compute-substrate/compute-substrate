@@ -659,7 +659,6 @@ fn is_requestable_missing_block(
             || has_raw_or_pending(db, pending_apply, &hi.parent)
     )
 }
-
 fn earliest_requestable_missing_ancestor(
     db: &Stores,
     pending_apply: &HashMap<Hash32, Block>,
@@ -710,7 +709,6 @@ fn earliest_requestable_missing_ancestor(
 
     Ok(None)
 }
-
 fn scrub_stale_inflight(
     inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
     rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
