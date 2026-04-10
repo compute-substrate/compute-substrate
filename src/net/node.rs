@@ -738,6 +738,51 @@ fn scrub_stale_inflight(
     }
 }
 
+fn compact_want_queue(
+    db: &Stores,
+    pending_apply: &HashMap<Hash32, Block>,
+    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+    want_blocks: &mut VecDeque<Hash32>,
+) -> Result<()> {
+    let old: Vec<Hash32> = want_blocks.drain(..).collect();
+    let mut seen: HashSet<Hash32> = HashSet::new();
+
+    for h in old {
+        // Already satisfied locally -> drop it.
+        if has_raw_or_pending(db, pending_apply, &h) {
+            continue;
+        }
+
+        // If we don't even have header index for it anymore, drop it.
+        if get_hidx(db, &h)?.is_none() {
+            continue;
+        }
+
+        // Collapse this queued descendant onto the earliest actually requestable
+        // missing ancestor in its indexed chain.
+        let Some(frontier) = earliest_requestable_missing_ancestor(
+            db,
+            pending_apply,
+            inflight,
+            h,
+        )? else {
+            continue;
+        };
+
+        // If that frontier is already in flight or already satisfied, no need to keep
+        // anything in want_blocks for this branch right now.
+        if inflight.contains_key(&frontier) || has_raw_or_pending(db, pending_apply, &frontier) {
+            continue;
+        }
+
+        if seen.insert(frontier) {
+            want_blocks.push_back(frontier);
+        }
+    }
+
+    Ok(())
+}
+
 fn short_peer(p: &PeerId) -> String {
     let s = p.to_string();
     if s.len() <= 12 { s } else { format!("{}..{}", &s[..6], &s[s.len()-4..]) }
@@ -1200,25 +1245,15 @@ if sync_peer == Some(peer) {
     // handled by outer sync-peer chooser on next poll/event
 }
 
+compact_want_queue(
+    db,
+    pending_apply,
+    inflight,
+    want_blocks,
+)?;
+
             }
 
-
-
-want_blocks.retain(|h| {
-    if inflight.contains_key(h) || pending_apply.contains_key(h) {
-        return true;
-    }
-
-    if db.blocks.get(k_block(h)).ok().flatten().is_some() {
-        return false;
-    }
-
-    if get_hidx(db, h).ok().flatten().is_none() {
-        return false;
-    }
-
-    true
-});
 
 
 
