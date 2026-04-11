@@ -1225,34 +1225,33 @@ let pump_blocks =
                 }
             }
 
-            for (h, peer) in timed_out {
-                if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
-                    rid_to_hash.remove(&rid);
-                }
 
-                bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT); 
-bad_providers.entry(h).or_default().insert(peer);
+for (h, peer) in timed_out {
+    if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
+        rid_to_hash.remove(&rid);
+    }
 
-                if providers.get(&h) == Some(&peer) {
-                }
+    bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT);
+    bad_providers.entry(h).or_default().insert(peer);
 
-                if want_blocks.len() < MAX_WANT_QUEUE {
-                    want_blocks.push_back(h);
-                }
-                println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
+    if want_blocks.len() < MAX_WANT_QUEUE {
+        want_blocks.push_back(h);
+    }
 
-if sync_peer == Some(peer) {
-    // handled by outer sync-peer chooser on next poll/event
+    println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
+
+    if sync_peer == Some(peer) {
+        // handled by outer sync-peer chooser on next poll/event
+    }
 }
 
+// Always compact, even when there were zero timeouts.
 compact_want_queue(
     db,
     pending_apply,
     inflight,
     want_blocks,
 )?;
-
-            }
 
 
 
