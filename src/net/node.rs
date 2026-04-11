@@ -783,6 +783,27 @@ fn compact_want_queue(
     Ok(())
 }
 
+fn compact_and_log_want_queue(
+    db: &Stores,
+    pending_apply: &HashMap<Hash32, Block>,
+    inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+    want_blocks: &mut VecDeque<Hash32>,
+    label: &str,
+) -> Result<()> {
+    let before = want_blocks.len();
+    compact_want_queue(db, pending_apply, inflight, want_blocks)?;
+    let after = want_blocks.len();
+
+    if before != after {
+        println!(
+            "[sync] compact_want_queue({}) {} -> {}",
+            label, before, after
+        );
+    }
+
+    Ok(())
+}
+
 fn short_peer(p: &PeerId) -> String {
     let s = p.to_string();
     if s.len() <= 12 { s } else { format!("{}..{}", &s[..6], &s[s.len()-4..]) }
@@ -1462,6 +1483,15 @@ scrub_stale_inflight(
     &mut want_blocks,
 );
 
+let _ = compact_and_log_want_queue(
+    &db,
+    &pending_apply,
+    &inflight,
+    &mut want_blocks,
+    "poll",
+);
+
+
                 // bootnode auto-redial (with backoff + connected-skip)
                 if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
                     for a in &cfg.bootnodes {
@@ -1721,6 +1751,15 @@ last_logged_tip.remove(&peer_id);
                             }
                         }
 
+let _ = compact_and_log_want_queue(
+    &db,
+    &pending_apply,
+    &inflight,
+    &mut want_blocks,
+    "connection-closed",
+);
+
+
                         if sync_peer == Some(peer_id) {
                             sync_peer = None;
                         }
@@ -1782,6 +1821,15 @@ if seen_blocks.insert(h) {
     {
         want_blocks.push_back(h);
     }
+
+let _ = compact_and_log_want_queue(
+    &db,
+    &pending_apply,
+    &inflight,
+    &mut want_blocks,
+    "gossip-hdr",
+);
+
     if sync_peer.is_none() {
         sync_peer = src;
     }
@@ -2139,6 +2187,14 @@ sync_peer = next_sync_peer;
         }
     }
 
+compact_and_log_want_queue(
+    &db,
+    &pending_apply,
+    &inflight,
+    &mut want_blocks,
+    "headers",
+)?;
+
     // Recompute best-peer metrics.
     let (best_h, best_w_lo) = recompute_best_peer_metrics(
         &connected,
@@ -2365,6 +2421,14 @@ if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
 pending_apply.insert(bh, block);
 try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
 
+compact_and_log_want_queue(
+    &db,
+    &pending_apply,
+    &inflight,
+    &mut want_blocks,
+    "block",
+)?;
+
 let _ = pump_blocks(
     &mut swarm,
     sync_peer,
@@ -2409,6 +2473,15 @@ SyncResponse::Err { msg } => {
             if want_blocks.len() < MAX_WANT_QUEUE {
                 want_blocks.push_back(h);
             }
+
+let _ = compact_and_log_want_queue(
+    &db,
+    &pending_apply,
+    &inflight,
+    &mut want_blocks,
+    "unknown-block",
+);
+
         } else {
             println!("[sync] unknown block from {peer}, but rid had no tracked hash");
         }
@@ -2466,6 +2539,15 @@ Event::OutboundFailure { peer, request_id, error } => {
         }
 
         println!("[sync] requeued {} after outbound failure", hex32(&h));
+
+        let _ = compact_and_log_want_queue(
+            &db,
+            &pending_apply,
+            &inflight,
+            &mut want_blocks,
+            "outbound-failure",
+        );
+
     }
 
     if sync_peer == Some(peer) {
