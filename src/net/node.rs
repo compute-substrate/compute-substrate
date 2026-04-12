@@ -736,35 +736,22 @@ fn compact_want_queue(
     let mut seen: HashSet<Hash32> = HashSet::new();
 
     for h in old {
-        // Already satisfied locally -> drop it.
+        // Drop entries already satisfied locally.
         if has_raw_or_pending(db, pending_apply, &h) {
             continue;
         }
 
-        // If we don't even have header index for it anymore, drop it.
+        // Drop entries whose header index is gone / unknown.
         if get_hidx(db, &h)?.is_none() {
             continue;
         }
 
-        // Collapse this queued descendant onto the earliest actually requestable
-        // missing ancestor in its indexed chain.
-        let Some(frontier) = earliest_requestable_missing_ancestor(
-            db,
-            pending_apply,
-            inflight,
-            h,
-        )? else {
-            continue;
-        };
-
-        // If that frontier is already in flight or already satisfied, no need to keep
-        // anything in want_blocks for this branch right now.
-        if inflight.contains_key(&frontier) || has_raw_or_pending(db, pending_apply, &frontier) {
-            continue;
-        }
-
-        if seen.insert(frontier) {
-            want_blocks.push_back(frontier);
+        // Keep descendants in the queue.
+        // Do NOT collapse them onto the current frontier here.
+        // pump_blocks() will map each queued descendant to the earliest
+        // requestable missing ancestor at request time.
+        if seen.insert(h) {
+            want_blocks.push_back(h);
         }
     }
 
