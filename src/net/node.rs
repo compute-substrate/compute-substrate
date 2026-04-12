@@ -694,23 +694,11 @@ fn earliest_requestable_missing_ancestor(
             return Ok(None);
         }
 
-        let Some(hi) = get_hidx(db, &x)? else {
-            return Ok(None);
-        };
-
-        let parent_grounded =
-            hi.parent == [0u8; 32] || has_raw_or_pending(db, pending_apply, &hi.parent);
-
-        if parent_grounded {
-            return Ok(Some(x));
-        } else {
-            return Ok(None);
-        }
+        return Ok(Some(x));
     }
 
     Ok(None)
 }
-
 
 fn scrub_stale_inflight(
     inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
