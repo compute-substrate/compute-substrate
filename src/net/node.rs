@@ -1241,13 +1241,6 @@ for (h, peer) in timed_out {
     }
 }
 
-// Always compact, even when there were zero timeouts.
-compact_want_queue(
-    db,
-    pending_apply,
-    inflight,
-    want_blocks,
-)?;
 
 
 
