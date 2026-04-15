@@ -322,6 +322,7 @@ pub struct NetHandle {
     last_peer_change_unix: Arc<AtomicU64>,
     best_peer_height: Arc<AtomicU64>,
     best_peer_work_lo: Arc<AtomicU64>,
+    best_peer_tip: Arc<RwLock<Hash32>>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 }
 
@@ -337,6 +338,10 @@ impl NetHandle {
     pub fn last_tip_seen_unix(&self) -> u64 {
         self.last_tip_seen_unix.load(Ordering::Relaxed)
     }
+
+pub async fn best_peer_tip(&self) -> Hash32 {
+    *self.best_peer_tip.read().await
+}
 
     pub fn is_tip_fresh(&self, max_age_secs: u64) -> bool {
         let now = unix_now();
@@ -931,6 +936,7 @@ let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
 let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 let best_peer_height = Arc::new(AtomicU64::new(0));
 let best_peer_work_lo = Arc::new(AtomicU64::new(0));
+let best_peer_tip = Arc::new(RwLock::new([0u8; 32]));
 
 let listen_addr = Arc::new(RwLock::new(None));
 
@@ -941,6 +947,7 @@ let handle = NetHandle {
     last_peer_change_unix: last_peer_change_unix.clone(),
     best_peer_height: best_peer_height.clone(),
     best_peer_work_lo: best_peer_work_lo.clone(),
+     best_peer_tip: best_peer_tip.clone(),
     listen_addr: listen_addr.clone(),
 };
 
@@ -957,6 +964,7 @@ if let Err(e) = run_p2p_loop(
     last_peer_change_unix,
     best_peer_height,
     best_peer_work_lo,
+    best_peer_tip,
     listen_addr,
     mined_rx,
     tx_gossip_rx,
@@ -996,6 +1004,7 @@ async fn run_p2p_loop(
     last_peer_change_unix: Arc<AtomicU64>,
     best_peer_height_atomic: Arc<AtomicU64>,
     best_peer_work_lo_atomic: Arc<AtomicU64>,
+    best_peer_tip: Arc<RwLock<Hash32>>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 
     mut mined_rx: tokio::sync::mpsc::UnboundedReceiver<MinedHeaderEvent>,
@@ -1097,6 +1106,7 @@ let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
 
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
+let mut peer_tips: HashMap<PeerId, Hash32> = HashMap::new();
     let mut sync_peer: Option<PeerId> = None;
 
 let mut last_logged_tip: HashMap<PeerId, (u64, u128, u128)> = HashMap::new();
@@ -1686,6 +1696,7 @@ if !is_quarantined(&quarantine, &peer_id) {
 
                         peer_heights.remove(&peer_id);
                         peer_work.remove(&peer_id);
+                         peer_tips.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
 
 let (best_h, best_w_lo) = recompute_best_peer_metrics(
@@ -1998,6 +2009,7 @@ SyncResponse::Tip { hash: _hash, height, chainwork } => {
 
 peer_heights.insert(peer, height);
 peer_work.insert(peer, chainwork);
+peer_tips.insert(peer, hash);
 
 // Recompute live best-peer metrics from current eligible peers.
 let (best_h, best_w_lo) = recompute_best_peer_metrics(
@@ -2198,6 +2210,13 @@ compact_and_log_want_queue(
         }
     }
     sync_peer = next_sync_peer;
+
+if let Some(sp) = sync_peer {
+    let best_tip = peer_tips.get(&sp).copied().unwrap_or([0u8; 32]);
+    *best_peer_tip.write().await = best_tip;
+} else {
+    *best_peer_tip.write().await = [0u8; 32];
+}
 
     // Immediate request rule:
     // pick the FIRST missing block in this batch whose parent block is already grounded
