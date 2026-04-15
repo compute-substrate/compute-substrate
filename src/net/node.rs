@@ -2003,7 +2003,7 @@ let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
                                         Message::Response { request_id: rid, response } => {
                                             match response {
 
-SyncResponse::Tip { hash: _hash, height, chainwork } => {
+SyncResponse::Tip { hash: hash, height, chainwork } => {
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
