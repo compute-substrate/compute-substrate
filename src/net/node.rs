@@ -2439,7 +2439,7 @@ let _ = pump_blocks(
 );
 
                                                 }
-
+}
                                                 SyncResponse::Ack => {}
 
 SyncResponse::Err { msg } => {
