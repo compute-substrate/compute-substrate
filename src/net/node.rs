@@ -2160,7 +2160,7 @@ if hi2.chainwork > best_hdr_work
 }
 
             }
-        }
+    
 
         let already_have_block = db.blocks.get(k_block(&h))?.is_some();
         let already_inflight = inflight.contains_key(&h);
