@@ -935,7 +935,7 @@ let connected_peers = Arc::new(AtomicUsize::new(0));
 let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
 let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 let best_peer_height = Arc::new(AtomicU64::new(0));
-let best_peer_work= Arc::new(RwLock<u128>::new(0));
+let best_peer_work = Arc::new(RwLock::new(0u128));
 let best_peer_tip = Arc::new(RwLock::new([0u8; 32]));
 
 let listen_addr = Arc::new(RwLock::new(None));
@@ -1532,7 +1532,7 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 );
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-*best_peer_work_atomic.write().await = best_w;
+*best_peer_work.write().await = best_w;
 
 // Pick best candidate, but keep current sync_peer unless the candidate is strictly better.
 let candidate_sync_peer = choose_best_sync_peer(
@@ -1710,7 +1710,7 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 );
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-*best_peer_work_atomic.write().await = best_w;
+*best_peer_work.write().await = best_w;
 
 last_gettip_log_at.remove(&peer_id);
 
@@ -2023,7 +2023,7 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 );
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-*best_peer_work_atomic.write().await = best_w;
+*best_peer_work.write().await = best_w;
 
 let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
 let last_logged = last_logged_tip.get(&peer).copied();
@@ -2180,7 +2180,7 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 );
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-*best_peer_work_atomic.write().await = best_w;
+*best_peer_work.write().await = best_w;
 
     let candidate_sync_peer = choose_best_sync_peer(
         &connected,
