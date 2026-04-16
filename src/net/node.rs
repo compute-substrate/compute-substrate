@@ -366,6 +366,7 @@ pub async fn best_peer_tip(&self) -> Hash32 {
 pub async fn best_peer_work(&self) -> u128 {
     *self.best_peer_work.read().await
 }
+}
 
 #[derive(Debug)]
 pub enum OutEvent {
