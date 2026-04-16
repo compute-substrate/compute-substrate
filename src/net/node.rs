@@ -2083,7 +2083,7 @@ sync_peer = next_sync_peer;
     }
 }
 
-                                                SyncResponse::Headers { headers } => {
+                                                S SyncResponse::Headers { headers } => {
     if headers.len() as u64 > MAX_HEADERS_PER_SYNC {
         note_invalid(&mut buckets, &mut bans, peer, "oversized headers response");
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_OVERSIZED_HEADERS);
@@ -2109,7 +2109,7 @@ sync_peer = next_sync_peer;
         sync_peer = Some(peer);
     }
 
-    // Store headers from this batch in order, keeping parent linkage visible.
+    // Keep headers in-order exactly as received.
     let mut indexed_batch: Vec<(Hash32, BlockHeader)> = Vec::new();
 
     for hdr in headers.into_iter() {
@@ -2121,7 +2121,6 @@ sync_peer = next_sync_peer;
             continue;
         }
 
-        // Remember who advertised this hash.
         providers.entry(h).or_insert(peer);
 
         let idx_res = {
@@ -2132,7 +2131,7 @@ sync_peer = next_sync_peer;
             } else {
                 let parent = get_hidx(&db, &hdr.prev)?;
                 let Some(p) = parent else {
-                    // Can't index this header yet because its parent header is unknown locally.
+                    // Parent header not known locally yet; skip this header for now.
                     continue;
                 };
                 index_header(&db, &hdr, Some(&p))
@@ -2166,14 +2165,6 @@ sync_peer = next_sync_peer;
             }
         }
     }
-
-compact_and_log_want_queue(
-    &db,
-    &pending_apply,
-    &inflight,
-    &mut want_blocks,
-    "headers",
-)?;
 
     // Recompute best-peer metrics.
     let (best_h, best_w_lo) = recompute_best_peer_metrics(
@@ -2211,16 +2202,15 @@ compact_and_log_want_queue(
     }
     sync_peer = next_sync_peer;
 
-if let Some(sp) = sync_peer {
-    let best_tip = peer_tips.get(&sp).copied().unwrap_or([0u8; 32]);
-    *best_peer_tip.write().await = best_tip;
-} else {
-    *best_peer_tip.write().await = [0u8; 32];
-}
+    if let Some(sp) = sync_peer {
+        let best_tip = peer_tips.get(&sp).copied().unwrap_or([0u8; 32]);
+        *best_peer_tip.write().await = best_tip;
+    } else {
+        *best_peer_tip.write().await = [0u8; 32];
+    }
 
     // Immediate request rule:
-    // pick the FIRST missing block in this batch whose parent block is already grounded
-    // locally (raw db) or already downloaded into pending_apply.
+    // request the FIRST missing block in this exact batch whose parent raw block is grounded.
     let mut immediate_req: Option<Hash32> = None;
 
     for (h, hdr) in &indexed_batch {
@@ -2235,7 +2225,8 @@ if let Some(sp) = sync_peer {
         let parent_grounded = if hdr.prev == [0u8; 32] {
             true
         } else {
-            db.blocks.get(k_block(&hdr.prev))?.is_some() || pending_apply.contains_key(&hdr.prev)
+            db.blocks.get(k_block(&hdr.prev))?.is_some()
+                || pending_apply.contains_key(&hdr.prev)
         };
 
         if parent_grounded {
