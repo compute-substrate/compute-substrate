@@ -184,7 +184,7 @@ let should_become_tip = if cur_tip == [0u8; 32] {
 };
 
 if should_become_tip {
-    crate::state::db::set_tip(db, hash)?;
+crate::state::db::set_tip(db, &hash)?;
 }
 
 // ------------------------------------------------------
