@@ -1267,7 +1267,7 @@ let peers = net2.connected_peers();
 let tip_fresh = net2.is_tip_fresh(TIP_FRESH_SECS);
 let peer_stable = net2.is_peer_stable(PEER_STABLE_SECS);
 let best_peer_height = net2.best_peer_height();
-let best_peer_work_lo = net2.best_peer_work_lo();
+let best_peer_work = net2.best_peer_work().await;
 
 let local_tip = crate::state::db::get_tip(db2.as_ref())
     .ok()
@@ -1279,7 +1279,7 @@ let local_hi = crate::chain::index::get_hidx(db2.as_ref(), &local_tip)
     .flatten();
 
 let local_height = local_hi.as_ref().map(|h| h.height).unwrap_or(0);
-let local_work_lo = local_hi
+let local_work = local_hi
     .as_ref()
     .map(|h| (h.chainwork & (u64::MAX as u128)) as u64)
     .unwrap_or(0);
@@ -1308,7 +1308,7 @@ if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
         eprintln!(
-    "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, bootstrap_genesis={}, genesis_aligned={}, same_tip_as_best_peer={}, local_tip=0x{}, best_peer_tip=0x{}, local_work_lo={}, best_peer_work_lo={}, last_tip_seen_unix={}, last_peer_change_unix={})",
+    "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, bootstrap_genesis={}, genesis_aligned={}, same_tip_as_best_peer={}, local_tip=0x{}, best_peer_tip=0x{}, local_work={}, best_peer_work={}, last_tip_seen_unix={}, last_peer_change_unix={})",
     peers,
     peers,
     tip_fresh,
@@ -1321,8 +1321,8 @@ if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
     same_tip_as_best_peer,
     hex::encode(local_tip),
     hex::encode(best_peer_tip),
-    local_work_lo,
-    best_peer_work_lo,
+    local_work,
+    best_peer_work,
     last_tip,
     last_peer_change
 );
