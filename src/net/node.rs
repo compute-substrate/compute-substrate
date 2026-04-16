@@ -2083,7 +2083,7 @@ sync_peer = next_sync_peer;
     }
 }
 
-                                                S SyncResponse::Headers { headers } => {
+                                                SyncResponse::Headers { headers } => {
     if headers.len() as u64 > MAX_HEADERS_PER_SYNC {
         note_invalid(&mut buckets, &mut bans, peer, "oversized headers response");
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_OVERSIZED_HEADERS);
