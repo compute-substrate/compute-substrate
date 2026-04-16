@@ -153,6 +153,17 @@ pub struct BlockResp {
     pub txs: Vec<serde_json::Value>,
 }
 
+#[derive(Serialize)]
+pub struct TxResp {
+    pub ok: bool,
+    pub txid: String,
+    pub block_hash: Option<String>,
+    pub height: Option<u64>,
+    pub time: Option<u64>,
+    pub tx: Option<serde_json::Value>,
+    pub err: Option<String>,
+}
+
 // ===========================
 // Recent blocks feed structs
 // ===========================
@@ -293,6 +304,7 @@ connected_peers,
         .route("/mempool", get(mempool_info))
         // Explorer-grade read endpoints:
         .route("/block/:hash", get(block_get))
+        .route("/tx/:id", get(tx_get))
         .route("/utxos/:addr20", get(utxos_for_addr20))
         // Recent blocks:
         .route("/recent/blocks/:limit", get(recent_blocks))
@@ -713,6 +725,120 @@ let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u3
         chainwork,
         header: header_json,
         txs: txs_json,
+    })
+}
+
+
+async fn tx_get(
+    Path(id): Path<String>,
+    State(st): State<ApiState>,
+) -> Json<TxResp> {
+    let want = match parse_hash32(&id) {
+        Ok(x) => x,
+        Err(e) => {
+            return Json(TxResp {
+                ok: false,
+                txid: id,
+                block_hash: None,
+                height: None,
+                time: None,
+                tx: None,
+                err: Some(e),
+            })
+        }
+    };
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    const MAX_BACK: u64 = 100_000;
+
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
+    let mut scanned: u64 = 0;
+
+    while scanned < MAX_BACK {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            break;
+        };
+
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+
+        for tx in &blk.txs {
+            let id = txid(tx);
+            if id == want {
+                let inputs_json: Vec<serde_json::Value> = tx.inputs.iter().map(|inp| {
+                    let script_sig_hex = format!("0x{}", hex::encode(&inp.script_sig));
+
+                    let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX {
+                        if inp.script_sig.len() > 9 {
+                            std::str::from_utf8(&inp.script_sig[9..])
+                                .ok()
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    serde_json::json!({
+                        "prev_txid": format!("0x{}", hex::encode(inp.prevout.txid)),
+                        "vout": inp.prevout.vout,
+                        "script_sig": script_sig_hex,
+                        "script_sig_text": script_sig_text,
+                    })
+                }).collect();
+
+                let tx_json = serde_json::json!({
+                    "txid": format!("0x{}", hex::encode(id)),
+                    "version": tx.version,
+                    "inputs": inputs_json,
+                    "outputs": tx.outputs.iter().map(|o| {
+                        serde_json::json!({
+                            "value": o.value,
+                            "script_pubkey": format!("0x{}", hex::encode(o.script_pubkey)),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "locktime": tx.locktime,
+                    "app": format!("{:?}", tx.app),
+                });
+
+                return Json(TxResp {
+                    ok: true,
+                    txid: format!("0x{}", hex::encode(id)),
+                    block_hash: Some(format!("0x{}", hex::encode(cur_hash))),
+                    height: Some(cur_height),
+                    time: Some(blk.header.time),
+                    tx: Some(tx_json),
+                    err: None,
+                });
+            }
+        }
+
+        scanned += 1;
+
+        if blk.header.prev == [0u8; 32] || cur_height == 0 {
+            break;
+        }
+
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
+    }
+
+    Json(TxResp {
+        ok: false,
+        txid: format!("0x{}", hex::encode(want)),
+        block_hash: None,
+        height: None,
+        time: None,
+        tx: None,
+        err: Some("not found".to_string()),
     })
 }
 
