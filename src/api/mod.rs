@@ -809,7 +809,15 @@ async fn utxos_for_addr20(
     if q.smallest.unwrap_or(false) {
         out.sort_by_key(|u| u.value);
     } else {
-        out.sort_by(|a, b| b.value.cmp(&a.value));
+
+out.sort_by(|a, b| {
+    b.height
+        .cmp(&a.height)
+        .then_with(|| b.confirmations.cmp(&a.confirmations))
+        .then_with(|| a.txid.cmp(&b.txid))
+        .then_with(|| a.vout.cmp(&b.vout))
+});
+
     }
 
     if let Some(limit) = q.limit {
