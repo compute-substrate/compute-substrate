@@ -2150,10 +2150,15 @@ sync_peer = next_sync_peer;
         indexed_batch.push((h, hdr.clone()));
 
         if let Ok(Some(hi2)) = get_hidx(&db, &h) {
-            if hi2.chainwork > best_hdr_work {
-                best_hdr_tip = h;
-                best_hdr_height = hi2.height;
-                best_hdr_work = hi2.chainwork;
+
+if hi2.chainwork > best_hdr_work
+    || (hi2.chainwork == best_hdr_work && h < best_hdr_tip)
+{
+    best_hdr_tip = h;
+    best_hdr_height = hi2.height;
+    best_hdr_work = hi2.chainwork;
+}
+
             }
         }
 
@@ -2391,10 +2396,15 @@ if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
                                                         }
 
                                                         if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
-                                                            if hi2.chainwork > best_hdr_work {
-                                                                best_hdr_tip = bh;
-                                                                best_hdr_height = hi2.height;
-                                                                best_hdr_work = hi2.chainwork;
+
+if hi2.chainwork > best_hdr_work
+    || (hi2.chainwork == best_hdr_work && h < best_hdr_tip)
+{
+    best_hdr_tip = h;
+    best_hdr_height = hi2.height;
+    best_hdr_work = hi2.chainwork;
+}
+
                                                             }
                                                         }
                                                     }
