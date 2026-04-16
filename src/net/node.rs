@@ -321,7 +321,7 @@ pub struct NetHandle {
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
     best_peer_height: Arc<AtomicU64>,
-    best_peer_work_lo: Arc<AtomicU64>,
+    best_peer_work: Arc< RwLock<u128> >,
     best_peer_tip: Arc<RwLock<Hash32>>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 }
@@ -363,9 +363,8 @@ pub async fn best_peer_tip(&self) -> Hash32 {
         self.best_peer_height.load(Ordering::Relaxed)
     }
 
-    pub fn best_peer_work_lo(&self) -> u64 {
-        self.best_peer_work_lo.load(Ordering::Relaxed)
-    }
+pub async fn best_peer_work(&self) -> u128 {
+    *self.best_peer_work.read().await
 }
 
 #[derive(Debug)]
@@ -552,9 +551,9 @@ fn recompute_best_peer_metrics(
     peer_work: &HashMap<PeerId, u128>,
     bans: &HashMap<PeerId, Instant>,
     quarantine: &HashMap<PeerId, Instant>,
-) -> (u64, u64) {
+) -> (u64, u128) {
     let mut best_h: u64 = 0;
-    let mut best_w_lo: u64 = 0;
+    let mut best_w: u128 = 0;
 
     for p in connected.iter() {
         if !peer_is_eligible(p, connected, bans, quarantine) {
@@ -562,17 +561,17 @@ fn recompute_best_peer_metrics(
         }
 
         let h = *peer_heights.get(p).unwrap_or(&0);
-        let w_lo = (*peer_work.get(p).unwrap_or(&0) & (u64::MAX as u128)) as u64;
+        let w = *peer_work.get(p).unwrap_or(&0);
 
         if h > best_h {
             best_h = h;
-            best_w_lo = w_lo;
-        } else if h == best_h && w_lo > best_w_lo {
-            best_w_lo = w_lo;
+            best_w = w;
+        } else if h == best_h && w > best_w {
+            best_w = w;
         }
     }
 
-    (best_h, best_w_lo)
+    (best_h, best_w)
 }
 
 fn maybe_switch_sync_peer(
@@ -935,7 +934,7 @@ let connected_peers = Arc::new(AtomicUsize::new(0));
 let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
 let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 let best_peer_height = Arc::new(AtomicU64::new(0));
-let best_peer_work_lo = Arc::new(AtomicU64::new(0));
+let best_peer_work= Arc::new(RwLock<u128>::new(0));
 let best_peer_tip = Arc::new(RwLock::new([0u8; 32]));
 
 let listen_addr = Arc::new(RwLock::new(None));
@@ -946,7 +945,7 @@ let handle = NetHandle {
     last_tip_seen_unix: last_tip_seen_unix.clone(),
     last_peer_change_unix: last_peer_change_unix.clone(),
     best_peer_height: best_peer_height.clone(),
-    best_peer_work_lo: best_peer_work_lo.clone(),
+    best_peer_work: best_peer_work.clone(),
      best_peer_tip: best_peer_tip.clone(),
     listen_addr: listen_addr.clone(),
 };
@@ -963,7 +962,7 @@ if let Err(e) = run_p2p_loop(
     last_tip_seen_unix,
     last_peer_change_unix,
     best_peer_height,
-    best_peer_work_lo,
+    best_peer_work,
     best_peer_tip,
     listen_addr,
     mined_rx,
@@ -1003,7 +1002,7 @@ async fn run_p2p_loop(
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
     best_peer_height_atomic: Arc<AtomicU64>,
-    best_peer_work_lo_atomic: Arc<AtomicU64>,
+    best_peer_work: Arc< RwLock<u128> >,
     best_peer_tip: Arc<RwLock<Hash32>>,
     listen_addr: Arc<RwLock<Option<Multiaddr>>>,
 
@@ -1522,15 +1521,17 @@ for p in connected.iter().cloned() {
 }
 
 // Recompute live best-peer metrics from current eligible peers.
-let (best_h, best_w_lo) = recompute_best_peer_metrics(
+
+let (best_h, best_w) = recompute_best_peer_metrics(
     &connected,
     &peer_heights,
     &peer_work,
     &bans,
     &quarantine,
 );
+
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
+*best_peer_work_atomic.write().await = best_w;
 
 // Pick best candidate, but keep current sync_peer unless the candidate is strictly better.
 let candidate_sync_peer = choose_best_sync_peer(
@@ -1699,15 +1700,16 @@ if !is_quarantined(&quarantine, &peer_id) {
                          peer_tips.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
 
-let (best_h, best_w_lo) = recompute_best_peer_metrics(
+let (best_h, best_w) = recompute_best_peer_metrics(
     &connected,
     &peer_heights,
     &peer_work,
     &bans,
     &quarantine,
 );
+
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
+*best_peer_work_atomic.write().await = best_w;
 
 last_gettip_log_at.remove(&peer_id);
 
@@ -2011,16 +2013,16 @@ peer_heights.insert(peer, height);
 peer_work.insert(peer, chainwork);
 peer_tips.insert(peer, hash);
 
-// Recompute live best-peer metrics from current eligible peers.
-let (best_h, best_w_lo) = recompute_best_peer_metrics(
+let (best_h, best_w) = recompute_best_peer_metrics(
     &connected,
     &peer_heights,
     &peer_work,
     &bans,
     &quarantine,
 );
+
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
+*best_peer_work_atomic.write().await = best_w;
 
 let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
 let last_logged = last_logged_tip.get(&peer).copied();
@@ -2167,15 +2169,17 @@ sync_peer = next_sync_peer;
     }
 
     // Recompute best-peer metrics.
-    let (best_h, best_w_lo) = recompute_best_peer_metrics(
-        &connected,
-        &peer_heights,
-        &peer_work,
-        &bans,
-        &quarantine,
-    );
-    best_peer_height_atomic.store(best_h, Ordering::Relaxed);
-    best_peer_work_lo_atomic.store(best_w_lo, Ordering::Relaxed);
+
+let (best_h, best_w) = recompute_best_peer_metrics(
+    &connected,
+    &peer_heights,
+    &peer_work,
+    &bans,
+    &quarantine,
+);
+
+best_peer_height_atomic.store(best_h, Ordering::Relaxed);
+*best_peer_work_atomic.write().await = best_w;
 
     let candidate_sync_peer = choose_best_sync_peer(
         &connected,
