@@ -168,6 +168,27 @@ pub fn index_header(
         time: hdr.time,
     };
 
-    put_hidx(db, &hi)?;
-    Ok(hi)
+put_hidx(db, &hi)?;
+
+// ---- Canonical tip selection (CONSENSUS CRITICAL) ----
+
+let cur_tip = crate::state::db::get_tip(db)?.unwrap_or([0u8; 32]);
+
+let should_become_tip = if cur_tip == [0u8; 32] {
+    true
+} else if let Some(cur_hi) = get_hidx(db, &cur_tip)? {
+    hi.chainwork > cur_hi.chainwork
+        || (hi.chainwork == cur_hi.chainwork && hash < cur_tip)
+} else {
+    true
+};
+
+if should_become_tip {
+    crate::state::db::set_tip(db, hash)?;
+}
+
+// ------------------------------------------------------
+
+Ok(hi)
+
 }
