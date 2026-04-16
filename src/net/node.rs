@@ -2398,16 +2398,16 @@ if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
                                                         if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
 
 if hi2.chainwork > best_hdr_work
-    || (hi2.chainwork == best_hdr_work && h < best_hdr_tip)
+    || (hi2.chainwork == best_hdr_work && bh < best_hdr_tip)
 {
-    best_hdr_tip = h;
+    best_hdr_tip = bh;
     best_hdr_height = hi2.height;
     best_hdr_work = hi2.chainwork;
 }
 
                                                             }
                                                         }
-                                                    }
+                                                    
 
 
 
@@ -2568,7 +2568,7 @@ Event::OutboundFailure { peer, request_id, error } => {
 Event::InboundFailure { peer, error, .. } => {
             println!("[sync] inbound failure from {}: {:?}", peer, error);
             bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-        }
+       }
 
         _ => {}
     }
