@@ -2406,7 +2406,7 @@ if hi2.chainwork > best_hdr_work
 }
 
                                                             }
-                                                        }
+                                                        
                                                     
 
 
