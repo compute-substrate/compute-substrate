@@ -29,13 +29,17 @@ fn hash_lt(a: &Hash32, b: &Hash32) -> bool {
     a.as_slice() < b.as_slice()
 }
 
-fn better_candidate(cw_a: u128, h_a: u64, hash_a: &Hash32, cw_b: u128, h_b: u64, hash_b: &Hash32) -> bool {
+fn better_candidate(
+    cw_a: u128,
+    _h_a: u64,
+    hash_a: &Hash32,
+    cw_b: u128,
+    _h_b: u64,
+    hash_b: &Hash32,
+) -> bool {
     // true if A is strictly better than B
     if cw_a != cw_b {
         return cw_a > cw_b;
-    }
-    if h_a != h_b {
-        return h_a > h_b;
     }
     // deterministic tie-break: smallest hash wins
     hash_lt(hash_a, hash_b)
@@ -1112,9 +1116,16 @@ pub fn maybe_reorg_to(db: &Stores, new_tip: &Hash32, mempool: Option<&Mempool>) 
     let old_hi = must_hidx(db, &old_tip).context("missing old tip idx")?;
     let new_hi = must_hidx(db, new_tip).context("missing new tip idx")?;
 
-    if new_hi.chainwork <= old_hi.chainwork {
-        return Ok(());
-    }
+if !better_candidate(
+    new_hi.chainwork,
+    new_hi.height,
+    &new_hi.hash,
+    old_hi.chainwork,
+    old_hi.height,
+    &old_hi.hash,
+) {
+    return Ok(());
+}
 
     let anc = find_ancestor(db, old_hi.clone(), new_hi.clone()).context("find_ancestor")?;
 
