@@ -2670,26 +2670,36 @@ fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse
                 return Ok(SyncResponse::Headers { headers: vec![] });
             }
 
-            // Find the first locator hash we actually know.
-            let mut anchor_hash: Option<Hash32> = None;
-            let mut anchor_height: Option<u64> = None;
+use std::collections::HashSet;
 
-            for h in locator {
-                if h == [0u8; 32] {
-                    anchor_hash = Some([0u8; 32]);
-                    anchor_height = Some(0);
-                    break;
-                }
-                if let Ok(Some(hi)) = get_hidx(db, &h) {
-                    anchor_hash = Some(h);
-                    anchor_height = Some(hi.height);
-                    break;
-                }
-            }
+// Find the first locator hash that is on the CURRENT CANONICAL chain.
+let locator_set: HashSet<Hash32> = locator.into_iter().collect();
 
-            let Some(anchor_h) = anchor_height else {
-                return Ok(SyncResponse::Headers { headers: vec![] });
-            };
+let mut anchor_height: Option<u64> = None;
+let mut cur = tip;
+
+loop {
+    let hi = get_hidx(db, &cur)?
+        .ok_or_else(|| anyhow::anyhow!("missing idx for {}", hex32(&cur)))?;
+
+    if locator_set.contains(&cur) {
+        anchor_height = Some(hi.height);
+        break;
+    }
+
+    if hi.parent == [0u8; 32] {
+        if locator_set.contains(&[0u8; 32]) {
+            anchor_height = Some(0);
+        }
+        break;
+    }
+
+    cur = hi.parent;
+}
+
+let Some(anchor_h) = anchor_height else {
+    return Ok(SyncResponse::Headers { headers: vec![] });
+};
 
             // Build canonical path from tip back to anchor, then reverse it so we can
             // return the NEXT contiguous chunk after the anchor.
