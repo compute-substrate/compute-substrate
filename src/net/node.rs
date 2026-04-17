@@ -363,6 +363,10 @@ pub async fn best_peer_tip(&self) -> Hash32 {
         self.best_peer_height.load(Ordering::Relaxed)
     }
 
+fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
+    cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
+}
+
 pub async fn best_peer_work(&self) -> u128 {
     *self.best_peer_work.read().await
 }
@@ -871,7 +875,9 @@ fn try_apply_pending(
             }
 
             // Case 2: stronger competing fork head was downloaded.
-            if new_hi.chainwork > cur_work {
+
+if better_fork_tip(new_hi.chainwork, &h, cur_work, &cur_tip) {
+
                 let blk = pending_apply.remove(&h).unwrap();
                 drop(blk);
 
@@ -1128,9 +1134,12 @@ let mut last_logged_tip: HashMap<PeerId, (u64, u128, u128)> = HashMap::new();
     let mut pending_apply: HashMap<Hash32, Block> = HashMap::new();
     let mut want_blocks: VecDeque<Hash32> = VecDeque::new();
 
-    let mut best_hdr_tip: Hash32 = [0u8; 32];
-    let mut best_hdr_height: u64 = 0;
-    let mut best_hdr_work: u128 = 0;
+let (mut best_hdr_tip, mut best_hdr_height, mut best_hdr_work) =
+    if let Ok(Some(hi)) = crate::chain::reorg::best_header_tip(&db) {
+        (hi.hash, hi.height, hi.chainwork)
+    } else {
+        ([0u8; 32], 0, 0)
+    };
 
     let mut buckets: HashMap<PeerId, RateBucket> = HashMap::new();
     let mut bans: HashMap<PeerId, Instant> = HashMap::new();
@@ -2066,7 +2075,8 @@ sync_peer = next_sync_peer;
     let local_w = applied_w;
     let locator_tip = applied_tip;
 
-    if chainwork > local_w && sync_peer == Some(peer) {
+if sync_peer == Some(peer) && better_fork_tip(chainwork, &hash, local_w, &locator_tip) {
+
         let locator = build_locator(&db, &locator_tip);
         let locator_len = locator.len();
 
@@ -2151,9 +2161,8 @@ sync_peer = next_sync_peer;
 
         if let Ok(Some(hi2)) = get_hidx(&db, &h) {
 
-if hi2.chainwork > best_hdr_work
-    || (hi2.chainwork == best_hdr_work && h < best_hdr_tip)
-{
+if better_fork_tip(hi2.chainwork, &h, best_hdr_work, &best_hdr_tip) {
+
     best_hdr_tip = h;
     best_hdr_height = hi2.height;
     best_hdr_work = hi2.chainwork;
@@ -2397,9 +2406,8 @@ if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
 
                                                         if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
 
-if hi2.chainwork > best_hdr_work
-    || (hi2.chainwork == best_hdr_work && bh < best_hdr_tip)
-{
+if better_fork_tip(hi2.chainwork, &bh, best_hdr_work, &best_hdr_tip) {
+
     best_hdr_tip = bh;
     best_hdr_height = hi2.height;
     best_hdr_work = hi2.chainwork;
