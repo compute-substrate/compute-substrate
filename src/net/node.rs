@@ -2321,18 +2321,17 @@ best_peer_height_atomic.store(best_h, Ordering::Relaxed);
         &mut inflight,
     );
 }
+
 SyncResponse::Block { block } => {
     let bh = header_hash(&block.header);
     println!("[sync] got block {} from {}", hex32(&bh), peer);
 
-    // Validate that this response matches an in-flight request
     let Some(expected_h) = rid_to_hash.remove(&rid) else {
         note_invalid(&mut buckets, &mut bans, peer, "unrequested block response");
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNREQUESTED_BLOCK);
         continue;
     };
 
-    // Ensure the block hash matches what we requested
     if expected_h != bh {
         inflight.remove(&expected_h);
 
@@ -2351,101 +2350,96 @@ SyncResponse::Block { block } => {
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
 
-                                                    if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
-                                                        if bytes.len() > MAX_BLOCK_BYTES {
-                                                            note_invalid(&mut buckets, &mut bans, peer, "block: oversized");
-                                                            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-                                                            continue;
-                                                        }
-                                                    }
-
-providers.insert(bh, peer);
-want_blocks.retain(|x| *x != bh);
-
-if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
-    if asked_peer == peer {
-        let _elapsed = t0.elapsed().as_millis();
+    if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
+        if bytes.len() > MAX_BLOCK_BYTES {
+            note_invalid(&mut buckets, &mut bans, peer, "block: oversized");
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            continue;
+        }
     }
+
+    providers.insert(bh, peer);
+    want_blocks.retain(|x| *x != bh);
+
+    if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
+        if asked_peer == peer {
+            let _elapsed = t0.elapsed().as_millis();
+        }
+    }
+
+    if !accept_header_universe_pow(&cfg, &block.header, &bh) {
+        note_invalid(&mut buckets, &mut bans, peer, "block: failed pow/limit/universe");
+        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+        continue;
+    }
+
+    // ---- lock only for raw-block store + header index ----
+    {
+        let _g = chain_lock.lock();
+
+        if db.blocks.get(k_block(&bh))?.is_none() {
+            let bytes = crate::codec::consensus_bincode().serialize(&block)?;
+            if bytes.len() > MAX_BLOCK_BYTES {
+                note_invalid(&mut buckets, &mut bans, peer, "block: oversized (store)");
+                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+                continue;
+            }
+            db.blocks.insert(k_block(&bh), bytes)?;
+        }
+
+        let idx_res = if block.header.prev == [0u8; 32] {
+            index_header(&db, &block.header, None)
+        } else if let Some(p) = get_hidx(&db, &block.header.prev)? {
+            index_header(&db, &block.header, Some(&p))
+        } else {
+            // parent header not known yet; keep raw block pending
+            pending_apply.insert(bh, block);
+            continue;
+        };
+
+        if idx_res.is_err() {
+            note_invalid(&mut buckets, &mut bans, peer, "block: index_header failed");
+            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+            continue;
+        }
+
+        if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
+            if better_fork_tip(hi2.chainwork, &bh, best_hdr_work, &best_hdr_tip) {
+                best_hdr_tip = bh;
+                best_hdr_height = hi2.height;
+                best_hdr_work = hi2.chainwork;
+            }
+        }
+    }
+
+    pending_apply.insert(bh, block);
+    try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
+
+    compact_and_log_want_queue(
+        &db,
+        &pending_apply,
+        &inflight,
+        &mut want_blocks,
+        "block",
+    )?;
+
+    let _ = pump_blocks(
+        &mut swarm,
+        sync_peer,
+        &connected,
+        &providers,
+        &mut bad_providers,
+        &bans,
+        &mut peer_score,
+        &mut quarantine,
+        &mut rid_to_hash,
+        &db,
+        &pending_apply,
+        &mut want_blocks,
+        &mut inflight,
+    );
 }
 
-                                                    if !accept_header_universe_pow(&cfg, &block.header, &bh) {
-                                                        note_invalid(&mut buckets, &mut bans, peer, "block: failed pow/limit/universe");
-                                                        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-                                                        continue;
-                                                    }
-
-                                                    {
-                                                        let _g = chain_lock.lock();
-
-                                                        if db.blocks.get(k_block(&bh))?.is_none() {
-                                                            let bytes = crate::codec::consensus_bincode().serialize(&block)?;
-                                                            if bytes.len() > MAX_BLOCK_BYTES {
-                                                                note_invalid(&mut buckets, &mut bans, peer, "block: oversized (store)");
-                                                                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-                                                                continue;
-                                                            }
-                                                            db.blocks.insert(k_block(&bh), bytes)?;
-                                                        }
-
-                                                        let idx_res = if block.header.prev == [0u8; 32] {
-                                                            index_header(&db, &block.header, None)
-                                                        } else if let Some(p) = get_hidx(&db, &block.header.prev)? {
-                                                            index_header(&db, &block.header, Some(&p))
-                                                        } else {
-                                                            pending_apply.insert(bh, block);
-                                                            continue;
-                                                        };
-
-                                                        if idx_res.is_err() {
-                                                            note_invalid(&mut buckets, &mut bans, peer, "block: index_header failed");
-                                                            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-                                                            continue;
-                                                        }
-
-                                                        if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
-
-if better_fork_tip(hi2.chainwork, &bh, best_hdr_work, &best_hdr_tip) {
-
-    best_hdr_tip = bh;
-    best_hdr_height = hi2.height;
-    best_hdr_work = hi2.chainwork;
-}
-
-                                                            }
-                                                        
-                                                    
-
-
-
-pending_apply.insert(bh, block);
-try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
-
-compact_and_log_want_queue(
-    &db,
-    &pending_apply,
-    &inflight,
-    &mut want_blocks,
-    "block",
-)?;
-
-let _ = pump_blocks(
-    &mut swarm,
-    sync_peer,
-    &connected,
-    &providers,
-    &mut bad_providers,
-    &bans,
-&mut peer_score,
-    &mut quarantine,
-    &mut rid_to_hash,
-    &db,
-    &pending_apply,
-    &mut want_blocks,
-    &mut inflight,
-);
-
-                                                }
-}
                                                 SyncResponse::Ack => {}
 
 SyncResponse::Err { msg } => {
