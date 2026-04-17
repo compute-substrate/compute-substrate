@@ -363,10 +363,6 @@ pub async fn best_peer_tip(&self) -> Hash32 {
         self.best_peer_height.load(Ordering::Relaxed)
     }
 
-fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
-    cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
-}
-
 pub async fn best_peer_work(&self) -> u128 {
     *self.best_peer_work.read().await
 }
@@ -577,6 +573,11 @@ fn recompute_best_peer_metrics(
     }
 
     (best_h, best_w)
+}
+
+
+fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
+    cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
 }
 
 fn maybe_switch_sync_peer(
@@ -1134,12 +1135,9 @@ let mut last_logged_tip: HashMap<PeerId, (u64, u128, u128)> = HashMap::new();
     let mut pending_apply: HashMap<Hash32, Block> = HashMap::new();
     let mut want_blocks: VecDeque<Hash32> = VecDeque::new();
 
-let (mut best_hdr_tip, mut best_hdr_height, mut best_hdr_work) =
-    if let Ok(Some(hi)) = crate::chain::reorg::best_header_tip(&db) {
-        (hi.hash, hi.height, hi.chainwork)
-    } else {
-        ([0u8; 32], 0, 0)
-    };
+let mut best_hdr_tip: Hash32 = [0u8; 32];
+let mut best_hdr_height: u64 = 0;
+let mut best_hdr_work: u128 = 0;
 
     let mut buckets: HashMap<PeerId, RateBucket> = HashMap::new();
     let mut bans: HashMap<PeerId, Instant> = HashMap::new();
