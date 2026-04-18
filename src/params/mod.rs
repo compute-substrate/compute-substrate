@@ -16,7 +16,7 @@ pub const TICKER: &str = "CSD";
 pub const GENESIS_EPIGRAPH: &str =
     "Reuters 2026-02-05: Britain to work with Microsoft to build deepfake detection system.";
 
-pub const TARGET_BLOCK_SECS: u64 = 10;
+pub const TARGET_BLOCK_SECS: u64 = 30;
 
 // Initial difficulty target (compact bits).
 // This sets the starting difficulty at genesis; subsequent blocks follow the difficulty adjustment rules in code.
