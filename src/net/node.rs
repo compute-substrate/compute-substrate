@@ -2181,6 +2181,24 @@ if better_fork_tip(hi2.chainwork, &h, best_hdr_work, &best_hdr_tip) {
         }
     }
 
+
+if let Some((last_h, _last_hdr)) = indexed_batch.last() {
+    if let Ok(Some(last_hi)) = get_hidx(&db, last_h) {
+        let prev_tip = peer_tips.get(&peer).copied().unwrap_or([0u8; 32]);
+        let prev_work = peer_work.get(&peer).copied().unwrap_or(0);
+        let prev_height = peer_heights.get(&peer).copied().unwrap_or(0);
+
+        if better_fork_tip(last_hi.chainwork, last_h, prev_work, &prev_tip) {
+            peer_tips.insert(peer, *last_h);
+            peer_work.insert(peer, last_hi.chainwork);
+            peer_heights.insert(peer, last_hi.height);
+        } else if last_hi.chainwork == prev_work && last_hi.height > prev_height {
+            // keep height telemetry monotone if work matches
+            peer_heights.insert(peer, last_hi.height);
+        }
+    }
+}
+
     // Recompute best-peer metrics.
 
 let (best_h, best_w) = recompute_best_peer_metrics(
@@ -2410,6 +2428,21 @@ SyncResponse::Block { block } => {
                 best_hdr_work = hi2.chainwork;
             }
         }
+
+
+if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
+    let prev_tip = peer_tips.get(&peer).copied().unwrap_or([0u8; 32]);
+    let prev_work = peer_work.get(&peer).copied().unwrap_or(0);
+    let prev_height = peer_heights.get(&peer).copied().unwrap_or(0);
+
+    if better_fork_tip(hi2.chainwork, &bh, prev_work, &prev_tip) {
+        peer_tips.insert(peer, bh);
+        peer_work.insert(peer, hi2.chainwork);
+        peer_heights.insert(peer, hi2.height);
+    } else if hi2.chainwork == prev_work && hi2.height > prev_height {
+        peer_heights.insert(peer, hi2.height);
+    }
+}
     }
 
     pending_apply.insert(bh, block);
