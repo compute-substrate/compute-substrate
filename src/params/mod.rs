@@ -16,11 +16,11 @@ pub const TICKER: &str = "CSD";
 pub const GENESIS_EPIGRAPH: &str =
     "Reuters 2026-02-05: Britain to work with Microsoft to build deepfake detection system.";
 
-pub const TARGET_BLOCK_SECS: u64 = 30;
+pub const TARGET_BLOCK_SECS: u64 = 120;
 
 // Initial difficulty target (compact bits).
 // This sets the starting difficulty at genesis; subsequent blocks follow the difficulty adjustment rules in code.
-pub const INITIAL_BITS: u32 = 0x1e00ffff;
+pub const INITIAL_BITS: u32 = 0x1d0ffff;
 
 // -----------------------------------------------------------------------------
 // Difficulty / PoW (LWMA per-block retarget)
@@ -39,11 +39,9 @@ pub const MAX_BLOCK_TXS: usize = 2_000; // count cap
 pub const MAX_BLOCK_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 
 // Maximum target (easiest difficulty).
-pub const POW_LIMIT_BITS: u32 = 0x1f00ffff;
+pub const POW_LIMIT_BITS: u32 = 0x1e00ffff;
 
-// LWMA window size (number of most-recent blocks used).
-// With 60s blocks, 90 blocks ≈ 90 minutes. Good default for early survivability + stability.
-pub const LWMA_WINDOW: usize = 90;
+pub const LWMA_WINDOW: usize = 45;
 
 // Clamp solve times to reduce timestamp gaming impact and prevent instability.
 // Standard LWMA uses max_solvetime = 6*T (and min 1 second).
@@ -54,24 +52,24 @@ pub const RETARGET_INTERVAL: u64 = 360;
 pub const RETARGET_CLAMP_FACTOR: u64 = 4; // legacy (unused)
 
 // -----------------------------------------------------------------------------
-// Timestamp policy params (CONSENSUS OBJECTIVE in chain/index.rs)
+// Timestamp policy params 
 // -----------------------------------------------------------------------------
 pub const MAX_FUTURE_DRIFT_SECS: u64 = 2 * 60 * 60;
 pub const MTP_WINDOW: usize = 11;
-pub const MIN_BLOCK_SPACING_SECS: u64 = 30;
+pub const MIN_BLOCK_SPACING_SECS: u64 = 60;
 
-// App-layer epoching (consensus-critical only insofar as app rules are consensus)
-pub const EPOCH_LEN: u64 = 60;
+// App-layer epoching 
+pub const EPOCH_LEN: u64 = 30;
 pub const TOP_K: usize = 25;
 
-// Fees (in base units, 1 CSD = COIN units)
+// Fees (in base units)
 pub const MIN_FEE_PROPOSE: u64 = 25_000_000;
 pub const MIN_FEE_ATTEST: u64 = 5_000_000;
 
 pub const COIN: u64 = 100_000_000; // 1 CSD = 1e8 base units
 
 pub const INITIAL_REWARD: u64 = 50 * COIN;
-pub const HALVING_INTERVAL: u64 = 2_102_400; // ~4 years at 60s blocks
+pub const HALVING_INTERVAL: u64 = 1_051_200; // ~4 years at 120s blocks
 pub const MAX_HALVINGS: u64 = 64;
 
 pub const GENESIS_HASH: [u8; 32] = [
