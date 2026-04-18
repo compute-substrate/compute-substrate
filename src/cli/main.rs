@@ -89,7 +89,7 @@ pub enum Commands {
         #[arg(long)]
         uri: Option<String>,
 
-        /// Expiry epoch; if omitted, defaults to current_epoch + 10
+        /// Expiry epoch; if omitted, defaults to current_epoch + 24
         #[arg(long)]
         expires_epoch: Option<u64>,
 
@@ -829,7 +829,7 @@ pub async fn run() -> Result<()> {
 
             let expires_epoch = match expires_epoch {
                 Some(e) => e,
-                None => current_epoch_from_rpc(&rpc_url)? + 10,
+                None => current_epoch_from_rpc(&rpc_url)? + 24,
             };
 
             wallet_propose_submit(
