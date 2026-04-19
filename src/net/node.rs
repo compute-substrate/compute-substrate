@@ -68,6 +68,8 @@ const TIP_POLL_SECS: u64 = 120;
 const REGULAR_TIP_POLL_SECS: u64 = 10;
 const GETTIP_LOG_EVERY_SECS: u64 = 60;
 
+const BAD_PROVIDER_RETRY_SECS: u64 = 30;
+
 // quarantine: soft-ban for a while when score too low
 const QUAR_SECS: u64 = 5 * 60;
 const QUAR_SCORE_THRESHOLD: i32 = -12;
@@ -137,6 +139,15 @@ fn prune_peer_state(
     bans.retain(|p, t| connected.contains(p) || t.elapsed().as_secs() < BAN_SECS);
     quarantine.retain(|p, t| connected.contains(p) || t.elapsed().as_secs() < QUAR_SECS);
     buckets.retain(|p, b| connected.contains(p) || b.window_start.elapsed() < RL_WINDOW);
+}
+
+fn prune_bad_providers(
+    bad_providers: &mut HashMap<Hash32, HashMap<PeerId, Instant>>,
+) {
+    bad_providers.retain(|_, peers| {
+        peers.retain(|_, t| t.elapsed().as_secs() < BAD_PROVIDER_RETRY_SECS);
+        !peers.is_empty()
+    });
 }
 
 fn hex32(h: &Hash32) -> String {
@@ -1124,7 +1135,8 @@ let mut last_logged_tip: HashMap<PeerId, (u64, u128, u128)> = HashMap::new();
     let mut quarantine: HashMap<PeerId, Instant> = HashMap::new();
 
     let mut providers: HashMap<Hash32, PeerId> = HashMap::new();
-    let mut bad_providers: HashMap<Hash32, HashSet<PeerId>> = HashMap::new();
+
+let mut bad_providers: HashMap<Hash32, HashMap<PeerId, Instant>> = HashMap::new();
 
     let mut seen_blocks: HashSet<Hash32> = HashSet::new();
 
@@ -1152,9 +1164,12 @@ poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
 let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 
-    let is_bad = |bad: &HashMap<Hash32, HashSet<PeerId>>, h: &Hash32, p: &PeerId| -> bool {
-        bad.get(h).map(|s| s.contains(p)).unwrap_or(false)
-    };
+let is_bad = |bad: &HashMap<Hash32, HashMap<PeerId, Instant>>, h: &Hash32, p: &PeerId| -> bool {
+    bad.get(h)
+        .and_then(|m| m.get(p))
+        .map(|t| t.elapsed().as_secs() < BAD_PROVIDER_RETRY_SECS)
+        .unwrap_or(false)
+};
 
     let is_quarantined = |quar: &HashMap<PeerId, Instant>, p: &PeerId| -> bool {
         quar.get(p)
@@ -1218,7 +1233,7 @@ let pump_blocks =
      sync_peer: Option<PeerId>,
      connected: &HashSet<PeerId>,
      providers: &HashMap<Hash32, PeerId>,
-     bad_providers: &mut HashMap<Hash32, HashSet<PeerId>>,
+bad_providers: &mut HashMap<Hash32, HashMap<PeerId, Instant>>,
      bans: &HashMap<PeerId, Instant>,
      peer_score: &mut HashMap<PeerId, i32>,
      quarantine: &mut HashMap<PeerId, Instant>,
@@ -1245,7 +1260,8 @@ for (h, peer) in timed_out {
     }
 
     bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT);
-    bad_providers.entry(h).or_default().insert(peer);
+
+bad_providers.entry(h).or_default().insert(peer, Instant::now());
 
     if want_blocks.len() < MAX_WANT_QUEUE {
         want_blocks.push_back(h);
@@ -1368,21 +1384,21 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
             }
         }
 
-        // 3) Fallback to any eligible connected peer
-        if target_peer.is_none() {
-            target_peer = connected
-                .iter()
-                .find(|p| {
-                    !is_banned(bans, p)
-                        && !is_quarantined(quarantine, p)
-                        && !is_bad(bad_providers, &target_h, p)
-                })
-                .cloned();
+// 3) Fallback to any eligible connected peer
+if target_peer.is_none() {
+    target_peer = connected
+        .iter()
+        .find(|p| {
+            !is_banned(bans, p)
+                && !is_quarantined(quarantine, p)
+                && !is_bad(bad_providers, &target_h, p)
+        })
+        .cloned();
 
-            if target_peer.is_none() && peer_reason.is_empty() {
-                peer_reason = "no_fallback_peer".to_string();
-            }
-        }
+    if target_peer.is_none() && peer_reason.is_empty() {
+        peer_reason = "no_fallback_peer".to_string();
+    }
+}
 
         let Some(peer) = target_peer else {
             skip_no_peer += 1;
@@ -1461,6 +1477,7 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
 _ = poll.tick() => {
 
 prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
+prune_bad_providers(&mut bad_providers);
 
 scrub_stale_inflight(
     &mut inflight,
@@ -2291,7 +2308,7 @@ best_peer_height_atomic.store(best_h, Ordering::Relaxed);
                 if connected.contains(p)
                     && !is_banned(&bans, p)
                     && !is_quarantined(&quarantine, p)
-                    && !bad_providers.get(&h).map(|s| s.contains(p)).unwrap_or(false)
+                    && !is_bad(&bad_providers, &h, p)
                 {
                     Some(*p)
                 } else {
@@ -2304,7 +2321,7 @@ best_peer_height_atomic.store(best_h, Ordering::Relaxed);
                 if connected.contains(&peer)
                     && !is_banned(&bans, &peer)
                     && !is_quarantined(&quarantine, &peer)
-                    && !bad_providers.get(&h).map(|s| s.contains(&peer)).unwrap_or(false)
+&& !is_bad(&bad_providers, &h, &peer)
                 {
                     Some(peer)
                 } else {
@@ -2316,7 +2333,7 @@ best_peer_height_atomic.store(best_h, Ordering::Relaxed);
                     connected.contains(sp)
                         && !is_banned(&bans, sp)
                         && !is_quarantined(&quarantine, sp)
-                        && !bad_providers.get(&h).map(|s| s.contains(sp)).unwrap_or(false)
+                        && !is_bad(&bad_providers, &h, sp)
                 })
             });
 
@@ -2371,7 +2388,7 @@ SyncResponse::Block { block } => {
         note_invalid(&mut buckets, &mut bans, peer, "block response hash mismatch");
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNREQUESTED_BLOCK);
 
-        bad_providers.entry(expected_h).or_default().insert(peer);
+bad_providers.entry(expected_h).or_default().insert(peer, Instant::now());
 
         if want_blocks.len() < MAX_WANT_QUEUE {
             want_blocks.push_back(expected_h);
@@ -2392,6 +2409,14 @@ SyncResponse::Block { block } => {
     }
 
     providers.insert(bh, peer);
+
+if let Some(peers) = bad_providers.get_mut(&bh) {
+    peers.remove(&peer);
+    if peers.is_empty() {
+        bad_providers.remove(&bh);
+    }
+}
+
     want_blocks.retain(|x| *x != bh);
 
     if let Some((_rid2, t0, asked_peer)) = inflight.remove(&expected_h) {
@@ -2505,7 +2530,7 @@ SyncResponse::Err { msg } => {
             );
 
             inflight.remove(&h);
-            bad_providers.entry(h).or_default().insert(peer);
+            bad_providers.entry(h).or_default().insert(peer, Instant::now());
 
             if providers.get(&h) == Some(&peer) {
                 providers.remove(&h);
@@ -2569,7 +2594,7 @@ Event::OutboundFailure { peer, request_id, error } => {
         inflight.remove(&h);
 
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_TIMEOUT);
-        bad_providers.entry(h).or_default().insert(peer);
+        bad_providers.entry(h).or_default().insert(peer, Instant::now());
 
         if providers.get(&h) == Some(&peer) {
             providers.remove(&h);
