@@ -1687,6 +1687,21 @@ if !is_quarantined(&quarantine, &peer_id) {
 
                     }
 
+SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+    println!("[p2p] OutgoingConnectionError peer={:?} err={:?}", peer_id, error);
+}
+
+SwarmEvent::IncomingConnectionError { local_addr, send_back_addr, error, .. } => {
+    println!(
+        "[p2p] IncomingConnectionError local_addr={:?} send_back_addr={:?} err={:?}",
+        local_addr, send_back_addr, error
+    );
+}
+
+SwarmEvent::Dialing { peer_id, connection_id } => {
+    println!("[p2p] Dialing peer={:?} conn={:?}", peer_id, connection_id);
+}
+
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         // NEW: refcount; only treat 1->0 as “disconnected”
                         if let Some(e) = conn_refcnt.get_mut(&peer_id) {
