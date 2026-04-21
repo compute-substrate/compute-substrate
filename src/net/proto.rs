@@ -1,30 +1,25 @@
+//src/net/proto.rs
 use crate::types::{Block, BlockHeader, Hash32, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncRequest {
     GetTip,
-
-    // Legacy (height-based). Still supported for compatibility/debug.
     GetHeaders { from_height: u64, max: u64 },
-
-    // Locator-based headers (Bitcoin-style).
     GetHeadersByLocator { locator: Vec<Hash32>, max: u64 },
-
     GetBlock { hash: Hash32 },
     SubmitTx { tx: Transaction },
+GetPeers { max: u16 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncResponse {
-    // Tip is still advisory. Receiver must verify via headers+pow.
     Tip {
         hash: Hash32,
         height: u64,
         chainwork: u128,
     },
 
-    // Hardened: receiver recomputes hash, height, chainwork from indexing.
     Headers {
         headers: Vec<BlockHeader>,
     },
@@ -37,11 +32,13 @@ pub enum SyncResponse {
     Err {
         msg: String,
     },
+
+Peers { peers: Vec<String> },
+
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GossipHeader {
-    // Hardened: receiver recomputes hash.
     pub header: BlockHeader,
 }
 
