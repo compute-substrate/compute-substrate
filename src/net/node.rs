@@ -1242,6 +1242,8 @@ let behaviour = Behaviour {
         libp2p::swarm::Config::with_tokio_executor(),
     );
 
+let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+
     swarm.listen_on(cfg.listen.clone())?;
     println!("[p2p] listening on {}", cfg.listen);
 
@@ -1261,8 +1263,6 @@ for a in &cfg.bootnodes {
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
 let mut peer_tips: HashMap<PeerId, Hash32> = HashMap::new();
-
-let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
 
     let mut sync_peer: Option<PeerId> = None;
 
@@ -1951,23 +1951,21 @@ let _ = compact_and_log_want_queue(
 
                     SwarmEvent::Behaviour(event) => {
 
-if let OutEvent::Identify(ev) = &event {
-    match ev {
-        identify::Event::Received { peer_id, info, .. } => {
-            for addr in &info.listen_addrs {
-                let full = with_p2p_suffix(addr.clone(), *peer_id);
-                insert_known_addr(&mut known_addrs, *peer_id, full.clone());
-                println!("[pex] learned addr for {} -> {}", peer_id, full);
-            }
+if let OutEvent::Identify(identify::Event::Received { peer_id, info, .. }) = &event {
+    let pid = *peer_id;
 
-            // Also proactively request peers once identify completes.
-            let _ = swarm
-                .behaviour_mut()
-                .rr
-                .send_request(peer_id, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
-        }
-        _ => {}
+    for addr in info.listen_addrs.iter().cloned() {
+        let full: Multiaddr = with_p2p_suffix(addr, pid);
+        insert_known_addr(&mut known_addrs, pid, full.clone());
+        println!("[pex] learned addr for {} -> {}", pid, full);
     }
+
+    let _ = swarm
+        .behaviour_mut()
+        .rr
+        .send_request(&pid, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
+
+    println!("[pex] requested peers from {} after identify", pid);
 }
 
                         if let Some((src, data, topic)) = handle_gossipsub_event(&event) {
@@ -3086,10 +3084,11 @@ SyncRequest::GetBlock { hash } => {
 
 
         SyncRequest::SubmitTx { tx: _tx } => Ok(SyncResponse::Ack),
-    }
 
 SyncRequest::GetPeers { .. } => {
     bail!("GetPeers must be handled in event loop");
 }
+
+    }
 
 }
