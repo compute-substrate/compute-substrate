@@ -7,6 +7,7 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use libp2p::{
     core::upgrade,
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
+    identify,
     identity, noise,
     request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
@@ -87,6 +88,11 @@ const MAX_INFLIGHT_BLOCKS: usize = 64;
 const MAX_WANT_QUEUE: usize = 20_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 12;
 
+const MAX_PEERS_IN_EXCHANGE: usize = 64;
+const PEER_REQ_ON_CONNECT: u16 = 64;
+const PEER_REDIAL_EVERY_SECS: u64 = 15;
+const MAX_ADDRS_PER_PEER: usize = 8;
+
 // ----------------- time helpers -----------------
 
 fn unix_now() -> u64 {
@@ -163,6 +169,115 @@ fn peer_id_from_multiaddr(a: &Multiaddr) -> Option<PeerId> {
             None
         }
     })
+}
+
+
+fn with_p2p_suffix(mut addr: Multiaddr, peer: PeerId) -> Multiaddr {
+    use libp2p::multiaddr::Protocol;
+    let already_has_p2p = addr.iter().any(|p| matches!(p, Protocol::P2p(_)));
+    if !already_has_p2p {
+        addr.push(Protocol::P2p(peer.into()));
+    }
+    addr
+}
+
+fn strip_p2p_suffix(addr: &Multiaddr) -> Multiaddr {
+    use libp2p::multiaddr::Protocol;
+    let mut out = Multiaddr::empty();
+    for p in addr.iter() {
+        if matches!(p, Protocol::P2p(_)) {
+            break;
+        }
+        out.push(p);
+    }
+    out
+}
+
+fn is_dialable_addr(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+
+    let mut has_ip_or_dns = false;
+    let mut has_tcp = false;
+
+    for p in addr.iter() {
+        match p {
+            Protocol::Ip4(_)
+            | Protocol::Ip6(_)
+            | Protocol::Dns(_)
+            | Protocol::Dns4(_)
+            | Protocol::Dns6(_)
+            | Protocol::Dnsaddr(_) => has_ip_or_dns = true,
+            Protocol::Tcp(_) => has_tcp = true,
+            _ => {}
+        }
+    }
+
+    has_ip_or_dns && has_tcp
+}
+
+fn insert_known_addr(
+    known_addrs: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    peer: PeerId,
+    addr: Multiaddr,
+) {
+    if !is_dialable_addr(&addr) {
+        return;
+    }
+
+    let entry = known_addrs.entry(peer).or_default();
+    if entry.len() >= MAX_ADDRS_PER_PEER && !entry.contains(&addr) {
+        return;
+    }
+    entry.insert(addr);
+}
+
+fn known_addrs_for_peer(
+    known_addrs: &HashMap<PeerId, HashSet<Multiaddr>>,
+    peer: &PeerId,
+) -> Vec<Multiaddr> {
+    known_addrs
+        .get(peer)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn export_peer_strings(
+    self_peer: PeerId,
+    requester: PeerId,
+    known_addrs: &HashMap<PeerId, HashSet<Multiaddr>>,
+    max: usize,
+) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+
+    for (pid, addrs) in known_addrs.iter() {
+        if *pid == self_peer || *pid == requester {
+            continue;
+        }
+
+        for addr in addrs {
+            if out.len() >= max {
+                return out;
+            }
+            out.push(addr.to_string());
+        }
+    }
+
+    out
+}
+
+fn parse_peer_strings_into_known_addrs(
+    known_addrs: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    peers: Vec<String>,
+) {
+    for s in peers {
+        let Ok(addr) = s.parse::<Multiaddr>() else {
+            continue;
+        };
+        let Some(pid) = peer_id_from_multiaddr(&addr) else {
+            continue;
+        };
+        insert_known_addr(known_addrs, pid, addr);
+    }
 }
 
 
@@ -383,6 +498,7 @@ pub async fn best_peer_work(&self) -> u128 {
 pub enum OutEvent {
     Gossipsub(gossipsub::Event),
     Rr(request_response::Event<SyncRequest, SyncResponse>),
+    Identify(identify::Event),
 }
 
 impl From<gossipsub::Event> for OutEvent {
@@ -396,11 +512,18 @@ impl From<request_response::Event<SyncRequest, SyncResponse>> for OutEvent {
     }
 }
 
+impl From<identify::Event> for OutEvent {
+    fn from(e: identify::Event) -> Self {
+        OutEvent::Identify(e)
+    }
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "OutEvent")]
 pub struct Behaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub rr: request_response::Behaviour<SyncCodec>,
+    pub identify: identify::Behaviour,
 }
 
 #[derive(Clone, Default)]
@@ -1098,9 +1221,19 @@ let rr_cfg = request_response::Config::default()
     .with_max_concurrent_streams(128);
 
 let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
+
 let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
 
-    let behaviour = Behaviour { gossipsub, rr };
+let identify = identify::Behaviour::new(
+    identify::Config::new("/csd/id/1.0.0".to_string(), local_key.public())
+        .with_interval(Duration::from_secs(30)),
+);
+
+let behaviour = Behaviour {
+    gossipsub,
+    rr,
+    identify,
+};
 
     let mut swarm = Swarm::new(
         transport,
@@ -1112,10 +1245,13 @@ let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
     swarm.listen_on(cfg.listen.clone())?;
     println!("[p2p] listening on {}", cfg.listen);
 
-    for a in &cfg.bootnodes {
-        println!("[p2p] dialing bootnode {a}");
-        let _ = swarm.dial(a.clone());
+for a in &cfg.bootnodes {
+    println!("[p2p] dialing bootnode {a}");
+    if let Some(pid) = peer_id_from_multiaddr(a) {
+        insert_known_addr(&mut known_addrs, pid, a.clone());
     }
+    let _ = swarm.dial(a.clone());
+}
 
     let mut connected: HashSet<PeerId> = HashSet::new();
 
@@ -1125,6 +1261,9 @@ let rr = request_response::Behaviour::<SyncCodec>::new(protocols, rr_cfg);
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
 let mut peer_tips: HashMap<PeerId, Hash32> = HashMap::new();
+
+let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+
     let mut sync_peer: Option<PeerId> = None;
 
 let mut last_logged_tip: HashMap<PeerId, (u64, u128, u128)> = HashMap::new();
@@ -1599,6 +1738,24 @@ if !want_blocks.is_empty() || !inflight.is_empty() {
     );
 }
 
+for (pid, addrs) in known_addrs.clone() {
+    if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) || is_quarantined(&quarantine, &pid) {
+        continue;
+    }
+
+    for addr in addrs {
+        if let Some(t0) = last_dial_by_addr.get(&addr) {
+            if t0.elapsed() < Duration::from_secs(PEER_REDIAL_EVERY_SECS) {
+                continue;
+            }
+        }
+
+        println!("[pex] periodic redial {} via {}", pid, addr);
+        let _ = swarm.dial(addr.clone());
+        last_dial_by_addr.insert(addr, Instant::now());
+    }
+}
+
 let _ = pump_blocks(
     &mut swarm,
     sync_peer,
@@ -1700,6 +1857,12 @@ if !is_quarantined(&quarantine, &peer_id) {
     let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
     last_tip_req_at.insert(peer_id, Instant::now());
     println!("[sync] requested tip ({rid:?})");
+
+    let _ = swarm
+        .behaviour_mut()
+        .rr
+        .send_request(&peer_id, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
+    println!("[pex] requested peers from {}", peer_id);
 }
 
                     }
@@ -1787,6 +1950,26 @@ let _ = compact_and_log_want_queue(
                     }
 
                     SwarmEvent::Behaviour(event) => {
+
+if let OutEvent::Identify(ev) = &event {
+    match ev {
+        identify::Event::Received { peer_id, info, .. } => {
+            for addr in &info.listen_addrs {
+                let full = with_p2p_suffix(addr.clone(), *peer_id);
+                insert_known_addr(&mut known_addrs, *peer_id, full.clone());
+                println!("[pex] learned addr for {} -> {}", peer_id, full);
+            }
+
+            // Also proactively request peers once identify completes.
+            let _ = swarm
+                .behaviour_mut()
+                .rr
+                .send_request(peer_id, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
+        }
+        _ => {}
+    }
+}
+
                         if let Some((src, data, topic)) = handle_gossipsub_event(&event) {
                             if data.len() > MAX_GOSSIP_MSG_BYTES {
                                 if let Some(p) = src {
@@ -1965,6 +2148,10 @@ match &request {
 
 match &request {
 
+SyncRequest::GetPeers { max } => {
+    println!("[pex] recv GetPeers from {peer} max={max}");
+}
+
 SyncRequest::GetTip => {
         let should_log = last_gettip_log_at
             .get(&peer)
@@ -2017,16 +2204,29 @@ if matches!(request, SyncRequest::GetBlock { .. }) {
 }
 }
 
-let db2 = db.clone();
-let req2 = request;
+let resp = match request {
+    SyncRequest::GetPeers { max } => {
+        let peers = export_peer_strings(
+            peer_id,
+            peer,
+            &known_addrs,
+            (max as usize).min(MAX_PEERS_IN_EXCHANGE),
+        );
+        SyncResponse::Peers { peers }
+    }
 
-let resp = tokio::task::spawn_blocking(move || {
-    handle_request_blocking(&db2, req2)
-})
-.await
-.map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?;
+    other => {
+        let db2 = db.clone();
+        tokio::task::spawn_blocking(move || {
+            handle_request_blocking(&db2, other)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
+        .unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
+    }
+};
 
-let mut resp = resp.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() });
+let mut resp = resp;
 
                                             if let SyncResponse::Block { block } = &resp {
                                                 let bh = header_hash(&block.header);
@@ -2513,6 +2713,37 @@ if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
     );
 }
 
+SyncResponse::Peers { peers } => {
+    let before = known_addrs.len();
+
+    parse_peer_strings_into_known_addrs(&mut known_addrs, peers);
+
+    let after = known_addrs.len();
+    println!(
+        "[pex] learned peer set from {} (known_peers {} -> {})",
+        peer, before, after
+    );
+
+    // Try dialing newly learned peers.
+    for (pid, addrs) in known_addrs.clone() {
+        if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) {
+            continue;
+        }
+
+        for addr in addrs {
+            if let Some(t0) = last_dial_by_addr.get(&addr) {
+                if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
+                    continue;
+                }
+            }
+
+            println!("[pex] dialing learned peer {} via {}", pid, addr);
+            let _ = swarm.dial(addr.clone());
+            last_dial_by_addr.insert(addr, Instant::now());
+        }
+    }
+}
+
                                                 SyncResponse::Ack => {}
 
 SyncResponse::Err { msg } => {
@@ -2664,6 +2895,7 @@ Event::InboundFailure { peer, error, .. } => {
 
 fn handle_request_blocking(db: &Stores, req: SyncRequest) -> Result<SyncResponse> {
     match req {
+
         SyncRequest::GetTip => {
             let tip = get_tip(db)?.unwrap_or([0u8; 32]);
 
@@ -2855,4 +3087,9 @@ SyncRequest::GetBlock { hash } => {
 
         SyncRequest::SubmitTx { tx: _tx } => Ok(SyncResponse::Ack),
     }
+
+SyncRequest::GetPeers { .. } => {
+    bail!("GetPeers must be handled in event loop");
+}
+
 }
