@@ -13,14 +13,17 @@ use libp2p::{
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Transport,
 };
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    net::{Ipv4Addr, Ipv6Addr},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
 use tokio::time::{interval, MissedTickBehavior};
 use tokio::sync::RwLock;
 
@@ -215,15 +218,141 @@ fn is_dialable_addr(addr: &Multiaddr) -> bool {
     has_ip_or_dns && has_tcp
 }
 
+fn is_routable_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast())
+}
+
+fn is_routable_ipv6(ip: Ipv6Addr) -> bool {
+    let seg0 = ip.segments()[0];
+
+    let is_unique_local = (seg0 & 0xfe00) == 0xfc00; // fc00::/7
+    let is_link_local = (seg0 & 0xffc0) == 0xfe80;   // fe80::/10
+
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || is_unique_local
+        || is_link_local)
+}
+
+fn addr_is_public_or_dns(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+
+    for p in addr.iter() {
+        match p {
+            Protocol::Dns(_)
+            | Protocol::Dns4(_)
+            | Protocol::Dns6(_)
+            | Protocol::Dnsaddr(_) => return true,
+            Protocol::Ip4(ip) => return is_routable_ipv4(ip),
+            Protocol::Ip6(ip) => return is_routable_ipv6(ip),
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn addr_peer_suffix_matches(addr: &Multiaddr, expected_peer: PeerId) -> bool {
+    match peer_id_from_multiaddr(addr) {
+        Some(pid) => pid == expected_peer,
+        None => true,
+    }
+}
+
+fn should_store_discovered_addr(self_peer: PeerId, peer: PeerId, addr: &Multiaddr) -> bool {
+    if peer == self_peer {
+        return false;
+    }
+    if !is_dialable_addr(addr) {
+        return false;
+    }
+    if !addr_is_public_or_dns(addr) {
+        return false;
+    }
+    if !addr_peer_suffix_matches(addr, peer) {
+        return false;
+    }
+    true
+}
+
+fn should_dial_discovered_addr(self_peer: PeerId, peer: PeerId, addr: &Multiaddr) -> bool {
+    if peer == self_peer {
+        return false;
+    }
+    if !is_dialable_addr(addr) {
+        return false;
+    }
+    if !addr_is_public_or_dns(addr) {
+        return false;
+    }
+    if peer_id_from_multiaddr(addr) == Some(self_peer) {
+        return false;
+    }
+    if !addr_peer_suffix_matches(addr, peer) {
+        return false;
+    }
+    true
+}
+
+
+fn addr_quality_rank(addr: &Multiaddr) -> u8 {
+    use libp2p::multiaddr::Protocol;
+
+    for p in addr.iter() {
+        match p {
+            Protocol::Dns(_)
+            | Protocol::Dns4(_)
+            | Protocol::Dns6(_)
+            | Protocol::Dnsaddr(_) => return 0,
+            Protocol::Ip4(ip) => {
+                return if is_routable_ipv4(ip) { 1 } else { 10 };
+            }
+            Protocol::Ip6(ip) => {
+                return if is_routable_ipv6(ip) { 2 } else { 11 };
+            }
+            _ => {}
+        }
+    }
+
+    20
+}
+
+fn sorted_peer_addrs_for_export(
+    self_peer: PeerId,
+    peer: PeerId,
+    known_addrs: &HashMap<PeerId, HashSet<Multiaddr>>,
+) -> Vec<Multiaddr> {
+    let mut out: Vec<Multiaddr> = known_addrs
+        .get(&peer)
+        .map(|s| {
+            s.iter()
+                .filter(|addr| should_dial_discovered_addr(self_peer, peer, addr))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    out.sort_by(|a, b| {
+        let ra = addr_quality_rank(a);
+        let rb = addr_quality_rank(b);
+
+        ra.cmp(&rb).then_with(|| a.to_string().cmp(&b.to_string()))
+    });
+
+    out
+}
+
 fn insert_known_addr(
     known_addrs: &mut HashMap<PeerId, HashSet<Multiaddr>>,
     peer: PeerId,
     addr: Multiaddr,
 ) {
-    if !is_dialable_addr(&addr) {
-        return;
-    }
-
     let entry = known_addrs.entry(peer).or_default();
     if entry.len() >= MAX_ADDRS_PER_PEER && !entry.contains(&addr) {
         return;
@@ -247,12 +376,17 @@ fn export_peer_strings(
     known_addrs: &HashMap<PeerId, HashSet<Multiaddr>>,
     max: usize,
 ) -> Vec<String> {
+    let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
+    peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
     let mut out = Vec::<String>::new();
 
-    for (pid, addrs) in known_addrs.iter() {
-        if *pid == self_peer || *pid == requester {
+    for pid in peer_ids {
+        if pid == self_peer || pid == requester {
             continue;
         }
+
+        let addrs = sorted_peer_addrs_for_export(self_peer, pid, known_addrs);
 
         for addr in addrs {
             if out.len() >= max {
@@ -267,6 +401,7 @@ fn export_peer_strings(
 
 fn parse_peer_strings_into_known_addrs(
     known_addrs: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    self_peer: PeerId,
     peers: Vec<String>,
 ) {
     for s in peers {
@@ -276,6 +411,9 @@ fn parse_peer_strings_into_known_addrs(
         let Some(pid) = peer_id_from_multiaddr(&addr) else {
             continue;
         };
+        if !should_store_discovered_addr(self_peer, pid, &addr) {
+            continue;
+        }
         insert_known_addr(known_addrs, pid, addr);
     }
 }
@@ -1250,7 +1388,9 @@ let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
 for a in &cfg.bootnodes {
     println!("[p2p] dialing bootnode {a}");
     if let Some(pid) = peer_id_from_multiaddr(a) {
-        insert_known_addr(&mut known_addrs, pid, a.clone());
+        if should_store_discovered_addr(peer_id, pid, a) {
+            insert_known_addr(&mut known_addrs, pid, a.clone());
+        }
     }
     let _ = swarm.dial(a.clone());
 }
@@ -1738,10 +1878,19 @@ if !want_blocks.is_empty() || !inflight.is_empty() {
     );
 }
 
-for (pid, addrs) in known_addrs.clone() {
-    if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) || is_quarantined(&quarantine, &pid) {
+let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
+peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+for pid in peer_ids {
+    if pid == peer_id
+        || connected.contains(&pid)
+        || is_banned(&bans, &pid)
+        || is_quarantined(&quarantine, &pid)
+    {
         continue;
     }
+
+    let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
 
     for addr in addrs {
         if let Some(t0) = last_dial_by_addr.get(&addr) {
@@ -1951,21 +2100,26 @@ let _ = compact_and_log_want_queue(
 
                     SwarmEvent::Behaviour(event) => {
 
-if let OutEvent::Identify(identify::Event::Received { peer_id, info, .. }) = &event {
-    let pid = *peer_id;
+if let OutEvent::Identify(identify::Event::Received { peer_id: remote_peer, info, .. }) = &event {
+    let pid = *remote_peer;
 
-    for addr in info.listen_addrs.iter().cloned() {
-        let full: Multiaddr = with_p2p_suffix(addr, pid);
-        insert_known_addr(&mut known_addrs, pid, full.clone());
-        println!("[pex] learned addr for {} -> {}", pid, full);
+    if pid != peer_id {
+        for addr in info.listen_addrs.iter().cloned() {
+            let full: Multiaddr = with_p2p_suffix(addr, pid);
+
+            if should_store_discovered_addr(peer_id, pid, &full) {
+                insert_known_addr(&mut known_addrs, pid, full.clone());
+                println!("[pex] learned addr for {} -> {}", pid, full);
+            }
+        }
+
+        let _ = swarm
+            .behaviour_mut()
+            .rr
+            .send_request(&pid, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
+
+        println!("[pex] requested peers from {} after identify", pid);
     }
-
-    let _ = swarm
-        .behaviour_mut()
-        .rr
-        .send_request(&pid, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
-
-    println!("[pex] requested peers from {} after identify", pid);
 }
 
                         if let Some((src, data, topic)) = handle_gossipsub_event(&event) {
@@ -2714,7 +2868,7 @@ if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
 SyncResponse::Peers { peers } => {
     let before = known_addrs.len();
 
-    parse_peer_strings_into_known_addrs(&mut known_addrs, peers);
+parse_peer_strings_into_known_addrs(&mut known_addrs, peer_id, peers);
 
     let after = known_addrs.len();
     println!(
@@ -2723,23 +2877,30 @@ SyncResponse::Peers { peers } => {
     );
 
     // Try dialing newly learned peers.
-    for (pid, addrs) in known_addrs.clone() {
-        if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) {
-            continue;
-        }
 
-        for addr in addrs {
-            if let Some(t0) = last_dial_by_addr.get(&addr) {
-                if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
-                    continue;
-                }
-            }
+let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
+peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 
-            println!("[pex] dialing learned peer {} via {}", pid, addr);
-            let _ = swarm.dial(addr.clone());
-            last_dial_by_addr.insert(addr, Instant::now());
-        }
+for pid in peer_ids {
+    if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) {
+        continue;
     }
+
+    let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
+
+    for addr in addrs {
+        if let Some(t0) = last_dial_by_addr.get(&addr) {
+            if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
+                continue;
+            }
+        }
+
+        println!("[pex] dialing learned peer {} via {}", pid, addr);
+        let _ = swarm.dial(addr.clone());
+        last_dial_by_addr.insert(addr, Instant::now());
+    }
+}
+
 }
 
                                                 SyncResponse::Ack => {}
