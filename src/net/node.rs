@@ -2393,7 +2393,8 @@ let _ = pump_blocks(
                                     }
                                 }
 
-                                match mempool.insert_checked(db.as_ref(), gt.tx) {
+match mempool.insert_checked(&db, gt.tx) {
+
                                     Ok(_added) => {}
                                     Err(_) => {
                                         if let Some(p) = src {
@@ -3005,6 +3006,15 @@ if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
     let prev_work = peer_work.get(&peer).copied().unwrap_or(0);
     let prev_height = peer_heights.get(&peer).copied().unwrap_or(0);
 
+    if better_fork_tip(hi2.chainwork, &bh, prev_work, &prev_tip) {
+        peer_tips.insert(peer, bh);
+        peer_work.insert(peer, hi2.chainwork);
+        peer_heights.insert(peer, hi2.height);
+    } else if hi2.chainwork == prev_work && hi2.height > prev_height {
+        peer_heights.insert(peer, hi2.height);
+    }
+}
+    }
 
 let best_tip_now = recompute_best_peer_tip(
     &connected,
@@ -3015,17 +3025,6 @@ let best_tip_now = recompute_best_peer_tip(
     &quarantine,
 );
 *best_peer_tip.write().await = best_tip_now;
-
-
-    if better_fork_tip(hi2.chainwork, &bh, prev_work, &prev_tip) {
-        peer_tips.insert(peer, bh);
-        peer_work.insert(peer, hi2.chainwork);
-        peer_heights.insert(peer, hi2.height);
-    } else if hi2.chainwork == prev_work && hi2.height > prev_height {
-        peer_heights.insert(peer, hi2.height);
-    }
-}
-    }
 
     pending_apply.insert(bh, block);
     try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
