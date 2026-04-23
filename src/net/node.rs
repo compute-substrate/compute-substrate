@@ -2170,6 +2170,15 @@ SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 println!("[pex] removing refused addr for {} -> {}", pid, addr);
                 remove_known_addr(&mut known_addrs, &pid, &addr);
             }
+        } else if err_s.contains("InvalidData")
+            || err_s.contains("error: Input")
+            || err_s.contains("kind: InvalidData")
+        {
+            let addrs = known_addrs_for_peer(&known_addrs, &pid);
+            for addr in addrs {
+                println!("[pex] removing invalid-data addr for {} -> {}", pid, addr);
+                remove_known_addr(&mut known_addrs, &pid, &addr);
+            }
         }
     }
 }
