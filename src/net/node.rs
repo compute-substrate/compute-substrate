@@ -984,6 +984,234 @@ fn pump_blocks(
     inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
 ) -> Result<()> {
 
+
+            let now = Instant::now();
+            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
+
+            for (h, (_rid, t0, peer)) in inflight.iter() {
+                if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
+                    timed_out.push((*h, *peer));
+                }
+            }
+
+
+for (h, peer) in timed_out {
+    if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
+        rid_to_hash.remove(&rid);
+    }
+
+    bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT);
+
+bad_providers.entry(h).or_default().insert(peer, Instant::now());
+
+    if want_blocks.len() < MAX_WANT_QUEUE {
+        want_blocks.push_back(h);
+    }
+
+    println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
+
+    if sync_peer == Some(peer) {
+        // handled by outer sync-peer chooser on next poll/event
+    }
+}
+
+
+
+
+
+while inflight.len() < MAX_INFLIGHT_BLOCKS {
+    let snapshot: Vec<Hash32> = want_blocks.iter().copied().collect();
+
+    let mut best_hash: Option<Hash32> = None;
+    let mut best_peer: Option<PeerId> = None;
+    let mut best_height: u64 = u64::MAX;
+
+    let mut skip_no_requestable = 0usize;
+    let mut skip_no_hidx = 0usize;
+    let mut skip_no_peer = 0usize;
+
+    let mut sample_reasons: Vec<String> = Vec::new();
+
+    for queued_h in snapshot {
+        let Some(target_h) = earliest_requestable_missing_ancestor(
+            db,
+            pending_apply,
+            inflight,
+            queued_h,
+        )? else {
+            skip_no_requestable += 1;
+
+            if sample_reasons.len() < 8 {
+                let have_raw = db.blocks.get(k_block(&queued_h)).ok().flatten().is_some();
+                let in_pending = pending_apply.contains_key(&queued_h);
+                let in_flight = inflight.contains_key(&queued_h);
+                let hidx = get_hidx(db, &queued_h)?.is_some();
+
+                sample_reasons.push(format!(
+                    "queued={} no_requestable (have_raw={} pending={} inflight={} hidx={})",
+                    short_hash(&queued_h),
+                    have_raw,
+                    in_pending,
+                    in_flight,
+                    hidx
+                ));
+            }
+
+            continue;
+        };
+
+        let Some(hi) = get_hidx(db, &target_h)? else {
+            skip_no_hidx += 1;
+
+            if sample_reasons.len() < 8 {
+                sample_reasons.push(format!(
+                    "queued={} target={} missing_hidx",
+                    short_hash(&queued_h),
+                    short_hash(&target_h),
+                ));
+            }
+
+            continue;
+        };
+
+        let mut target_peer: Option<PeerId> = None;
+        let mut peer_reason = String::new();
+
+        // 1) Prefer recorded provider for target hash
+        if let Some(p) = providers.get(&target_h) {
+            let connected_ok = connected.contains(p);
+            let banned = is_banned(bans, p);
+            let quarantined = is_quarantined(quarantine, p);
+            let bad = is_bad(bad_providers, &target_h, p);
+
+            if connected_ok && !banned && !quarantined && !bad {
+                target_peer = Some(*p);
+            } else {
+                peer_reason = format!(
+                    "provider={} connected={} banned={} quarantined={} bad={}",
+                    short_peer(p),
+                    connected_ok,
+                    banned,
+                    quarantined,
+                    bad
+                );
+            }
+        } else {
+            peer_reason = "no_provider".to_string();
+        }
+
+        // 2) Fallback to sync_peer
+        if target_peer.is_none() {
+            if let Some(sp) = sync_peer {
+                let connected_ok = connected.contains(&sp);
+                let banned = is_banned(bans, &sp);
+                let quarantined = is_quarantined(quarantine, &sp);
+                let bad = is_bad(bad_providers, &target_h, &sp);
+
+                if connected_ok && !banned && !quarantined && !bad {
+                    target_peer = Some(sp);
+                } else if peer_reason.is_empty() {
+                    peer_reason = format!(
+                        "sync_peer={} connected={} banned={} quarantined={} bad={}",
+                        short_peer(&sp),
+                        connected_ok,
+                        banned,
+                        quarantined,
+                        bad
+                    );
+                }
+            } else if peer_reason.is_empty() {
+                peer_reason = "no_sync_peer".to_string();
+            }
+        }
+
+// 3) Fallback to any eligible connected peer
+if target_peer.is_none() {
+    target_peer = connected
+        .iter()
+        .find(|p| {
+            !is_banned(bans, p)
+                && !is_quarantined(quarantine, p)
+                && !is_bad(bad_providers, &target_h, p)
+        })
+        .cloned();
+
+    if target_peer.is_none() && peer_reason.is_empty() {
+        peer_reason = "no_fallback_peer".to_string();
+    }
+}
+
+        let Some(peer) = target_peer else {
+            skip_no_peer += 1;
+
+            if sample_reasons.len() < 8 {
+                sample_reasons.push(format!(
+                    "queued={} target={} no_peer ({})",
+                    short_hash(&queued_h),
+                    short_hash(&target_h),
+                    peer_reason
+                ));
+            }
+
+            continue;
+        };
+
+        if hi.height < best_height {
+            best_height = hi.height;
+            best_hash = Some(target_h);
+            best_peer = Some(peer);
+        }
+    }
+
+    let Some(h) = best_hash else {
+        if !want_blocks.is_empty() {
+            println!(
+                "[sync-debug] pump_blocks stalled: want={} inflight={} pending={} connected={} no_requestable={} no_hidx={} no_peer={}",
+                want_blocks.len(),
+                inflight.len(),
+                pending_apply.len(),
+                connected.len(),
+                skip_no_requestable,
+                skip_no_hidx,
+                skip_no_peer,
+            );
+
+            for line in &sample_reasons {
+                println!("[sync-debug] {}", line);
+            }
+        }
+        break;
+    };
+
+    let Some(peer) = best_peer else {
+        println!(
+            "[sync-debug] pump_blocks internal inconsistency: best_hash but no best_peer for {}",
+            short_hash(&h)
+        );
+        break;
+    };
+
+    want_blocks.retain(|x| *x != h);
+
+    let rid = swarm
+        .behaviour_mut()
+        .rr
+        .send_request(&peer, SyncRequest::GetBlock { hash: h });
+
+    println!(
+        "[sync] request block {} from {} (height={})",
+        hex32(&h),
+        peer,
+        best_height
+    );
+
+    rid_to_hash.insert(rid, h);
+    inflight.insert(h, (rid, Instant::now(), peer));
+}
+
+            Ok(())
+        }
+
 fn is_bad(
     bad: &HashMap<Hash32, HashMap<PeerId, Instant>>,
     h: &Hash32,
@@ -1659,235 +1887,6 @@ let choose_best_sync_peer = |connected: &HashSet<PeerId>,
     let mark_peer_change = |last_peer_change_unix: &Arc<AtomicU64>| {
         last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
     };
-
-
-
-            let now = Instant::now();
-            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
-
-            for (h, (_rid, t0, peer)) in inflight.iter() {
-                if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
-                    timed_out.push((*h, *peer));
-                }
-            }
-
-
-for (h, peer) in timed_out {
-    if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
-        rid_to_hash.remove(&rid);
-    }
-
-    bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT);
-
-bad_providers.entry(h).or_default().insert(peer, Instant::now());
-
-    if want_blocks.len() < MAX_WANT_QUEUE {
-        want_blocks.push_back(h);
-    }
-
-    println!("[sync] requeue timed-out block {} from {}", hex32(&h), peer);
-
-    if sync_peer == Some(peer) {
-        // handled by outer sync-peer chooser on next poll/event
-    }
-}
-
-
-
-
-
-while inflight.len() < MAX_INFLIGHT_BLOCKS {
-    let snapshot: Vec<Hash32> = want_blocks.iter().copied().collect();
-
-    let mut best_hash: Option<Hash32> = None;
-    let mut best_peer: Option<PeerId> = None;
-    let mut best_height: u64 = u64::MAX;
-
-    let mut skip_no_requestable = 0usize;
-    let mut skip_no_hidx = 0usize;
-    let mut skip_no_peer = 0usize;
-
-    let mut sample_reasons: Vec<String> = Vec::new();
-
-    for queued_h in snapshot {
-        let Some(target_h) = earliest_requestable_missing_ancestor(
-            db,
-            pending_apply,
-            inflight,
-            queued_h,
-        )? else {
-            skip_no_requestable += 1;
-
-            if sample_reasons.len() < 8 {
-                let have_raw = db.blocks.get(k_block(&queued_h)).ok().flatten().is_some();
-                let in_pending = pending_apply.contains_key(&queued_h);
-                let in_flight = inflight.contains_key(&queued_h);
-                let hidx = get_hidx(db, &queued_h)?.is_some();
-
-                sample_reasons.push(format!(
-                    "queued={} no_requestable (have_raw={} pending={} inflight={} hidx={})",
-                    short_hash(&queued_h),
-                    have_raw,
-                    in_pending,
-                    in_flight,
-                    hidx
-                ));
-            }
-
-            continue;
-        };
-
-        let Some(hi) = get_hidx(db, &target_h)? else {
-            skip_no_hidx += 1;
-
-            if sample_reasons.len() < 8 {
-                sample_reasons.push(format!(
-                    "queued={} target={} missing_hidx",
-                    short_hash(&queued_h),
-                    short_hash(&target_h),
-                ));
-            }
-
-            continue;
-        };
-
-        let mut target_peer: Option<PeerId> = None;
-        let mut peer_reason = String::new();
-
-        // 1) Prefer recorded provider for target hash
-        if let Some(p) = providers.get(&target_h) {
-            let connected_ok = connected.contains(p);
-            let banned = is_banned(bans, p);
-            let quarantined = is_quarantined(quarantine, p);
-            let bad = is_bad(bad_providers, &target_h, p);
-
-            if connected_ok && !banned && !quarantined && !bad {
-                target_peer = Some(*p);
-            } else {
-                peer_reason = format!(
-                    "provider={} connected={} banned={} quarantined={} bad={}",
-                    short_peer(p),
-                    connected_ok,
-                    banned,
-                    quarantined,
-                    bad
-                );
-            }
-        } else {
-            peer_reason = "no_provider".to_string();
-        }
-
-        // 2) Fallback to sync_peer
-        if target_peer.is_none() {
-            if let Some(sp) = sync_peer {
-                let connected_ok = connected.contains(&sp);
-                let banned = is_banned(bans, &sp);
-                let quarantined = is_quarantined(quarantine, &sp);
-                let bad = is_bad(bad_providers, &target_h, &sp);
-
-                if connected_ok && !banned && !quarantined && !bad {
-                    target_peer = Some(sp);
-                } else if peer_reason.is_empty() {
-                    peer_reason = format!(
-                        "sync_peer={} connected={} banned={} quarantined={} bad={}",
-                        short_peer(&sp),
-                        connected_ok,
-                        banned,
-                        quarantined,
-                        bad
-                    );
-                }
-            } else if peer_reason.is_empty() {
-                peer_reason = "no_sync_peer".to_string();
-            }
-        }
-
-// 3) Fallback to any eligible connected peer
-if target_peer.is_none() {
-    target_peer = connected
-        .iter()
-        .find(|p| {
-            !is_banned(bans, p)
-                && !is_quarantined(quarantine, p)
-                && !is_bad(bad_providers, &target_h, p)
-        })
-        .cloned();
-
-    if target_peer.is_none() && peer_reason.is_empty() {
-        peer_reason = "no_fallback_peer".to_string();
-    }
-}
-
-        let Some(peer) = target_peer else {
-            skip_no_peer += 1;
-
-            if sample_reasons.len() < 8 {
-                sample_reasons.push(format!(
-                    "queued={} target={} no_peer ({})",
-                    short_hash(&queued_h),
-                    short_hash(&target_h),
-                    peer_reason
-                ));
-            }
-
-            continue;
-        };
-
-        if hi.height < best_height {
-            best_height = hi.height;
-            best_hash = Some(target_h);
-            best_peer = Some(peer);
-        }
-    }
-
-    let Some(h) = best_hash else {
-        if !want_blocks.is_empty() {
-            println!(
-                "[sync-debug] pump_blocks stalled: want={} inflight={} pending={} connected={} no_requestable={} no_hidx={} no_peer={}",
-                want_blocks.len(),
-                inflight.len(),
-                pending_apply.len(),
-                connected.len(),
-                skip_no_requestable,
-                skip_no_hidx,
-                skip_no_peer,
-            );
-
-            for line in &sample_reasons {
-                println!("[sync-debug] {}", line);
-            }
-        }
-        break;
-    };
-
-    let Some(peer) = best_peer else {
-        println!(
-            "[sync-debug] pump_blocks internal inconsistency: best_hash but no best_peer for {}",
-            short_hash(&h)
-        );
-        break;
-    };
-
-    want_blocks.retain(|x| *x != h);
-
-    let rid = swarm
-        .behaviour_mut()
-        .rr
-        .send_request(&peer, SyncRequest::GetBlock { hash: h });
-
-    println!(
-        "[sync] request block {} from {} (height={})",
-        hex32(&h),
-        peer,
-        best_height
-    );
-
-    rid_to_hash.insert(rid, h);
-    inflight.insert(h, (rid, Instant::now(), peer));
-}
-
-            Ok(())
-        };
 
     loop {
         tokio::select! {
