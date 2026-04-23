@@ -968,6 +968,55 @@ fn maybe_send_bootstrap_requests(
     last_bootstrap_req_at.insert(peer, Instant::now());
 }
 
+fn pump_blocks(
+    swarm: &mut Swarm<Behaviour>,
+    sync_peer: Option<PeerId>,
+    connected: &HashSet<PeerId>,
+    providers: &HashMap<Hash32, PeerId>,
+    bad_providers: &mut HashMap<Hash32, HashMap<PeerId, Instant>>,
+    bans: &HashMap<PeerId, Instant>,
+    peer_score: &mut HashMap<PeerId, i32>,
+    quarantine: &mut HashMap<PeerId, Instant>,
+    rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
+    db: &Stores,
+    pending_apply: &HashMap<Hash32, Block>,
+    want_blocks: &mut VecDeque<Hash32>,
+    inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
+) -> Result<()> {
+
+fn is_bad(
+    bad: &HashMap<Hash32, HashMap<PeerId, Instant>>,
+    h: &Hash32,
+    p: &PeerId,
+) -> bool {
+    bad.get(h)
+        .and_then(|m| m.get(p))
+        .map(|t| t.elapsed().as_secs() < BAD_PROVIDER_RETRY_SECS)
+        .unwrap_or(false)
+}
+
+fn is_quarantined(
+    quar: &HashMap<PeerId, Instant>,
+    p: &PeerId,
+) -> bool {
+    quar.get(p)
+        .map(|t| t.elapsed().as_secs() < QUAR_SECS)
+        .unwrap_or(false)
+}
+
+fn bump_score(
+    scores: &mut HashMap<PeerId, i32>,
+    quar: &mut HashMap<PeerId, Instant>,
+    p: PeerId,
+    delta: i32,
+) {
+    let s = scores.entry(p).or_insert(0);
+    *s = s.saturating_add(delta);
+    if *s <= QUAR_SCORE_THRESHOLD {
+        quar.insert(p, Instant::now());
+    }
+}
+
 
 fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
     cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
@@ -1567,26 +1616,6 @@ let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_bootstrap_req_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_disconnect_at: HashMap<PeerId, Instant> = HashMap::new();
 
-let is_bad = |bad: &HashMap<Hash32, HashMap<PeerId, Instant>>, h: &Hash32, p: &PeerId| -> bool {
-    bad.get(h)
-        .and_then(|m| m.get(p))
-        .map(|t| t.elapsed().as_secs() < BAD_PROVIDER_RETRY_SECS)
-        .unwrap_or(false)
-};
-
-    let is_quarantined = |quar: &HashMap<PeerId, Instant>, p: &PeerId| -> bool {
-        quar.get(p)
-            .map(|t| t.elapsed().as_secs() < QUAR_SECS)
-            .unwrap_or(false)
-    };
-
-    let bump_score = |scores: &mut HashMap<PeerId, i32>, quar: &mut HashMap<PeerId, Instant>, p: PeerId, delta: i32| {
-        let s = scores.entry(p).or_insert(0);
-        *s = s.saturating_add(delta);
-        if *s <= QUAR_SCORE_THRESHOLD {
-            quar.insert(p, Instant::now());
-        }
-    };
 
 let choose_best_sync_peer = |connected: &HashSet<PeerId>,
                              peer_work: &HashMap<PeerId, u128>,
@@ -1632,22 +1661,6 @@ let choose_best_sync_peer = |connected: &HashSet<PeerId>,
     };
 
 
-
-let pump_blocks =
-    |swarm: &mut Swarm<Behaviour>,
-     sync_peer: Option<PeerId>,
-     connected: &HashSet<PeerId>,
-     providers: &HashMap<Hash32, PeerId>,
-bad_providers: &mut HashMap<Hash32, HashMap<PeerId, Instant>>,
-     bans: &HashMap<PeerId, Instant>,
-     peer_score: &mut HashMap<PeerId, i32>,
-     quarantine: &mut HashMap<PeerId, Instant>,
-     rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
-     db: &Stores,
-     pending_apply: &HashMap<Hash32, Block>,
-     want_blocks: &mut VecDeque<Hash32>,
-     inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>|
-     -> Result<()> {
 
             let now = Instant::now();
             let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
