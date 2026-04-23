@@ -897,6 +897,78 @@ fn recompute_best_peer_metrics(
 }
 
 
+fn recompute_best_peer_tip(
+    connected: &HashSet<PeerId>,
+    peer_tips: &HashMap<PeerId, Hash32>,
+    peer_work: &HashMap<PeerId, u128>,
+    peer_score: &HashMap<PeerId, i32>,
+    bans: &HashMap<PeerId, Instant>,
+    quarantine: &HashMap<PeerId, Instant>,
+) -> Hash32 {
+    let mut best: Option<(PeerId, u128, i32, String)> = None;
+
+    for p in connected.iter() {
+        if !peer_is_eligible(p, connected, bans, quarantine) {
+            continue;
+        }
+
+        let w = *peer_work.get(p).unwrap_or(&0);
+        let s = *peer_score.get(p).unwrap_or(&0);
+        let pid = p.to_string();
+
+        match &best {
+            None => best = Some((*p, w, s, pid)),
+            Some((_bp, bw, bs, bpid)) => {
+                let better =
+                    (w > *bw)
+                    || (w == *bw && s > *bs)
+                    || (w == *bw && s == *bs && pid < *bpid);
+
+                if better {
+                    best = Some((*p, w, s, pid));
+                }
+            }
+        }
+    }
+
+    best.and_then(|(p, _, _, _)| peer_tips.get(&p).copied())
+        .unwrap_or([0u8; 32])
+}
+
+fn maybe_send_bootstrap_requests(
+    swarm: &mut Swarm<Behaviour>,
+    peer: PeerId,
+    last_bootstrap_req_at: &mut HashMap<PeerId, Instant>,
+    last_tip_req_at: &mut HashMap<PeerId, Instant>,
+) {
+    let due = last_bootstrap_req_at
+        .get(&peer)
+        .map(|t| t.elapsed() >= Duration::from_secs(BOOTSTRAP_REQ_COOLDOWN_SECS))
+        .unwrap_or(true);
+
+    if !due {
+        return;
+    }
+
+    let rid = swarm
+        .behaviour_mut()
+        .rr
+        .send_request(&peer, SyncRequest::GetTip);
+
+    last_tip_req_at.insert(peer, Instant::now());
+    println!("[sync] requested tip ({rid:?})");
+
+    let _ = swarm
+        .behaviour_mut()
+        .rr
+        .send_request(&peer, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
+
+    println!("[pex] requested peers from {} after identify/bootstrap", peer);
+
+    last_bootstrap_req_at.insert(peer, Instant::now());
+}
+
+
 fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
     cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
 }
@@ -1559,52 +1631,7 @@ let choose_best_sync_peer = |connected: &HashSet<PeerId>,
         last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
     };
 
-let recompute_best_peer_tip =
-    |connected: &HashSet<PeerId>,
-     peer_tips: &HashMap<PeerId, Hash32>,
-     peer_work: &HashMap<PeerId, u128>,
-     peer_score: &HashMap<PeerId, i32>,
-     bans: &HashMap<PeerId, Instant>,
-     quarantine: &HashMap<PeerId, Instant>|
-     -> Hash32 {
-        let best = choose_best_sync_peer(
-            connected,
-            peer_work,
-            peer_score,
-            bans,
-            quarantine,
-        );
 
-        best.and_then(|p| peer_tips.get(&p).copied())
-            .unwrap_or([0u8; 32])
-    };
-
-let maybe_send_bootstrap_requests =
-    |swarm: &mut Swarm<Behaviour>,
-     peer: PeerId,
-     last_bootstrap_req_at: &mut HashMap<PeerId, Instant>,
-     last_tip_req_at: &mut HashMap<PeerId, Instant>| {
-        let due = last_bootstrap_req_at
-            .get(&peer)
-            .map(|t| t.elapsed() >= Duration::from_secs(BOOTSTRAP_REQ_COOLDOWN_SECS))
-            .unwrap_or(true);
-
-        if !due {
-            return;
-        }
-
-        let rid = swarm.behaviour_mut().rr.send_request(&peer, SyncRequest::GetTip);
-        last_tip_req_at.insert(peer, Instant::now());
-        println!("[sync] requested tip ({rid:?})");
-
-        let _ = swarm
-            .behaviour_mut()
-            .rr
-            .send_request(&peer, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
-        println!("[pex] requested peers from {} after identify/bootstrap", peer);
-
-        last_bootstrap_req_at.insert(peer, Instant::now());
-    };
 
 let pump_blocks =
     |swarm: &mut Swarm<Behaviour>,
