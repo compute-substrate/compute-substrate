@@ -968,6 +968,50 @@ fn maybe_send_bootstrap_requests(
     last_bootstrap_req_at.insert(peer, Instant::now());
 }
 
+fn choose_best_sync_peer(
+    connected: &HashSet<PeerId>,
+    peer_work: &HashMap<PeerId, u128>,
+    peer_score: &HashMap<PeerId, i32>,
+    bans: &HashMap<PeerId, Instant>,
+    quarantine: &HashMap<PeerId, Instant>,
+) -> Option<PeerId> {
+    let mut best: Option<(PeerId, u128, i32, String)> = None;
+
+    for p in connected.iter() {
+        if !peer_is_eligible(p, connected, bans, quarantine) {
+            continue;
+        }
+
+        let w = *peer_work.get(p).unwrap_or(&0);
+        let s = *peer_score.get(p).unwrap_or(&0);
+        let pid = p.to_string();
+
+        match &best {
+            None => best = Some((*p, w, s, pid)),
+            Some((_bp, bw, bs, bpid)) => {
+                let better =
+                    (w > *bw)
+                    || (w == *bw && s > *bs)
+                    || (w == *bw && s == *bs && pid < *bpid);
+
+                if better {
+                    best = Some((*p, w, s, pid));
+                }
+            }
+        }
+    }
+
+    best.map(|(p, _, _, _)| p)
+}
+
+fn mark_peer_change(last_peer_change_unix: &Arc<AtomicU64>) {
+    last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
+}
+
+fn mark_tip_seen(last_tip_seen_unix: &Arc<AtomicU64>) {
+    last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
+}
+
 fn pump_blocks(
     swarm: &mut Swarm<Behaviour>,
     sync_peer: Option<PeerId>,
@@ -1843,50 +1887,6 @@ let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let mut last_bootstrap_req_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_disconnect_at: HashMap<PeerId, Instant> = HashMap::new();
-
-
-let choose_best_sync_peer = |connected: &HashSet<PeerId>,
-                             peer_work: &HashMap<PeerId, u128>,
-                             peer_score: &HashMap<PeerId, i32>,
-                             bans: &HashMap<PeerId, Instant>,
-                             quarantine: &HashMap<PeerId, Instant>|
- -> Option<PeerId> {
-    let mut best: Option<(PeerId, u128, i32, String)> = None;
-
-    for p in connected.iter() {
-        if !peer_is_eligible(p, connected, bans, quarantine) {
-            continue;
-        }
-
-        let w = *peer_work.get(p).unwrap_or(&0);
-        let s = *peer_score.get(p).unwrap_or(&0);
-        let pid = p.to_string();
-
-        match &best {
-            None => best = Some((*p, w, s, pid)),
-            Some((_bp, bw, bs, bpid)) => {
-                let better =
-                    (w > *bw)
-                    || (w == *bw && s > *bs)
-                    || (w == *bw && s == *bs && pid < *bpid);
-
-                if better {
-                    best = Some((*p, w, s, pid));
-                }
-            }
-        }
-    }
-
-    best.map(|(p, _, _, _)| p)
-};
-
-    let mark_tip_seen = |last_tip_seen_unix: &Arc<AtomicU64>| {
-        last_tip_seen_unix.store(unix_now(), Ordering::Relaxed);
-    };
-
-    let mark_peer_change = |last_peer_change_unix: &Arc<AtomicU64>| {
-        last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
-    };
 
     loop {
         tokio::select! {
