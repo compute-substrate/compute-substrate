@@ -95,6 +95,8 @@ const MAX_PEERS_IN_EXCHANGE: usize = 64;
 const PEER_REQ_ON_CONNECT: u16 = 64;
 const PEER_REDIAL_EVERY_SECS: u64 = 15;
 const MAX_ADDRS_PER_PEER: usize = 8;
+const BOOTSTRAP_REQ_COOLDOWN_SECS: u64 = 30;
+const PEER_DISCONNECT_COOLDOWN_SECS: u64 = 20;
 
 // ----------------- time helpers -----------------
 
@@ -323,6 +325,33 @@ fn addr_quality_rank(addr: &Multiaddr) -> u8 {
     20
 }
 
+fn addr_base_key(addr: &Multiaddr) -> String {
+    use libp2p::multiaddr::Protocol;
+
+    let mut parts = Vec::<String>::new();
+    for p in addr.iter() {
+        match p {
+            Protocol::P2p(_) => break,
+            _ => parts.push(p.to_string()),
+        }
+    }
+    parts.join("/")
+}
+
+fn dedup_addrs_by_base(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
+    let mut seen = HashSet::<String>::new();
+    let mut out = Vec::<Multiaddr>::new();
+
+    for addr in addrs {
+        let k = addr_base_key(&addr);
+        if seen.insert(k) {
+            out.push(addr);
+        }
+    }
+
+    out
+}
+
 fn sorted_peer_addrs_for_export(
     self_peer: PeerId,
     peer: PeerId,
@@ -345,7 +374,7 @@ fn sorted_peer_addrs_for_export(
         ra.cmp(&rb).then_with(|| a.to_string().cmp(&b.to_string()))
     });
 
-    out
+    dedup_addrs_by_base(out)
 }
 
 fn insert_known_addr(
@@ -418,6 +447,26 @@ fn parse_peer_strings_into_known_addrs(
     }
 }
 
+
+fn remove_known_addr(
+    known_addrs: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    peer: &PeerId,
+    addr: &Multiaddr,
+) {
+    if let Some(set) = known_addrs.get_mut(peer) {
+        set.remove(addr);
+        if set.is_empty() {
+            known_addrs.remove(peer);
+        }
+    }
+}
+
+fn remove_peer_from_known_addrs(
+    known_addrs: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    peer: &PeerId,
+) {
+    known_addrs.remove(peer);
+}
 
 // Locator builder (Bitcoin-style): tip, parent, parent^2, parent^4, ... capped.
 fn build_locator(db: &Stores, tip: &Hash32) -> Vec<Hash32> {
@@ -1443,6 +1492,9 @@ poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
 let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 
+let mut last_bootstrap_req_at: HashMap<PeerId, Instant> = HashMap::new();
+let mut last_disconnect_at: HashMap<PeerId, Instant> = HashMap::new();
+
 let is_bad = |bad: &HashMap<Hash32, HashMap<PeerId, Instant>>, h: &Hash32, p: &PeerId| -> bool {
     bad.get(h)
         .and_then(|m| m.get(p))
@@ -1505,6 +1557,53 @@ let choose_best_sync_peer = |connected: &HashSet<PeerId>,
 
     let mark_peer_change = |last_peer_change_unix: &Arc<AtomicU64>| {
         last_peer_change_unix.store(unix_now(), Ordering::Relaxed);
+    };
+
+let recompute_best_peer_tip =
+    |connected: &HashSet<PeerId>,
+     peer_tips: &HashMap<PeerId, Hash32>,
+     peer_work: &HashMap<PeerId, u128>,
+     peer_score: &HashMap<PeerId, i32>,
+     bans: &HashMap<PeerId, Instant>,
+     quarantine: &HashMap<PeerId, Instant>|
+     -> Hash32 {
+        let best = choose_best_sync_peer(
+            connected,
+            peer_work,
+            peer_score,
+            bans,
+            quarantine,
+        );
+
+        best.and_then(|p| peer_tips.get(&p).copied())
+            .unwrap_or([0u8; 32])
+    };
+
+let maybe_send_bootstrap_requests =
+    |swarm: &mut Swarm<Behaviour>,
+     peer: PeerId,
+     last_bootstrap_req_at: &mut HashMap<PeerId, Instant>,
+     last_tip_req_at: &mut HashMap<PeerId, Instant>| {
+        let due = last_bootstrap_req_at
+            .get(&peer)
+            .map(|t| t.elapsed() >= Duration::from_secs(BOOTSTRAP_REQ_COOLDOWN_SECS))
+            .unwrap_or(true);
+
+        if !due {
+            return;
+        }
+
+        let rid = swarm.behaviour_mut().rr.send_request(&peer, SyncRequest::GetTip);
+        last_tip_req_at.insert(peer, Instant::now());
+        println!("[sync] requested tip ({rid:?})");
+
+        let _ = swarm
+            .behaviour_mut()
+            .rr
+            .send_request(&peer, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
+        println!("[pex] requested peers from {} after identify/bootstrap", peer);
+
+        last_bootstrap_req_at.insert(peer, Instant::now());
     };
 
 let pump_blocks =
@@ -1890,6 +1989,12 @@ for pid in peer_ids {
         continue;
     }
 
+    if let Some(t0) = last_disconnect_at.get(&pid) {
+        if t0.elapsed() < Duration::from_secs(PEER_DISCONNECT_COOLDOWN_SECS) {
+            continue;
+        }
+    }
+
     let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
 
     for addr in addrs {
@@ -2002,22 +2107,29 @@ mark_peer_change(&last_peer_change_unix);
                             sync_peer = Some(peer_id);
                         }
 
-if !is_quarantined(&quarantine, &peer_id) {
-    let rid = swarm.behaviour_mut().rr.send_request(&peer_id, SyncRequest::GetTip);
-    last_tip_req_at.insert(peer_id, Instant::now());
-    println!("[sync] requested tip ({rid:?})");
-
-    let _ = swarm
-        .behaviour_mut()
-        .rr
-        .send_request(&peer_id, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
-    println!("[pex] requested peers from {}", peer_id);
-}
+// Bootstrap RR is sent after Identify::Received, not on raw connection establishment.
 
                     }
 
 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
     println!("[p2p] OutgoingConnectionError peer={:?} err={:?}", peer_id, error);
+
+    if let Some(pid) = peer_id {
+        last_disconnect_at.insert(pid, Instant::now());
+
+        let err_s = format!("{:?}", error);
+
+        if err_s.contains("WrongPeerId") {
+            println!("[pex] removing peer {} from known_addrs due to WrongPeerId", pid);
+            remove_peer_from_known_addrs(&mut known_addrs, &pid);
+        } else if err_s.contains("ConnectionRefused") {
+            let addrs = known_addrs_for_peer(&known_addrs, &pid);
+            for addr in addrs {
+                println!("[pex] removing refused addr for {} -> {}", pid, addr);
+                remove_known_addr(&mut known_addrs, &pid, &addr);
+            }
+        }
+    }
 }
 
 SwarmEvent::IncomingConnectionError { local_addr, send_back_addr, error, .. } => {
@@ -2047,6 +2159,9 @@ SwarmEvent::Dialing { peer_id, connection_id } => {
 
                         mark_peer_change(&last_peer_change_unix);
 
+			last_disconnect_at.insert(peer_id, Instant::now());
+			last_bootstrap_req_at.remove(&peer_id);
+
                         peer_heights.remove(&peer_id);
                         peer_work.remove(&peer_id);
                          peer_tips.remove(&peer_id);
@@ -2062,6 +2177,16 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
 *best_peer_work.write().await = best_w;
+
+let best_tip_now = recompute_best_peer_tip(
+    &connected,
+    &peer_tips,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+);
+*best_peer_tip.write().await = best_tip_now;
 
 last_gettip_log_at.remove(&peer_id);
 
@@ -2113,12 +2238,12 @@ if let OutEvent::Identify(identify::Event::Received { peer_id: remote_peer, info
             }
         }
 
-        let _ = swarm
-            .behaviour_mut()
-            .rr
-            .send_request(&pid, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
-
-        println!("[pex] requested peers from {} after identify", pid);
+maybe_send_bootstrap_requests(
+    &mut swarm,
+    pid,
+    &mut last_bootstrap_req_at,
+    &mut last_tip_req_at,
+);
     }
 }
 
@@ -2416,6 +2541,17 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
 *best_peer_work.write().await = best_w;
 
+let best_tip_now = recompute_best_peer_tip(
+    &connected,
+    &peer_tips,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+);
+*best_peer_tip.write().await = best_tip_now;
+
+
 let (_dbg_tip, _dbg_h, _dbg_w) = local_tip_and_work(&db);
 let last_logged = last_logged_tip.get(&peer).copied();
 
@@ -2621,12 +2757,15 @@ best_peer_height_atomic.store(best_h, Ordering::Relaxed);
     }
     sync_peer = next_sync_peer;
 
-    if let Some(sp) = sync_peer {
-        let best_tip = peer_tips.get(&sp).copied().unwrap_or([0u8; 32]);
-        *best_peer_tip.write().await = best_tip;
-    } else {
-        *best_peer_tip.write().await = [0u8; 32];
-    }
+let best_tip_now = recompute_best_peer_tip(
+    &connected,
+    &peer_tips,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+);
+*best_peer_tip.write().await = best_tip_now;
 
     // Immediate request rule:
     // request the FIRST missing block in this exact batch whose parent raw block is grounded.
@@ -2827,6 +2966,18 @@ if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
     let prev_work = peer_work.get(&peer).copied().unwrap_or(0);
     let prev_height = peer_heights.get(&peer).copied().unwrap_or(0);
 
+
+let best_tip_now = recompute_best_peer_tip(
+    &connected,
+    &peer_tips,
+    &peer_work,
+    &peer_score,
+    &bans,
+    &quarantine,
+);
+*best_peer_tip.write().await = best_tip_now;
+
+
     if better_fork_tip(hi2.chainwork, &bh, prev_work, &prev_tip) {
         peer_tips.insert(peer, bh);
         peer_work.insert(peer, hi2.chainwork);
@@ -2884,6 +3035,12 @@ peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 for pid in peer_ids {
     if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) {
         continue;
+    }
+
+    if let Some(t0) = last_disconnect_at.get(&pid) {
+        if t0.elapsed() < Duration::from_secs(PEER_DISCONNECT_COOLDOWN_SECS) {
+            continue;
+        }
     }
 
     let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
