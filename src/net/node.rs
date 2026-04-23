@@ -963,7 +963,7 @@ fn maybe_send_bootstrap_requests(
         .rr
         .send_request(&peer, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
 
-    println!("[pex] requested peers from {} after identify/bootstrap", peer);
+println!("[pex] requested peers from {}", peer);
 
     last_bootstrap_req_at.insert(peer, Instant::now());
 }
@@ -2121,34 +2121,37 @@ SwarmEvent::NewListenAddr { address, .. } => {
     }
 }
 
-                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                        if is_banned(&bans, &peer_id) {
-                            println!("[p2p] ignoring connect from banned peer: {peer_id}");
-                            continue;
-                        }
+SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+    if is_banned(&bans, &peer_id) {
+        println!("[p2p] ignoring connect from banned peer: {peer_id}");
+        continue;
+    }
 
-// Track refcount, but use `connected` as the authoritative "first connect" gate.
-let e = conn_refcnt.entry(peer_id).or_insert(0);
-*e += 1;
+    let e = conn_refcnt.entry(peer_id).or_insert(0);
+    *e += 1;
 
-let is_first_logical_connection = connected.insert(peer_id);
-if !is_first_logical_connection {
-    // Already logically connected to this peer; ignore duplicate established events.
-    continue;
+    let is_first_logical_connection = connected.insert(peer_id);
+    if !is_first_logical_connection {
+        continue;
+    }
+
+    println!("[p2p] connected: {peer_id}");
+    connected_peers.store(connected.len(), Ordering::Relaxed);
+    mark_peer_change(&last_peer_change_unix);
+
+    if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
+        sync_peer = Some(peer_id);
+    }
+
+    if !is_quarantined(&quarantine, &peer_id) {
+        maybe_send_bootstrap_requests(
+            &mut swarm,
+            peer_id,
+            &mut last_bootstrap_req_at,
+            &mut last_tip_req_at,
+        );
+    }
 }
-
-println!("[p2p] connected: {peer_id}");
-connected_peers.store(connected.len(), Ordering::Relaxed);
-mark_peer_change(&last_peer_change_unix);
-
-                        // only request tip on first connection
-                        if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
-                            sync_peer = Some(peer_id);
-                        }
-
-// Bootstrap RR is sent after Identify::Received, not on raw connection establishment.
-
-                    }
 
 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
     println!("[p2p] OutgoingConnectionError peer={:?} err={:?}", peer_id, error);
