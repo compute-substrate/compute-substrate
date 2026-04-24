@@ -1890,10 +1890,16 @@ let behaviour = Behaviour {
 
 let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
 
-    swarm.listen_on(cfg.listen.clone())?;
-    println!("[p2p] listening on {}", cfg.listen);
+let mut last_redial = Instant::now() - Duration::from_secs(60);
+let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
+let mut addr_backoff: HashMap<Multiaddr, (u32, Instant)> = HashMap::new();
+let mut pending_dials: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+
+swarm.listen_on(cfg.listen.clone())?;
+println!("[p2p] listening on {}", cfg.listen);
 
 for a in &cfg.bootnodes {
+
     println!("[p2p] dialing bootnode {a}");
 
     if let Some(pid) = peer_id_from_multiaddr(a) {
@@ -1958,13 +1964,6 @@ let mut best_hdr_work: u128 = 0;
 
 let mut poll = interval(Duration::from_secs(5));
 poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    let mut last_redial = Instant::now() - Duration::from_secs(60);
-    let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
-
-let mut addr_backoff: HashMap<Multiaddr, (u32, Instant)> = HashMap::new();
-
-let mut pending_dials: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
 
     let mut last_tip_req_at: HashMap<PeerId, Instant> = HashMap::new();
 
@@ -2249,6 +2248,16 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
 
     if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
         sync_peer = Some(peer_id);
+
+if !is_quarantined(&quarantine, &peer_id) {
+    maybe_send_bootstrap_requests(
+        &mut swarm,
+        peer_id,
+        &mut last_bootstrap_req_at,
+        &mut last_tip_req_at,
+    );
+}
+
     }
 }
 
@@ -3201,25 +3210,24 @@ for pid in peer_ids {
 
     let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
 
-    for addr in addrs {
-        if let Some(t0) = last_dial_by_addr.get(&addr) {
+for addr in addrs {
+    if addr_is_backed_off(&addr_backoff, &addr) {
+        continue;
+    }
 
-if addr_is_backed_off(&addr_backoff, &addr) {
-    continue;
+    if let Some(t0) = last_dial_by_addr.get(&addr) {
+        if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
+            continue;
+        }
+    }
+
+    println!("[pex] dialing learned peer {} via {}", pid, addr);
+
+    let _ = swarm.dial(addr.clone());
+    last_dial_by_addr.insert(addr.clone(), Instant::now());
+    note_pending_dial(&mut pending_dials, pid, addr);
 }
 
-            if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
-                continue;
-            }
-        }
-
-        println!("[pex] dialing learned peer {} via {}", pid, addr);
-
-let _ = swarm.dial(addr.clone());
-last_dial_by_addr.insert(addr.clone(), Instant::now());
-note_pending_dial(&mut pending_dials, pid, addr);
-
-    }
 }
 
 }
