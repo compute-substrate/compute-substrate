@@ -11,18 +11,12 @@ use crate::state::db::get_utxo;
 use crate::state::utxo::validate_tx_for_mempool;
 use crate::types::{Block, Hash32, OutPoint, Transaction};
 
-/// -------------------------
-/// Mainnet hardening limits
-/// -------------------------
-///
-/// Safe to change later.
-/// These are conservative defaults for mainnet stability.
-///
+
 /// Notes:
 /// - Mempool is "strictly mineable": it only accepts txs whose inputs exist
 ///   in the current canonical UTXO set (no mempool chains / no package relay).
 /// - That property dramatically reduces complexity and DoS surface.
-///
+
 /// IMPORTANT:
 /// - Per-tx caps must NOT exceed consensus caps (or unminable txes will be accepted).
 const MAX_MEMPOOL_TXS: usize = 50_000;
@@ -30,7 +24,6 @@ const MAX_MEMPOOL_BYTES: usize = 64 * 1024 * 1024; // 64 MiB total tx bytes (ser
 const MAX_MEMPOOL_SPENT: usize = 200_000; // cap spent-outpoint index growth (DoS guard)
 
 /// Minimum fee-rate to be accepted into mempool.
-///
 /// Unit: "ppm-per-byte" = fee * 1_000_000 / tx_bytes.
 const MIN_FEERATE_PPM: u64 = 1;
 
@@ -254,14 +247,7 @@ impl Mempool {
             }
         }
 
-        if w.spent.len().saturating_add(tx.inputs.len()) > self.max_spent {
-            bail!(
-                "mempool spent index full (spent_len={} + new_inputs={} > max_spent={})",
-                w.spent.len(),
-                tx.inputs.len(),
-                self.max_spent
-            );
-        }
+
 
         let would_exceed_count = w.txs.len() >= self.max_txs;
         let would_exceed_bytes = w.total_bytes.saturating_add(tx_bytes) > self.max_bytes;
@@ -280,16 +266,31 @@ impl Mempool {
             }
         }
 
-        while w.txs.len() >= self.max_txs {
-            if !evict_one_lowest_feerate(&mut w) {
-                bail!("mempool full (cannot evict)");
-            }
-        }
+while w.txs.len() >= self.max_txs {
+    if !evict_one_below_feerate(&mut w, feerate_ppm) {
+        bail!(
+            "mempool full; no lower-feerate tx available to evict (new_feerate={})",
+            feerate_ppm
+        );
+    }
+}
 
-        while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
-            if !evict_one_lowest_feerate(&mut w) {
-                bail!("mempool bytes full (cannot evict)");
-            }
+while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
+    if !evict_one_below_feerate(&mut w, feerate_ppm) {
+        bail!(
+            "mempool bytes full; no lower-feerate tx available to evict (new_feerate={})",
+            feerate_ppm
+        );
+    }
+}
+
+        if w.spent.len().saturating_add(tx.inputs.len()) > self.max_spent {
+            bail!(
+                "mempool spent index full (spent_len={} + new_inputs={} > max_spent={})",
+                w.spent.len(),
+                tx.inputs.len(),
+                self.max_spent
+            );
         }
 
         for inp in &tx.inputs {
@@ -501,6 +502,20 @@ fn evict_one_lowest_feerate(w: &mut Inner) -> bool {
     let Some((_fr, id)) = victim else {
         return false;
     };
+    remove_locked(w, &id)
+}
+
+fn evict_one_below_feerate(w: &mut Inner, new_feerate_ppm: u64) -> bool {
+    let victim = w.eviction.iter().next().cloned();
+
+    let Some((fr, id)) = victim else {
+        return false;
+    };
+
+    if fr >= new_feerate_ppm {
+        return false;
+    }
+
     remove_locked(w, &id)
 }
 
