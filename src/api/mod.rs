@@ -12,7 +12,6 @@ use std::sync::Arc;
 use crate::chain::index::{get_hidx, HeaderIndex};
 use crate::crypto::{sighash, txid};
 use crate::net::mempool::{Mempool, MempoolStats};
-use crate::net::GossipTxEvent;
 use crate::net::GossipTxEvent as _; // keep type visible even if optimized paths change
 use crate::state::app_state::{get_proposal, get_topk, k_proposal, Proposal};
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
@@ -303,6 +302,7 @@ connected_peers,
         .route("/tip", get(tip))
         .route("/mempool", get(mempool_info))
         // Explorer-grade read endpoints:
+.route("/block/height/:height", get(block_by_height_get))
         .route("/block/:hash", get(block_get))
         .route("/tx/:id", get(tx_get))
         .route("/utxos/:addr20", get(utxos_for_addr20))
@@ -726,6 +726,63 @@ let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u3
         header: header_json,
         txs: txs_json,
     })
+}
+
+
+async fn block_by_height_get(
+    Path(height): Path<u64>,
+    State(st): State<ApiState>,
+) -> Json<BlockResp> {
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    if height > hi.height {
+        return Json(BlockResp {
+            ok: false,
+            hash: "".to_string(),
+            height: None,
+            chainwork: None,
+            header: serde_json::json!({ "err": "height beyond tip" }),
+            txs: vec![],
+        });
+    }
+
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
+
+    while cur_height > height {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            return Json(BlockResp {
+                ok: false,
+                hash: format!("0x{}", hex::encode(cur_hash)),
+                height: Some(cur_height),
+                chainwork: None,
+                header: serde_json::json!({ "err": "missing block while walking back" }),
+                txs: vec![],
+            });
+        };
+
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(e) => {
+                return Json(BlockResp {
+                    ok: false,
+                    hash: format!("0x{}", hex::encode(cur_hash)),
+                    height: Some(cur_height),
+                    chainwork: None,
+                    header: serde_json::json!({ "err": format!("decode block: {e}") }),
+                    txs: vec![],
+                })
+            }
+        };
+
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
+    }
+
+    block_get(Path(format!("0x{}", hex::encode(cur_hash))), State(st)).await
 }
 
 
