@@ -560,7 +560,18 @@ fn remove_locked(w: &mut Inner, id: &Hash32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AppPayload, TxIn};
+use crate::types::{AppPayload, BlockHeader, TxIn, TxOut};
+
+fn test_header() -> BlockHeader {
+    BlockHeader {
+        version: 1,
+        prev: [0u8; 32],
+        merkle: [0u8; 32],
+        time: 0,
+        bits: 0,
+        nonce: 0,
+    }
+}
 
     fn op(n: u8) -> OutPoint {
         OutPoint {
@@ -646,7 +657,7 @@ mod tests {
         assert!(mp.has_spent_outpoint(&shared_input));
 
         let block = Block {
-            header: Default::default(),
+header: test_header(),
             txs: vec![coinbase(), mined_competing_tx],
         };
 
@@ -671,7 +682,7 @@ mod tests {
         assert!(mp.has_spent_outpoint(&input));
 
         let block = Block {
-            header: Default::default(),
+header: test_header(),
             txs: vec![coinbase(), tx],
         };
 
@@ -684,4 +695,3 @@ mod tests {
         assert_eq!(mp.spent_len(), 0);
     }
 }
-
