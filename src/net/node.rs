@@ -303,6 +303,72 @@ fn should_dial_discovered_addr(self_peer: PeerId, peer: PeerId, addr: &Multiaddr
 }
 
 
+fn addr_backoff_secs(failures: u32) -> u64 {
+    match failures {
+        0 => 0,
+        1 => 10,
+        2 => 30,
+        3 => 60,
+        4 => 180,
+        _ => 600,
+    }
+}
+
+fn addr_is_backed_off(
+    addr_backoff: &HashMap<Multiaddr, (u32, Instant)>,
+    addr: &Multiaddr,
+) -> bool {
+    addr_backoff
+        .get(addr)
+        .map(|(_, until)| Instant::now() < *until)
+        .unwrap_or(false)
+}
+
+fn note_addr_dial_failure(
+    addr_backoff: &mut HashMap<Multiaddr, (u32, Instant)>,
+    addr: &Multiaddr,
+) {
+    let failures = addr_backoff
+        .get(addr)
+        .map(|(n, _)| n.saturating_add(1))
+        .unwrap_or(1);
+
+    let secs = addr_backoff_secs(failures);
+    addr_backoff.insert(addr.clone(), (failures, Instant::now() + Duration::from_secs(secs)));
+}
+
+fn note_addr_dial_success(
+    addr_backoff: &mut HashMap<Multiaddr, (u32, Instant)>,
+    addr: &Multiaddr,
+) {
+    addr_backoff.remove(addr);
+}
+
+fn prune_addr_backoff(
+    addr_backoff: &mut HashMap<Multiaddr, (u32, Instant)>,
+) {
+    let now = Instant::now();
+    addr_backoff.retain(|_, (_fails, until)| now < *until);
+}
+
+fn note_pending_dial(
+    pending_dials: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    peer: PeerId,
+    addr: Multiaddr,
+) {
+    pending_dials.entry(peer).or_default().insert(addr);
+}
+
+fn take_pending_dials(
+    pending_dials: &mut HashMap<PeerId, HashSet<Multiaddr>>,
+    peer: &PeerId,
+) -> Vec<Multiaddr> {
+    pending_dials
+        .remove(peer)
+        .map(|s| s.into_iter().collect())
+        .unwrap_or_default()
+}
+
 fn addr_quality_rank(addr: &Multiaddr) -> u8 {
     use libp2p::multiaddr::Protocol;
 
@@ -1829,12 +1895,27 @@ let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
 
 for a in &cfg.bootnodes {
     println!("[p2p] dialing bootnode {a}");
+
     if let Some(pid) = peer_id_from_multiaddr(a) {
         if should_store_discovered_addr(peer_id, pid, a) {
             insert_known_addr(&mut known_addrs, pid, a.clone());
         }
+
+        if addr_is_backed_off(&addr_backoff, a) {
+            continue;
+        }
+
+        let _ = swarm.dial(a.clone());
+        last_dial_by_addr.insert(a.clone(), Instant::now());
+        note_pending_dial(&mut pending_dials, pid, a.clone());
+    } else {
+        if addr_is_backed_off(&addr_backoff, a) {
+            continue;
+        }
+
+        let _ = swarm.dial(a.clone());
+        last_dial_by_addr.insert(a.clone(), Instant::now());
     }
-    let _ = swarm.dial(a.clone());
 }
 
     let mut connected: HashSet<PeerId> = HashSet::new();
@@ -1881,6 +1962,10 @@ poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_redial = Instant::now() - Duration::from_secs(60);
     let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
 
+let mut addr_backoff: HashMap<Multiaddr, (u32, Instant)> = HashMap::new();
+
+let mut pending_dials: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+
     let mut last_tip_req_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
@@ -1895,6 +1980,9 @@ _ = poll.tick() => {
 
 prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
 prune_bad_providers(&mut bad_providers);
+
+prune_addr_backoff(&mut addr_backoff);
+
 
 scrub_stale_inflight(
     &mut inflight,
@@ -1912,28 +2000,36 @@ let _ = compact_and_log_want_queue(
 
 
                 // bootnode auto-redial (with backoff + connected-skip)
-                if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
-                    for a in &cfg.bootnodes {
-                        // if multiaddr includes peer id, skip if already connected
-                        if let Some(pid) = peer_id_from_multiaddr(a) {
-                            if connected.contains(&pid) {
-                                continue;
-                            }
-                        }
 
-                        // per-address backoff
-                        if let Some(t0) = last_dial_by_addr.get(a) {
-                            if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
-                                continue;
-                            }
-                        }
+if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
+    for a in &cfg.bootnodes {
+        if let Some(pid) = peer_id_from_multiaddr(a) {
+            if connected.contains(&pid) {
+                continue;
+            }
+        }
 
-                        println!("[p2p] redial bootnode {a}");
-                        let _ = swarm.dial(a.clone());
-                        last_dial_by_addr.insert(a.clone(), Instant::now());
-                    }
-                    last_redial = Instant::now();
-                }
+        if addr_is_backed_off(&addr_backoff, a) {
+            continue;
+        }
+
+        if let Some(t0) = last_dial_by_addr.get(a) {
+            if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
+                continue;
+            }
+        }
+
+        println!("[p2p] redial bootnode {a}");
+        let _ = swarm.dial(a.clone());
+        last_dial_by_addr.insert(a.clone(), Instant::now());
+
+        if let Some(pid) = peer_id_from_multiaddr(a) {
+            note_pending_dial(&mut pending_dials, pid, a.clone());
+        }
+    }
+
+    last_redial = Instant::now();
+}
 
 // regular tip polling + stale fallback
 let tip_age = unix_now().saturating_sub(last_tip_seen_unix.load(Ordering::Relaxed));
@@ -2037,6 +2133,11 @@ for pid in peer_ids {
     let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
 
     for addr in addrs {
+
+if addr_is_backed_off(&addr_backoff, &addr) {
+    continue;
+}
+
         if let Some(t0) = last_dial_by_addr.get(&addr) {
             if t0.elapsed() < Duration::from_secs(PEER_REDIAL_EVERY_SECS) {
                 continue;
@@ -2044,8 +2145,11 @@ for pid in peer_ids {
         }
 
         println!("[pex] periodic redial {} via {}", pid, addr);
-        let _ = swarm.dial(addr.clone());
-        last_dial_by_addr.insert(addr, Instant::now());
+
+let _ = swarm.dial(addr.clone());
+last_dial_by_addr.insert(addr.clone(), Instant::now());
+note_pending_dial(&mut pending_dials, pid, addr);
+
     }
 }
 
@@ -2122,6 +2226,10 @@ SwarmEvent::NewListenAddr { address, .. } => {
 }
 
 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+    for addr in take_pending_dials(&mut pending_dials, &peer_id) {
+        note_addr_dial_success(&mut addr_backoff, &addr);
+    }
+
     if is_banned(&bans, &peer_id) {
         println!("[p2p] ignoring connect from banned peer: {peer_id}");
         continue;
@@ -2142,21 +2250,19 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
     if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
         sync_peer = Some(peer_id);
     }
-
-    if !is_quarantined(&quarantine, &peer_id) {
-        maybe_send_bootstrap_requests(
-            &mut swarm,
-            peer_id,
-            &mut last_bootstrap_req_at,
-            &mut last_tip_req_at,
-        );
-    }
 }
 
 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
     println!("[p2p] OutgoingConnectionError peer={:?} err={:?}", peer_id, error);
 
     if let Some(pid) = peer_id {
+
+
+for addr in take_pending_dials(&mut pending_dials, &pid) {
+    println!("[pex] backing off addr for {} -> {}", pid, addr);
+    note_addr_dial_failure(&mut addr_backoff, &addr);
+}
+
         last_disconnect_at.insert(pid, Instant::now());
 
         let err_s = format!("{:?}", error);
@@ -3097,14 +3203,22 @@ for pid in peer_ids {
 
     for addr in addrs {
         if let Some(t0) = last_dial_by_addr.get(&addr) {
+
+if addr_is_backed_off(&addr_backoff, &addr) {
+    continue;
+}
+
             if t0.elapsed() < Duration::from_secs(DIAL_BACKOFF_SECS) {
                 continue;
             }
         }
 
         println!("[pex] dialing learned peer {} via {}", pid, addr);
-        let _ = swarm.dial(addr.clone());
-        last_dial_by_addr.insert(addr, Instant::now());
+
+let _ = swarm.dial(addr.clone());
+last_dial_by_addr.insert(addr.clone(), Instant::now());
+note_pending_dial(&mut pending_dials, pid, addr);
+
     }
 }
 
