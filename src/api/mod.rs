@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::chain::index::{get_hidx, HeaderIndex};
 use crate::crypto::{sighash, txid};
 use crate::net::mempool::{Mempool, MempoolStats};
-use crate::net::GossipTxEvent as _; // keep type visible even if optimized paths change
+use crate::net::GossipTxEvent;
 use crate::state::app_state::{get_proposal, get_topk, k_proposal, Proposal};
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
 use crate::types::{AppPayload, Block, Hash32, OutPoint, Transaction, TxOut};
