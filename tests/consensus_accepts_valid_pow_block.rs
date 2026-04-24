@@ -7,7 +7,7 @@ use csd::chain::index::{get_hidx, header_hash, index_header};
 use csd::chain::pow::{expected_bits, pow_ok};
 use csd::chain::time::median_time_past;
 use csd::params::{MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
-use csd::state::app::current_epoch;
+use csd::state::app_state::current_epoch;
 use csd::state::db::{get_tip, k_block, set_tip};
 use csd::state::utxo::validate_and_apply_block;
 use csd::types::{Block, BlockHeader, Hash20, Hash32};
