@@ -412,20 +412,15 @@ fn mark_bad(db: &Stores, h: &Hash32, why: &str) -> Result<()> {
 }
 
 // Mempool helpers
+
 fn mempool_remove_mined(mempool: Option<&Mempool>, blk: &Block) {
     let Some(mp) = mempool else { return };
 
-    let mut removed = 0usize;
-    for tx in &blk.txs {
-        let id = txid(tx);
-        if mp.remove(&id) {
-            removed += 1;
-        }
-    }
+    let removed = mp.remove_mined_block(blk);
 
     if removed > 0 {
         println!(
-            "[mempool] removed {} mined txs after block apply (mempool_len={}, spent_outpoints={})",
+            "[mempool] removed {} mined/conflicting txs after block apply (mempool_len={}, spent_outpoints={})",
             removed,
             mp.len(),
             mp.spent_len()
