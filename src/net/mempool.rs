@@ -556,3 +556,132 @@ fn remove_locked(w: &mut Inner, id: &Hash32) -> bool {
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AppPayload, TxIn};
+
+    fn op(n: u8) -> OutPoint {
+        OutPoint {
+            txid: [n; 32],
+            vout: 0,
+        }
+    }
+
+    fn tx_spending(prevout: OutPoint, value: u64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                prevout,
+                script_sig: vec![1, 2, 3],
+            }],
+            outputs: vec![TxOut {
+                value,
+                script_pubkey: [9u8; 20],
+            }],
+            locktime: 0,
+            app: AppPayload::None,
+        }
+    }
+
+    fn coinbase() -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                prevout: OutPoint {
+                    txid: [0u8; 32],
+                    vout: u32::MAX,
+                },
+                script_sig: vec![0],
+            }],
+            outputs: vec![TxOut {
+                value: 50,
+                script_pubkey: [7u8; 20],
+            }],
+            locktime: 0,
+            app: AppPayload::None,
+        }
+    }
+
+    fn force_insert_for_test(mp: &Mempool, tx: Transaction, feerate_ppm: u64) -> Hash32 {
+        let id = txid(&tx);
+        let bytes = crate::codec::consensus_bincode()
+            .serialized_size(&tx)
+            .unwrap() as usize;
+
+        let mut w = mp.inner.write().unwrap();
+
+        for inp in &tx.inputs {
+            w.spent.insert(inp.prevout, id);
+        }
+
+        w.txs.insert(id, tx);
+        w.total_bytes += bytes;
+
+        let fi = FeeInfo {
+            fee: 1,
+            bytes: bytes as u32,
+            feerate_ppm,
+        };
+
+        w.feeinfo.insert(id, fi);
+        w.eviction.insert((feerate_ppm, id));
+
+        id
+    }
+
+    #[test]
+    fn mined_block_removes_conflicting_mempool_tx() {
+        let mp = Mempool::new();
+
+        let shared_input = op(1);
+
+        let mempool_tx = tx_spending(shared_input, 10);
+        let mined_competing_tx = tx_spending(shared_input, 9);
+
+        let mempool_id = force_insert_for_test(&mp, mempool_tx, 100);
+
+        assert!(mp.contains(&mempool_id));
+        assert!(mp.has_spent_outpoint(&shared_input));
+
+        let block = Block {
+            header: Default::default(),
+            txs: vec![coinbase(), mined_competing_tx],
+        };
+
+        let removed = mp.remove_mined_block(&block);
+
+        assert_eq!(removed, 1);
+        assert!(!mp.contains(&mempool_id));
+        assert!(!mp.has_spent_outpoint(&shared_input));
+        assert_eq!(mp.len(), 0);
+        assert_eq!(mp.spent_len(), 0);
+    }
+
+    #[test]
+    fn mined_block_removes_exact_mempool_tx() {
+        let mp = Mempool::new();
+
+        let input = op(2);
+        let tx = tx_spending(input, 10);
+        let id = force_insert_for_test(&mp, tx.clone(), 100);
+
+        assert!(mp.contains(&id));
+        assert!(mp.has_spent_outpoint(&input));
+
+        let block = Block {
+            header: Default::default(),
+            txs: vec![coinbase(), tx],
+        };
+
+        let removed = mp.remove_mined_block(&block);
+
+        assert_eq!(removed, 1);
+        assert!(!mp.contains(&id));
+        assert!(!mp.has_spent_outpoint(&input));
+        assert_eq!(mp.len(), 0);
+        assert_eq!(mp.spent_len(), 0);
+    }
+}
+
