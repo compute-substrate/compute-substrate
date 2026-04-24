@@ -462,11 +462,19 @@ pub fn mine_one(
             let tip_after = get_tip(db)?.unwrap_or([0u8; 32]);
             let accepted_as_tip = tip_after == h;
 
-            if accepted_as_tip {
-                for id in &included_ids {
-                    mempool.remove(id);
-                }
-            } else {
+if accepted_as_tip {
+    let removed = mempool.remove_mined_block(&block);
+
+    if removed > 0 {
+        println!(
+            "[mempool] removed {} mined/conflicting txs after accepted block (mempool_len={}, spent_outpoints={})",
+            removed,
+            mempool.len(),
+            mempool.spent_len()
+        );
+    }
+} else {
+
 println!(
     "[mine] orphaned local win: 0x{} (tip_after=0x{})",
     hex::encode(h),
