@@ -120,8 +120,11 @@ fn sign_tx_all_inputs(tx: &mut Transaction, sk: &SecretKey, pub33: &[u8; 33]) ->
 
     let digest = sighash(tx);
     let msg = secp256k1::Message::from_digest_slice(&digest)?;
-    let sig: Signature = Secp256k1::new().sign_ecdsa(&msg, sk);
-    let sig64 = sig.serialize_compact();
+
+let mut sig: Signature = Secp256k1::new().sign_ecdsa(&msg, sk);
+sig.normalize_s();
+
+let sig64 = sig.serialize_compact();
 
     for i in tx.inputs.iter_mut() {
         i.script_sig = make_scriptsig(&sig64, pub33);
