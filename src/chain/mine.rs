@@ -364,7 +364,7 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-const TIP_CHECK_EVERY_NONCES: u64 = 2048;
+const TIP_CHECK_EVERY_NONCES: u64 = 16;
 
     let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
     let parent_hi_opt = if parent_tip != [0u8; 32] {
@@ -412,8 +412,7 @@ thread::scope(|scope| {
     for worker_id in 0..workers {
         let stop = stop.clone();
         let tx_found = tx_found.clone();
-let parent_hi_for_worker = parent_hi_opt.clone();
-let mut whdr = hdr.clone();
+        let mut whdr = hdr.clone();
 
         // Split nonce space across workers.
         whdr.nonce = worker_id as u32;
@@ -451,8 +450,8 @@ let mut whdr = hdr.clone();
                     }
 
                     // Refresh timestamp occasionally.
-if let Some(p) = parent_hi_for_worker.as_ref() {
-    let new_time = choose_block_time(db, &parent_tip, Some(p));
+                    if let Some(p) = parent_hi_opt.as_ref() {
+                        let new_time = choose_block_time(db, &parent_tip, Some(p));
                         if new_time != whdr.time {
                             whdr.time = new_time;
                             whdr.nonce = worker_id as u32;
@@ -550,4 +549,3 @@ if let Some(p) = parent_hi_for_worker.as_ref() {
         Err(_) => Err(anyhow!("miner workers exited without result")),
     }
 })
-    }
