@@ -549,3 +549,4 @@ thread::scope(|scope| {
         Err(_) => Err(anyhow!("miner workers exited without result")),
     }
 })
+    }
