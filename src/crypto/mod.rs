@@ -33,12 +33,22 @@ pub fn hash160(pubkey_bytes: &[u8]) -> Hash20 {
     out
 }
 
-/// Return tx clone with all script_sig cleared.
+fn is_coinbase_input(prevout: &crate::types::OutPoint) -> bool {
+    prevout.txid == [0u8; 32] && prevout.vout == u32::MAX
+}
+
+/// Return tx clone with normal script_sig cleared.
+/// Coinbase script_sig is NOT stripped because it is not a signature;
+/// it is consensus coinbase data and must affect txid/merkle.
 fn stripped_tx(tx: &Transaction) -> Transaction {
     let mut stripped = tx.clone();
+
     for i in stripped.inputs.iter_mut() {
-        i.script_sig.clear();
+        if !is_coinbase_input(&i.prevout) {
+            i.script_sig.clear();
+        }
     }
+
     stripped
 }
 
