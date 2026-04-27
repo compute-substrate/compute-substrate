@@ -398,7 +398,7 @@ println!(
 
 #[derive(Clone)]
 enum MineMsg {
-    Found(Hash32, BlockHeader),
+    Found(Hash32, Block),
     Stale,
 }
 
@@ -416,6 +416,18 @@ thread::scope(|scope| {
 let parent_hi_for_worker = parent_hi_opt.clone();
 let mut whdr = hdr.clone();
 
+let mut wtxs = txs.clone();
+
+// Give each worker a unique coinbase script_sig.
+// This changes coinbase txid -> merkle -> header search space.
+wtxs[0].inputs[0].script_sig.push(0x00);
+wtxs[0]
+    .inputs[0]
+    .script_sig
+    .extend_from_slice(format!("worker:{worker_id}").as_bytes());
+
+whdr.merkle = merkle_root(&wtxs);
+
         // Split nonce space across workers.
         whdr.nonce = worker_id as u32;
         let step = workers as u32;
@@ -432,7 +444,14 @@ let mut whdr = hdr.clone();
 
                 if pow_ok(&h, whdr.bits) {
                     stop.store(true, Ordering::Relaxed);
-                    let _ = tx_found.send(MineMsg::Found(h, whdr.clone()));
+
+let block = Block {
+    header: whdr.clone(),
+    txs: wtxs.clone(),
+};
+
+let _ = tx_found.send(MineMsg::Found(h, block));
+
                     return;
                 }
 
@@ -459,6 +478,9 @@ if let Some(p) = parent_hi_for_worker.as_ref() {
                         if new_time != whdr.time {
                             whdr.time = new_time;
                             whdr.nonce = worker_id as u32;
+
+                            whdr.merkle = merkle_root(&wtxs);
+
                         }
                     }
                 }
@@ -470,7 +492,10 @@ if let Some(p) = parent_hi_for_worker.as_ref() {
 
     match rx_found.recv() {
         Ok(MineMsg::Stale) => Err(anyhow!("stale template")),
-        Ok(MineMsg::Found(h, solved_hdr)) => {
+
+Ok(MineMsg::Found(h, block)) => {
+    let solved_hdr = block.header.clone();
+
             let _g = chain_lock.lock();
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
@@ -482,11 +507,6 @@ if let Some(p) = parent_hi_for_worker.as_ref() {
                 );
                 return Err(anyhow!("solved stale block"));
             }
-
-            let block = Block {
-                header: solved_hdr.clone(),
-                txs: txs.clone(),
-            };
 
             let block_bytes = crate::codec::consensus_bincode().serialize(&block)?;
 
