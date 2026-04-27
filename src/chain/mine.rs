@@ -51,6 +51,15 @@ fn merkle_root(txs: &[Transaction]) -> Hash32 {
     merkle_root_txids(&ids)
 }
 
+fn miner_entropy() -> Vec<u8> {
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string());
+    let pid = std::process::id();
+    let instance = std::env::var("CSD_MINER_ID").unwrap_or_else(|_| "default".to_string());
+
+    format!("{host}:{pid}:{instance}").into_bytes()
+}
+
+
 /// Coinbase with guaranteed uniqueness:
 /// - script_sig commits height (consensus rule enforced in utxo.rs)
 /// - locktime commits height (also makes txid unique even if txid strips scriptsig)
@@ -78,6 +87,8 @@ pub fn coinbase(miner_h160: Hash20, value: u64, height: u64, memo: Option<&[u8]>
         app: AppPayload::None,
     }
 }
+
+
 
 /// Return (all_inputs_exist, in_sum)
 fn sum_inputs_if_present(db: &Stores, tx: &Transaction) -> Result<(bool, u64)> {
@@ -246,7 +257,9 @@ fn build_template_with_byte_cap(
         }
     });
 
-    let cb_placeholder = coinbase(miner_h160, reward, height, None);
+let entropy = miner_entropy();
+let cb_placeholder = coinbase(miner_h160, reward, height, Some(&entropy));
+
     let cb_bytes = c.serialized_size(&cb_placeholder)? as usize;
 
     let mut remaining = byte_cap.saturating_sub(cb_bytes);
@@ -293,7 +306,7 @@ fn build_template_with_byte_cap(
     let cb_value = reward
         .checked_add(total_fees)
         .ok_or_else(|| anyhow!("coinbase overflow"))?;
-    let cb = coinbase(miner_h160, cb_value, height, None);
+let cb = coinbase(miner_h160, cb_value, height, Some(&entropy));
 
     let mut final_txs: Vec<Transaction> = Vec::with_capacity(1 + included.len());
     final_txs.push(cb);
