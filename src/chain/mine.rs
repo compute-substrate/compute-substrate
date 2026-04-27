@@ -412,7 +412,9 @@ thread::scope(|scope| {
     for worker_id in 0..workers {
         let stop = stop.clone();
         let tx_found = tx_found.clone();
-        let mut whdr = hdr.clone();
+
+let parent_hi_for_worker = parent_hi_opt.clone();
+let mut whdr = hdr.clone();
 
         // Split nonce space across workers.
         whdr.nonce = worker_id as u32;
@@ -450,8 +452,10 @@ thread::scope(|scope| {
                     }
 
                     // Refresh timestamp occasionally.
-                    if let Some(p) = parent_hi_opt.as_ref() {
-                        let new_time = choose_block_time(db, &parent_tip, Some(p));
+
+if let Some(p) = parent_hi_for_worker.as_ref() {
+    let new_time = choose_block_time(db, &parent_tip, Some(p));
+
                         if new_time != whdr.time {
                             whdr.time = new_time;
                             whdr.nonce = worker_id as u32;
@@ -549,3 +553,4 @@ thread::scope(|scope| {
         Err(_) => Err(anyhow!("miner workers exited without result")),
     }
 })
+}
