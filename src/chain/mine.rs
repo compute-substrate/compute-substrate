@@ -17,6 +17,12 @@ use crate::state::utxo::validate_tx_for_mempool;
 use crate::types::{
     AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut,
 };
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+    Arc,
+};
+use std::thread;
 
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
@@ -334,6 +340,18 @@ pub fn build_template_for_tests(
     )
 }
 
+fn miner_thread_count() -> usize {
+    if let Ok(v) = std::env::var("CSD_MINER_THREADS") {
+        if let Ok(n) = v.parse::<usize>() {
+            return n.max(1);
+        }
+    }
+
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 /// Mine exactly one block.
 ///
 /// CRITICAL: Do NOT apply blocks here.
@@ -346,7 +364,7 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-    const TIP_CHECK_EVERY_NONCES: u64 = 256;
+const TIP_CHECK_EVERY_NONCES: u64 = 2048;
 
     let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
     let parent_hi_opt = if parent_tip != [0u8; 32] {
@@ -370,83 +388,99 @@ pub fn mine_one(
         nonce: 0u32,
     };
 
-    let mut n_since_check: u64 = 0;
+println!(
+    "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
+    height,
+    hex::encode(hdr.prev),
+    hdr.bits,
+    hdr.time
+);
 
-    println!(
-        "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
-        height,
-        hex::encode(hdr.prev),
-        hdr.bits,
-        hdr.time
-    );
+#[derive(Clone)]
+enum MineMsg {
+    Found(Hash32, BlockHeader),
+    Stale,
+}
 
-    loop {
-        n_since_check = n_since_check.wrapping_add(1);
+let workers = miner_thread_count().min(u32::MAX as usize).max(1);
+println!("[mine] workers={}", workers);
 
-        if n_since_check % TIP_CHECK_EVERY_NONCES == 0 {
-            std::thread::yield_now();
-        }
+let stop = Arc::new(AtomicBool::new(false));
+let (tx_found, rx_found) = mpsc::channel::<MineMsg>();
 
-        if n_since_check >= TIP_CHECK_EVERY_NONCES {
-            n_since_check = 0;
+thread::scope(|scope| {
+    for worker_id in 0..workers {
+        let stop = stop.clone();
+        let tx_found = tx_found.clone();
+        let mut whdr = hdr.clone();
 
-            let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
+        // Split nonce space across workers.
+        whdr.nonce = worker_id as u32;
+        let step = workers as u32;
 
-            // Hard stale-work cancellation:
-            // if canonical tip changed under us, abandon this attempt immediately.
-            if cur_tip != hdr.prev {
-                println!(
-                    "[mine] stale-template abort: started_prev=0x{} current_tip=0x{}",
-                    hex::encode(hdr.prev),
-                    hex::encode(cur_tip),
-                );
-                return Err(anyhow!("stale template"));
-            }
+        scope.spawn(move || {
+            let mut checks: u64 = 0;
 
-            // Refresh template if mempool gained txs while we were mining an empty block.
-            if mempool.len() > 0 && included_ids.is_empty() {
-                let built = build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
-                txs = built.0;
-                included_ids = built.1;
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
 
-                hdr.merkle = merkle_root(&txs);
-                hdr.nonce = 0;
+                let h = header_hash(&whdr);
 
-                println!(
-                    "[mine] template refresh (mempool update): height={} txs={}",
-                    height,
-                    included_ids.len()
-                );
-            }
+                if pow_ok(&h, whdr.bits) {
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = tx_found.send(MineMsg::Found(h, whdr.clone()));
+                    return;
+                }
 
-            // Refresh timestamp so long-running work does not keep an old header time.
-            if let Some(p) = parent_hi_opt.as_ref() {
-                let new_time = choose_block_time(db, &parent_tip, Some(p));
-                if new_time != hdr.time {
-                    hdr.time = new_time;
-                    hdr.nonce = 0;
+                whdr.nonce = whdr.nonce.wrapping_add(step);
+                checks = checks.wrapping_add(1);
+
+                if checks >= TIP_CHECK_EVERY_NONCES {
+                    checks = 0;
+                    std::thread::yield_now();
+
+                    // Abort stale work quickly if another node advanced the tip.
+                    let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
+                    if cur_tip != whdr.prev {
+                        stop.store(true, Ordering::Relaxed);
+                        let _ = tx_found.send(MineMsg::Stale);
+                        return;
+                    }
+
+                    // Refresh timestamp occasionally.
+                    if let Some(p) = parent_hi_opt.as_ref() {
+                        let new_time = choose_block_time(db, &parent_tip, Some(p));
+                        if new_time != whdr.time {
+                            whdr.time = new_time;
+                            whdr.nonce = worker_id as u32;
+                        }
+                    }
                 }
             }
-        }
+        });
+    }
 
-        let h = header_hash(&hdr);
+    drop(tx_found);
 
-        if pow_ok(&h, hdr.bits) {
-
+    match rx_found.recv() {
+        Ok(MineMsg::Stale) => Err(anyhow!("stale template")),
+        Ok(MineMsg::Found(h, solved_hdr)) => {
             let _g = chain_lock.lock();
 
             let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
-            if cur_tip != hdr.prev {
+            if cur_tip != solved_hdr.prev {
                 println!(
                     "[mine] solved stale block: solved_prev=0x{} current_tip=0x{}",
-                    hex::encode(hdr.prev),
+                    hex::encode(solved_hdr.prev),
                     hex::encode(cur_tip),
                 );
                 return Err(anyhow!("solved stale block"));
             }
 
             let block = Block {
-                header: hdr.clone(),
+                header: solved_hdr.clone(),
                 txs: txs.clone(),
             };
 
@@ -463,36 +497,35 @@ pub fn mine_one(
 
             db.blocks.insert(k_block(&h), block_bytes)?;
 
-            let _hi = index_header(db, &hdr, parent_hi_opt.as_ref())?;
+            let _hi = index_header(db, &solved_hdr, parent_hi_opt.as_ref())?;
 
             db.db.flush()?;
-            
+
             if let Err(e) = maybe_reorg_to(db, &h, Some(mempool)) {
                 println!("[mine] maybe_reorg_to failed for {}: {}", hex::encode(h), e);
-                continue;
+                return Err(e);
             }
 
             let tip_after = get_tip(db)?.unwrap_or([0u8; 32]);
             let accepted_as_tip = tip_after == h;
 
-if accepted_as_tip {
-    let removed = mempool.remove_mined_block(&block);
+            if accepted_as_tip {
+                let removed = mempool.remove_mined_block(&block);
 
-    if removed > 0 {
-        println!(
-            "[mempool] removed {} mined/conflicting txs after accepted block (mempool_len={}, spent_outpoints={})",
-            removed,
-            mempool.len(),
-            mempool.spent_len()
-        );
-    }
-} else {
-
-println!(
-    "[mine] orphaned local win: 0x{} (tip_after=0x{})",
-    hex::encode(h),
-    hex::encode(tip_after),
-);
+                if removed > 0 {
+                    println!(
+                        "[mempool] removed {} mined/conflicting txs after accepted block (mempool_len={}, spent_outpoints={})",
+                        removed,
+                        mempool.len(),
+                        mempool.spent_len()
+                    );
+                }
+            } else {
+                println!(
+                    "[mine] orphaned local win: 0x{} (tip_after=0x{})",
+                    hex::encode(h),
+                    hex::encode(tip_after),
+                );
                 println!(
                     "[mine] block {} was not selected as tip (tip_after={}); keeping {} txs in mempool",
                     hex::encode(h),
@@ -511,15 +544,8 @@ println!(
                 );
             }
 
-            return Ok(h);
+            Ok(h)
         }
-
-        hdr.nonce = hdr.nonce.wrapping_add(1);
-
-// If nonce wrapped, refresh time (wall-clock clamped to consensus window).
-if hdr.nonce == 0 {
-    hdr.time = choose_block_time(db, &parent_tip, parent_hi_opt.as_ref());
-}
-
+        Err(_) => Err(anyhow!("miner workers exited without result")),
     }
-}
+})
