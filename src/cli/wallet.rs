@@ -593,6 +593,76 @@ pub fn wallet_spend(
     Ok(())
 }
 
+
+pub fn wallet_spend_submit(
+    rpc_url: &str,
+    privkey: &str,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    fee: u64,
+    change_addr20: Option<String>,
+) -> Result<()> {
+    let sk = sk_from_hex(privkey)?;
+    let (pk33, self_addr) = pub_from_sk(&sk);
+
+    let ins = inputs
+        .iter()
+        .map(|s| parse_input_triple(s.as_str()))
+        .collect::<Result<Vec<_>>>()?;
+
+    let outs0 = outputs
+        .iter()
+        .map(|s| parse_output_pair(s.as_str()))
+        .collect::<Result<Vec<_>>>()?;
+
+    let (mut tx, in_sum, out_sum) = build_base_tx(&ins, &outs0, fee, 0)?;
+
+    let ch20 = match change_addr20 {
+        Some(ch) => parse_addr20(&ch)?,
+        None => self_addr,
+    };
+
+    let leftover = in_sum
+        .checked_sub(out_sum)
+        .ok_or_else(|| anyhow::anyhow!("underflow computing (in_sum - out_sum)"))?;
+
+    if leftover < fee {
+        bail!(
+            "insufficient funds: in_sum={} out_sum={} fee={} leftover={}",
+            in_sum,
+            out_sum,
+            fee,
+            leftover
+        );
+    }
+
+    let change = leftover
+        .checked_sub(fee)
+        .ok_or_else(|| anyhow::anyhow!("underflow computing change"))?;
+
+    let (actual_fee, change20) = if change >= DUST_LIMIT {
+        tx.outputs.push(TxOut {
+            value: change,
+            script_pubkey: ch20,
+        });
+        (fee, Some(ch20))
+    } else {
+        let actual_fee = fee
+            .checked_add(change)
+            .ok_or_else(|| anyhow::anyhow!("fee overflow"))?;
+        (actual_fee, None)
+    };
+
+    sign_tx_all_inputs(&mut tx, &sk, &pk33)?;
+
+    let submit = submit_tx(rpc_url, &tx)
+        .unwrap_or_else(|e| json!({ "http_ok": false, "error": e.to_string() }));
+
+    let receipt = mk_receipt(&tx, &ins, actual_fee, change20, Some(submit))?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
 fn payload_hash_must_not_be_zero(h: &Hash32) -> Result<()> {
     if *h == [0u8; 32] {
         bail!(
