@@ -364,7 +364,7 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-const TIP_CHECK_EVERY_NONCES: u64 = 16;
+const TIP_CHECK_EVERY_NONCES: u64 = 2048;
 
     let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
     let parent_hi_opt = if parent_tip != [0u8; 32] {
