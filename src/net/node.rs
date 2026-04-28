@@ -2246,9 +2246,6 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
     connected_peers.store(connected.len(), Ordering::Relaxed);
     mark_peer_change(&last_peer_change_unix);
 
-    if sync_peer.is_none() && !is_quarantined(&quarantine, &peer_id) {
-        sync_peer = Some(peer_id);
-
 if !is_quarantined(&quarantine, &peer_id) {
     maybe_send_bootstrap_requests(
         &mut swarm,
@@ -2256,9 +2253,11 @@ if !is_quarantined(&quarantine, &peer_id) {
         &mut last_bootstrap_req_at,
         &mut last_tip_req_at,
     );
-}
 
+    if sync_peer.is_none() {
+        sync_peer = Some(peer_id);
     }
+}
 }
 
 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -2455,6 +2454,41 @@ maybe_send_bootstrap_requests(
                                 }
 
                                 mark_tip_seen(&last_tip_seen_unix);
+
+if let Some(p) = src {
+    providers.entry(h).or_insert(p);
+}
+
+{
+    let _g = chain_lock.lock();
+
+    if get_hidx(&db, &h)?.is_none() {
+        if gh.header.prev == [0u8; 32] {
+            let _ = index_header(&db, &gh.header, None);
+        } else if let Some(parent) = get_hidx(&db, &gh.header.prev)? {
+            let _ = index_header(&db, &gh.header, Some(&parent));
+        } else if let Some(p) = src {
+            let tip = get_tip(&db)?.unwrap_or([0u8; 32]);
+            let locator = build_locator(&db, &tip);
+
+            let _ = swarm.behaviour_mut().rr.send_request(
+                &p,
+                SyncRequest::GetHeadersByLocator {
+                    locator,
+                    max: MAX_HEADERS_PER_SYNC,
+                },
+            );
+
+            println!(
+                "[sync] gossip header parent unknown; requesting headers from {} for {}",
+                p,
+                hex32(&h)
+            );
+
+            continue;
+        }
+    }
+}
 
                                 if let Some(p) = src {
                                     // Gossip source is only a relay hint, not a guaranteed block provider.
@@ -2760,8 +2794,8 @@ sync_peer = next_sync_peer;
     let local_w = applied_w;
     let locator_tip = applied_tip;
 
-if sync_peer == Some(peer) && better_fork_tip(chainwork, &hash, local_w, &locator_tip) {
-
+if better_fork_tip(chainwork, &hash, local_w, &locator_tip) {
+    sync_peer = Some(peer);
         let locator = build_locator(&db, &locator_tip);
         let locator_len = locator.len();
 
