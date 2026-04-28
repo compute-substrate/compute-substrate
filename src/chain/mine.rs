@@ -455,8 +455,16 @@ let _ = tx_found.send(MineMsg::Found(h, block));
                     return;
                 }
 
-                whdr.nonce = whdr.nonce.wrapping_add(step);
-                checks = checks.wrapping_add(1);
+let old_nonce = whdr.nonce;
+whdr.nonce = whdr.nonce.wrapping_add(step);
+
+if whdr.nonce < old_nonce {
+    whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+    whdr.nonce = worker_id as u32;
+    whdr.merkle = merkle_root(&wtxs);
+}
+
+checks = checks.wrapping_add(1);
 
                 if checks >= TIP_CHECK_EVERY_NONCES {
                     checks = 0;
@@ -469,6 +477,30 @@ let _ = tx_found.send(MineMsg::Found(h, block));
                         let _ = tx_found.send(MineMsg::Stale);
                         return;
                     }
+
+if mempool.len() > 0 && wtxs.len() == 1 {
+    if let Ok((mut new_txs, _new_ids, _fees)) =
+        build_template(db, mempool, miner_h160, height, max_mempool_txs)
+    {
+        // Preserve per-worker unique coinbase search space.
+        new_txs[0].inputs[0].script_sig.push(0x00);
+        new_txs[0]
+            .inputs[0]
+            .script_sig
+            .extend_from_slice(format!("worker:{worker_id}").as_bytes());
+
+        wtxs = new_txs;
+        whdr.merkle = merkle_root(&wtxs);
+        whdr.nonce = worker_id as u32;
+
+        println!(
+            "[mine] worker {} template refresh: height={} txs={}",
+            worker_id,
+            height,
+            wtxs.len().saturating_sub(1)
+        );
+    }
+}
 
                     // Refresh timestamp occasionally.
 
