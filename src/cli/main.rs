@@ -773,7 +773,7 @@ pub async fn run() -> Result<()> {
                 input.push(picked);
             }
 
-            wallet_spend(&privkey, input, output, fee, change)?;
+wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change)?;
             Ok(())
         }
 
