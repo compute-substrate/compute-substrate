@@ -700,6 +700,92 @@ fn pick_input_from_rpc(
     ))
 }
 
+fn output_sum_from_pairs(outputs: &[String]) -> Result<u64> {
+    let mut sum = 0u64;
+
+    for o in outputs {
+        let parts: Vec<&str> = o.split(':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!("output must be <addr20>:<value>");
+        }
+
+        let value = parts[1]
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("bad output value in {}: {}", o, e))?;
+
+        sum = sum
+            .checked_add(value)
+            .ok_or_else(|| anyhow::anyhow!("output sum overflow"))?;
+    }
+
+    Ok(sum)
+}
+
+fn pick_inputs_from_rpc(
+    rpc_url: &str,
+    addr20: &str,
+    min_total: u64,
+) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize, Clone)]
+    struct RpcUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct UtxosResp {
+        utxos: Vec<RpcUtxo>,
+    }
+
+    let addr20 = normalize_hex_0x(addr20);
+
+    let url = format!(
+        "{}/utxos/{}?available=true&min_value=0&smallest=false&limit=1000",
+        rpc_url.trim_end_matches('/'),
+        addr20,
+    );
+
+    let resp = ureq::get(&url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed GET {}: {}", url, e))?;
+
+    let body = resp
+        .into_string()
+        .map_err(|e| anyhow::anyhow!("failed reading {}: {}", url, e))?;
+
+    let parsed: UtxosResp = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("failed parsing {} JSON: {}", url, e))?;
+
+    let mut picked = Vec::new();
+    let mut total = 0u64;
+
+    for u in parsed.utxos {
+        picked.push(format!(
+            "{}:{}:{}",
+            normalize_hex_0x(&u.txid),
+            u.vout,
+            u.value
+        ));
+
+        total = total
+            .checked_add(u.value)
+            .ok_or_else(|| anyhow::anyhow!("input sum overflow"))?;
+
+        if total >= min_total {
+            return Ok(picked);
+        }
+    }
+
+    anyhow::bail!(
+        "insufficient spendable balance via RPC for addr20={} need={} got={}",
+        addr20,
+        min_total,
+        total
+    );
+}
+
+
 pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
 
@@ -767,10 +853,16 @@ pub async fn run() -> Result<()> {
                 if !input.is_empty() && auto_input {
                     anyhow::bail!("--auto-input cannot be combined with explicit --input");
                 }
-                let min_needed = min_input.unwrap_or(fee);
-                let addr20 = privkey_to_addr20_hex(&privkey)?;
-                let picked = pick_input_from_rpc(&rpc_url, &addr20, min_needed, false)?;
-                input.push(picked);
+let output_sum = output_sum_from_pairs(&output)?;
+let need = output_sum
+    .checked_add(fee)
+    .ok_or_else(|| anyhow::anyhow!("output_sum + fee overflow"))?;
+
+let min_needed = min_input.unwrap_or(need).max(need);
+
+let addr20 = privkey_to_addr20_hex(&privkey)?;
+let picked = pick_inputs_from_rpc(&rpc_url, &addr20, min_needed)?;
+input.extend(picked);
             }
 
 wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change)?;
