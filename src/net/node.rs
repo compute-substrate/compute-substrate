@@ -98,6 +98,10 @@ const MAX_ADDRS_PER_PEER: usize = 8;
 const BOOTSTRAP_REQ_COOLDOWN_SECS: u64 = 30;
 const PEER_DISCONNECT_COOLDOWN_SECS: u64 = 20;
 
+const MIN_OUTBOUND_PEERS: usize = 8;
+const PEERS_FILE: &str = "peers.txt";
+const SAVE_PEERS_EVERY_SECS: u64 = 30;
+
 // ----------------- time helpers -----------------
 
 fn unix_now() -> u64 {
@@ -111,6 +115,74 @@ fn unix_now() -> u64 {
 
 fn nodekey_path(datadir: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(datadir).join("nodekey.ed25519")
+}
+
+fn peers_path(datadir: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(datadir).join(PEERS_FILE)
+}
+
+fn load_known_addrs(datadir: &str, self_peer: PeerId) -> HashMap<PeerId, HashSet<Multiaddr>> {
+    let mut out: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+    let p = peers_path(datadir);
+
+    let Ok(s) = std::fs::read_to_string(&p) else {
+        return out;
+    };
+
+    for line in s.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Ok(addr) = line.parse::<Multiaddr>() else {
+            continue;
+        };
+
+        let Some(pid) = peer_id_from_multiaddr(&addr) else {
+            continue;
+        };
+
+        if should_store_discovered_addr(self_peer, pid, &addr) {
+            out.entry(pid).or_default().insert(addr);
+        }
+    }
+
+    out
+}
+
+fn save_known_addrs(datadir: &str, self_peer: PeerId, known_addrs: &HashMap<PeerId, HashSet<Multiaddr>>) {
+    let p = peers_path(datadir);
+    let tmp = p.with_extension("tmp");
+
+    let mut lines: Vec<String> = Vec::new();
+
+    let mut peers: Vec<PeerId> = known_addrs.keys().copied().collect();
+    peers.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+    for pid in peers {
+        if pid == self_peer {
+            continue;
+        }
+
+        let mut addrs: Vec<Multiaddr> = known_addrs
+            .get(&pid)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+
+        addrs.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+        for addr in addrs {
+            if should_store_discovered_addr(self_peer, pid, &addr) {
+                lines.push(addr.to_string());
+            }
+        }
+    }
+
+    let body = lines.join("\n");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
 }
 
 fn load_or_create_node_key(datadir: &str) -> anyhow::Result<identity::Keypair> {
@@ -1888,7 +1960,15 @@ let behaviour = Behaviour {
         libp2p::swarm::Config::with_tokio_executor(),
     );
 
-let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> =
+    load_known_addrs(&cfg.datadir, peer_id);
+
+println!(
+    "[pex] loaded {} known peers from disk",
+    known_addrs.len()
+);
+
+let mut last_peer_save = Instant::now();
 
 let mut last_redial = Instant::now() - Duration::from_secs(60);
 let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
@@ -1923,6 +2003,30 @@ for a in &cfg.bootnodes {
         last_dial_by_addr.insert(a.clone(), Instant::now());
     }
 }
+
+let mut startup_peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
+startup_peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+for pid in startup_peer_ids {
+    if pid == peer_id {
+        continue;
+    }
+
+    let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
+
+    for addr in addrs {
+        if addr_is_backed_off(&addr_backoff, &addr) {
+            continue;
+        }
+
+        println!("[pex] startup dial known peer {} via {}", pid, addr);
+
+        let _ = swarm.dial(addr.clone());
+        last_dial_by_addr.insert(addr.clone(), Instant::now());
+        note_pending_dial(&mut pending_dials, pid, addr);
+    }
+}
+
 
     let mut connected: HashSet<PeerId> = HashSet::new();
 
@@ -1982,6 +2086,11 @@ prune_bad_providers(&mut bad_providers);
 
 prune_addr_backoff(&mut addr_backoff);
 
+if last_peer_save.elapsed() >= Duration::from_secs(SAVE_PEERS_EVERY_SECS) {
+    save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
+    last_peer_save = Instant::now();
+}
+
 
 scrub_stale_inflight(
     &mut inflight,
@@ -2000,7 +2109,8 @@ let _ = compact_and_log_want_queue(
 
                 // bootnode auto-redial (with backoff + connected-skip)
 
-if connected.is_empty() && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
+if connected.len() < MIN_OUTBOUND_PEERS && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
+
     for a in &cfg.bootnodes {
         if let Some(pid) = peer_id_from_multiaddr(a) {
             if connected.contains(&pid) {
@@ -2402,6 +2512,8 @@ if let OutEvent::Identify(identify::Event::Received { peer_id: remote_peer, info
                 println!("[pex] learned addr for {} -> {}", pid, full);
             }
         }
+
+save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
 
 maybe_send_bootstrap_requests(
     &mut swarm,
@@ -3219,6 +3331,8 @@ SyncResponse::Peers { peers } => {
     let before = known_addrs.len();
 
 parse_peer_strings_into_known_addrs(&mut known_addrs, peer_id, peers);
+
+save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
 
     let after = known_addrs.len();
     println!(
