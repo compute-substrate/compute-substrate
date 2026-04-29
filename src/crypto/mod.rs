@@ -58,7 +58,7 @@ fn stripped_tx(tx: &Transaction) -> Transaction {
 /// NOTE:
 /// - txid() strips script_sig.
 /// - Coinbase uniqueness must therefore be ensured by some other committed field
-///   (you do locktime = height in mine.rs, and also script_sig commits height for policy).
+///   (we do locktime = height in mine.rs, and also script_sig commits height for policy).
 pub fn txid(tx: &Transaction) -> Hash32 {
     let stripped = stripped_tx(tx);
     let bytes = crate::codec::consensus_bincode()
