@@ -12,7 +12,7 @@ use crate::state::utxo::validate_and_apply_block;
 use crate::types::{Block, BlockHeader, Hash20, Transaction};
 
 
-pub const GENESIS_TIME: u64 = 1774006045;
+pub const GENESIS_TIME: u64 = 1777474800;
 
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
