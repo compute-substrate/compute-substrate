@@ -80,8 +80,8 @@ const QUAR_SCORE_THRESHOLD: i32 = -30;
 
 // ----------------- dial backoff tuning -----------------
 
-const REDIAL_EVERY_SECS: u64 = 10;
-const DIAL_BACKOFF_SECS: u64 = 10;
+const REDIAL_EVERY_SECS: u64 = 30;
+const DIAL_BACKOFF_SECS: u64 = 20;
 
 // ----------------- sync bounds -----------------
 
