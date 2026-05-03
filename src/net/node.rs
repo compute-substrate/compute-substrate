@@ -62,7 +62,7 @@ const SCORE_GOOD_HEADERS: i32 = 2;
 const SCORE_GOOD_BLOCK: i32 = 3;
 
 const SCORE_BAD_INVALID: i32 = -6;
-const SCORE_BAD_TIMEOUT: i32 = -3;
+const SCORE_BAD_TIMEOUT: i32 = -1;
 const SCORE_BAD_UNKNOWN_BLOCK: i32 = -3;
 const SCORE_BAD_EMPTY_HEADERS: i32 = -1;
 const SCORE_BAD_UNREQUESTED_BLOCK: i32 = -8;
@@ -76,7 +76,7 @@ const BAD_PROVIDER_RETRY_SECS: u64 = 30;
 
 // quarantine: soft-ban for a while when score too low
 const QUAR_SECS: u64 = 5 * 60;
-const QUAR_SCORE_THRESHOLD: i32 = -12;
+const QUAR_SCORE_THRESHOLD: i32 = -30;
 
 // ----------------- dial backoff tuning -----------------
 
@@ -89,7 +89,7 @@ const MAX_HEADERS_PER_SYNC: u64 = 1024;
 const MAX_LOCATOR_LEN: usize = 128;
 const MAX_INFLIGHT_BLOCKS: usize = 64;
 const MAX_WANT_QUEUE: usize = 20_000;
-const BLOCK_REQ_TIMEOUT_SECS: u64 = 12;
+const BLOCK_REQ_TIMEOUT_SECS: u64 = 45;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 64;
 const PEER_REQ_ON_CONNECT: u16 = 64;
@@ -1528,38 +1528,19 @@ fn earliest_requestable_missing_ancestor(
     inflight: &HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
     h: Hash32,
 ) -> Result<Option<Hash32>> {
-    let mut cur = h;
-    let mut path: Vec<Hash32> = Vec::new();
-
-    loop {
-        let Some(hi) = get_hidx(db, &cur)? else {
-            return Ok(None);
-        };
-
-        path.push(cur);
-
-        if hi.parent == [0u8; 32] {
-            break;
-        }
-
-        cur = hi.parent;
+    if has_raw_or_pending(db, pending_apply, &h) {
+        return Ok(None);
     }
 
-    path.reverse();
-
-    for x in path {
-        if has_raw_or_pending(db, pending_apply, &x) {
-            continue;
-        }
-
-        if inflight.contains_key(&x) {
-            return Ok(None);
-        }
-
-        return Ok(Some(x));
+    if inflight.contains_key(&h) {
+        return Ok(None);
     }
 
-    Ok(None)
+    if get_hidx(db, &h)?.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(h))
 }
 
 fn scrub_stale_inflight(
@@ -1935,7 +1916,7 @@ async fn run_p2p_loop(
     gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
 
 let rr_cfg = request_response::Config::default()
-    .with_request_timeout(Duration::from_secs(10))
+    .with_request_timeout(Duration::from_secs(45))
     .with_max_concurrent_streams(128);
 
 let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
@@ -3506,9 +3487,10 @@ Event::OutboundFailure { peer, request_id, error } => {
 }
 
 Event::InboundFailure { peer, error, .. } => {
-            println!("[sync] inbound failure from {}: {:?}", peer, error);
-            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-       }
+    println!("[sync] inbound failure from {}: {:?}", peer, error);
+    // Do not punish inbound timeouts aggressively.
+    // Slow/overloaded peers are common during bootstrap and weak-node sync.
+}
 
         _ => {}
     }
