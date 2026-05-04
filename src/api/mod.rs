@@ -491,6 +491,9 @@ async fn top_global(State(st): State<ApiState>) -> Json<serde_json::Value> {
         let rows = get_topk(&st.db, epoch, &d.domain).unwrap_or_default();
 
         for (pid, weight) in rows {
+            if weight == 0 {
+    continue;
+}
             let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else { continue };
             let prop: Proposal = match c().deserialize(&v) {
                 Ok(p) => p,
