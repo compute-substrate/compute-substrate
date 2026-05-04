@@ -163,6 +163,16 @@ pub struct TxResp {
     pub err: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct TopGlobalItem {
+    pub proposal_id: String,
+    pub economic_weight: u128,
+    pub domain: String,
+    pub payload_hash: String,
+    pub uri: String,
+    pub expires_epoch: u64,
+}
+
 // ===========================
 // Recent blocks feed structs
 // ===========================
@@ -327,6 +337,7 @@ connected_peers,
         .route("/proposal/:id", get(proposal_get))
         .route("/topk/:epoch/:domain", get(topk_get))
         .route("/domains", get(domains_list))
+.route("/top/global", get(top_global))
         // Tx template helpers (public attestation surface):
         .route("/tx/template/propose", post(tx_template_propose))
         .route("/tx/template/attest", post(tx_template_attest))
@@ -456,6 +467,60 @@ async fn peers(State(st): State<ApiState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
         "peer_count": st.connected_peers.load(Ordering::Relaxed),
+    }))
+}
+
+async fn top_global(State(st): State<ApiState>) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let epoch = crate::state::app_state::epoch_of(hi.height).saturating_sub(1);
+
+    // 1. get all domains
+    let domains_resp = domains_list(State(st.clone())).await;
+    let domains = domains_resp.0.domains;
+
+    let mut global: Vec<TopGlobalItem> = vec![];
+
+    // 2. merge all domain topk
+    for d in domains {
+        let rows = get_topk(&st.db, epoch, &d.domain).unwrap_or_default();
+
+        for (pid, weight) in rows {
+            let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else { continue };
+            let prop: Proposal = match c().deserialize(&v) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            global.push(TopGlobalItem {
+                proposal_id: format!("0x{}", hex::encode(pid)),
+                economic_weight: weight,
+                domain: prop.domain,
+                payload_hash: format!("0x{}", hex::encode(prop.payload_hash)),
+                uri: prop.uri,
+                expires_epoch: prop.expires_epoch,
+            });
+        }
+    }
+
+    // 3. sort globally by economic weight
+    global.sort_by(|a, b| {
+        b.economic_weight
+            .cmp(&a.economic_weight)
+            .then_with(|| a.proposal_id.cmp(&b.proposal_id))
+    });
+
+    global.truncate(50);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "epoch": epoch,
+        "top": global
     }))
 }
 
