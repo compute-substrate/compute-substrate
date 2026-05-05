@@ -13,7 +13,7 @@ use crate::chain::index::{get_hidx, HeaderIndex};
 use crate::crypto::{sighash, txid};
 use crate::net::mempool::{Mempool, MempoolStats};
 use crate::net::GossipTxEvent;
-use crate::state::app_state::{get_proposal, get_topk, k_proposal, Proposal};
+use crate::state::app_state::{get_proposal, get_topk, k_proposal, Attestation, Proposal};
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
 use crate::types::{AppPayload, Block, Hash32, OutPoint, Transaction, TxOut};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -333,6 +333,7 @@ connected_peers,
         .route("/window/:domain", get(window_domain))
         .route("/top/:domain", get(top_current))
         .route("/top/:domain/:epoch", get(top_epoch))
+    .route("/top/active", get(top_active))
         // Canonical app endpoints:
         .route("/proposal/:id", get(proposal_get))
         .route("/topk/:epoch/:domain", get(topk_get))
@@ -467,6 +468,120 @@ async fn peers(State(st): State<ApiState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
         "peer_count": st.connected_peers.load(Ordering::Relaxed),
+    }))
+}
+
+async fn top_active(State(st): State<ApiState>) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct ActiveStats {
+        attest_count: u64,
+        economic_weight: u128,
+        raw_score_sum: u64,
+        raw_confidence_sum: u64,
+    }
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let current_epoch = crate::state::app_state::epoch_of(hi.height);
+
+    let mut stats: HashMap<Hash32, ActiveStats> = HashMap::new();
+
+    for item in st.db.app.iter() {
+        let Ok((k, v)) = item else { continue };
+
+        if k.len() != 1 + 32 || k[0] != b'A' {
+            continue;
+        }
+
+        let att: Attestation = match c().deserialize(&v) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        let Some(pv) = st.db.app.get(k_proposal(&att.proposal_id)).unwrap() else {
+            continue;
+        };
+
+        let prop: Proposal = match c().deserialize(&pv) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if current_epoch > prop.expires_epoch {
+            continue;
+        }
+
+        let e = stats.entry(att.proposal_id).or_default();
+        e.attest_count = e.attest_count.saturating_add(1);
+        e.economic_weight = e.economic_weight.saturating_add(att.weight as u128);
+        e.raw_score_sum = e.raw_score_sum.saturating_add(att.score as u64);
+        e.raw_confidence_sum = e.raw_confidence_sum.saturating_add(att.confidence as u64);
+    }
+
+    let mut out: Vec<serde_json::Value> = vec![];
+
+    for (pid, s) in stats {
+        if s.economic_weight == 0 {
+            continue;
+        }
+
+        let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else {
+            continue;
+        };
+
+        let prop: Proposal = match c().deserialize(&v) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if current_epoch > prop.expires_epoch {
+            continue;
+        }
+
+        out.push(serde_json::json!({
+            "proposal_id": format!("0x{}", hex::encode(pid)),
+            "domain": prop.domain,
+            "economic_weight": s.economic_weight,
+            "attest_count": s.attest_count,
+            "raw_score_sum": s.raw_score_sum,
+            "raw_confidence_sum": s.raw_confidence_sum,
+            "payload_hash": format!("0x{}", hex::encode(prop.payload_hash)),
+            "uri": prop.uri,
+            "created_epoch": prop.created_epoch,
+            "expires_epoch": prop.expires_epoch
+        }));
+    }
+
+    out.sort_by(|a, b| {
+        let aw = a["economic_weight"].as_u64().unwrap_or(0);
+        let bw = b["economic_weight"].as_u64().unwrap_or(0);
+
+        bw.cmp(&aw)
+            .then_with(|| {
+                let ac = a["attest_count"].as_u64().unwrap_or(0);
+                let bc = b["attest_count"].as_u64().unwrap_or(0);
+                bc.cmp(&ac)
+            })
+            .then_with(|| {
+                let ap = a["proposal_id"].as_str().unwrap_or("");
+                let bp = b["proposal_id"].as_str().unwrap_or("");
+                ap.cmp(bp)
+            })
+    });
+
+    out.truncate(50);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "tip": format!("0x{}", hex::encode(tip)),
+        "height": hi.height,
+        "current_epoch": current_epoch,
+        "top": out
     }))
 }
 
