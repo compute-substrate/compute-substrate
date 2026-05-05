@@ -331,7 +331,9 @@ connected_peers,
         )
         // Computation window:
         .route("/window/:domain", get(window_domain))
+        .route("/top/global", get(top_global))
         .route("/top/active", get(top_active))
+        .route("/top/all-time", get(top_all_time))
         .route("/top/:domain", get(top_current))
         .route("/top/:domain/:epoch", get(top_epoch))
 
@@ -339,7 +341,6 @@ connected_peers,
         .route("/proposal/:id", get(proposal_get))
         .route("/topk/:epoch/:domain", get(topk_get))
         .route("/domains", get(domains_list))
-.route("/top/global", get(top_global))
         // Tx template helpers (public attestation surface):
         .route("/tx/template/propose", post(tx_template_propose))
         .route("/tx/template/attest", post(tx_template_attest))
@@ -586,6 +587,101 @@ async fn top_active(State(st): State<ApiState>) -> Json<serde_json::Value> {
     }))
 }
 
+async fn top_all_time(State(st): State<ApiState>) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct AllTimeStats {
+        attest_count: u64,
+        economic_weight: u128,
+        raw_score_sum: u64,
+        raw_confidence_sum: u64,
+    }
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let mut stats: HashMap<Hash32, AllTimeStats> = HashMap::new();
+
+    for item in st.db.app.iter() {
+        let Ok((k, v)) = item else { continue };
+
+        if k.len() != 1 + 32 || k[0] != b'A' {
+            continue;
+        }
+
+        let att: Attestation = match c().deserialize(&v) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        let e = stats.entry(att.proposal_id).or_default();
+        e.attest_count = e.attest_count.saturating_add(1);
+        e.economic_weight = e.economic_weight.saturating_add(att.weight as u128);
+        e.raw_score_sum = e.raw_score_sum.saturating_add(att.score as u64);
+        e.raw_confidence_sum = e.raw_confidence_sum.saturating_add(att.confidence as u64);
+    }
+
+    let mut out: Vec<serde_json::Value> = vec![];
+
+    for (pid, s) in stats {
+        if s.economic_weight == 0 {
+            continue;
+        }
+
+        let Some(v) = st.db.app.get(k_proposal(&pid)).unwrap() else {
+            continue;
+        };
+
+        let prop: Proposal = match c().deserialize(&v) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        out.push(serde_json::json!({
+            "proposal_id": format!("0x{}", hex::encode(pid)),
+            "domain": prop.domain,
+            "economic_weight": s.economic_weight,
+            "attest_count": s.attest_count,
+            "raw_score_sum": s.raw_score_sum,
+            "raw_confidence_sum": s.raw_confidence_sum,
+            "payload_hash": format!("0x{}", hex::encode(prop.payload_hash)),
+            "uri": prop.uri,
+            "created_epoch": prop.created_epoch,
+            "expires_epoch": prop.expires_epoch
+        }));
+    }
+
+    out.sort_by(|a, b| {
+        let aw = a["economic_weight"].as_u64().unwrap_or(0);
+        let bw = b["economic_weight"].as_u64().unwrap_or(0);
+
+        bw.cmp(&aw)
+            .then_with(|| {
+                let ac = a["attest_count"].as_u64().unwrap_or(0);
+                let bc = b["attest_count"].as_u64().unwrap_or(0);
+                bc.cmp(&ac)
+            })
+            .then_with(|| {
+                let ap = a["proposal_id"].as_str().unwrap_or("");
+                let bp = b["proposal_id"].as_str().unwrap_or("");
+                ap.cmp(bp)
+            })
+    });
+
+    out.truncate(50);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "tip": format!("0x{}", hex::encode(tip)),
+        "height": hi.height,
+        "top": out
+    }))
+}
+
+        
 async fn top_global(State(st): State<ApiState>) -> Json<serde_json::Value> {
     use std::collections::HashMap;
 
