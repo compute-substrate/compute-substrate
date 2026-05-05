@@ -331,9 +331,10 @@ connected_peers,
         )
         // Computation window:
         .route("/window/:domain", get(window_domain))
+        .route("/top/active", get(top_active))
         .route("/top/:domain", get(top_current))
         .route("/top/:domain/:epoch", get(top_epoch))
-    .route("/top/active", get(top_active))
+
         // Canonical app endpoints:
         .route("/proposal/:id", get(proposal_get))
         .route("/topk/:epoch/:domain", get(topk_get))
