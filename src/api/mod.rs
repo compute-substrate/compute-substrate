@@ -1729,7 +1729,7 @@ let Some(prop) = get_proposal(&st.db, &pid).unwrap() else {
     Json(serde_json::json!({
         "ok": true,
         "proposal": {
-            "proposal_id": prop.id,
+            "proposal_id": format!("0x{}", hex::encode(prop.id)),
             "domain": prop.domain,
             "payload_hash": format!("0x{}", hex::encode(prop.payload_hash)),
             "uri": prop.uri,
