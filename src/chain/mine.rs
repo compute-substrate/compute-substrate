@@ -488,6 +488,8 @@ scope.spawn(move || {
 if whdr.nonce < old_nonce {
     extra_nonce = extra_nonce.wrapping_add(1);
 
+    whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+
     let marker = extra_nonce.to_le_bytes();
 
     wtxs[0].inputs[0].script_sig.push(0x00);
