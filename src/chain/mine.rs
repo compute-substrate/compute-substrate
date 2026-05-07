@@ -508,7 +508,7 @@ scope.spawn(move || {
         }
     }
 });
-
+}
     drop(tx_found);
 
     match rx_found.recv() {
