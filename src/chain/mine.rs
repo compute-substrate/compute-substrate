@@ -364,8 +364,8 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-const TIP_CHECK_EVERY_NONCES: u64 = 2048;
-
+const TIP_CHECK_EVERY_NONCES: u64 = 1_048_576;
+    
     let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
     let parent_hi_opt = if parent_tip != [0u8; 32] {
         get_hidx(db, &parent_tip)?
@@ -434,6 +434,7 @@ whdr.merkle = merkle_root(&wtxs);
 
         scope.spawn(move || {
             let mut checks: u64 = 0;
+            let mut extra_nonce: u64 = 0;
 
             loop {
                 if stop.load(Ordering::Relaxed) {
@@ -459,9 +460,18 @@ let old_nonce = whdr.nonce;
 whdr.nonce = whdr.nonce.wrapping_add(step);
 
 if whdr.nonce < old_nonce {
+    extra_nonce = extra_nonce.wrapping_add(1);
+
     whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
-    whdr.nonce = worker_id as u32;
+
+    wtxs[0].inputs[0].script_sig.push(0x00);
+    wtxs[0]
+        .inputs[0]
+        .script_sig
+        .extend_from_slice(format!("extra:{extra_nonce}").as_bytes());
+
     whdr.merkle = merkle_root(&wtxs);
+    whdr.nonce = worker_id as u32;
 }
 
 checks = checks.wrapping_add(1);
