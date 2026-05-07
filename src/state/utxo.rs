@@ -15,6 +15,14 @@ use crate::state::db::{
 };
 use crate::types::{AppPayload, Block, Hash20, Hash32, OutPoint, Transaction, TxOut};
 
+// Consensus rule activation guard.
+//
+// For now this is intentionally disabled to preserve compatibility with
+// already-mined historical blocks and unknown peers. Updated miners may still
+// *produce* height-prefixed coinbase script_sigs, but nodes will not reject
+// older/non-prefixed coinbases until a coordinated activation height is chosen.
+const COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UndoLog {
@@ -203,8 +211,14 @@ pub fn validate_and_apply_block(
     if cb.outputs.len() != 1 {
         bail!("coinbase must have 1 output");
     }
-    // consensus: enforce coinbase uniqueness rule
+// Consensus-gated coinbase height-prefix rule.
+//
+// Do not apply retroactively: historical blocks may have been mined before
+// this rule existed. Enforcing it before activation would make existing chain
+// history fail rebuild/reorg recovery.
+if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
     validate_coinbase_scriptsig_height(cb, height)?;
+}
 
     // coinbase output must be pay-to-hash20 (fixed type)
     let _coinbase_addr: Hash20 = cb.outputs[0].script_pubkey;
