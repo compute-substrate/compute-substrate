@@ -485,20 +485,17 @@ scope.spawn(move || {
         let old_nonce = whdr.nonce;
         whdr.nonce = whdr.nonce.wrapping_add(step);
 
-        if whdr.nonce < old_nonce {
-            extra_nonce = extra_nonce.wrapping_add(1);
+if whdr.nonce < old_nonce {
+    extra_nonce = extra_nonce.wrapping_add(1);
 
-            whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+    let marker = extra_nonce.to_le_bytes();
 
-            wtxs[0].inputs[0].script_sig.push(0x00);
-            wtxs[0]
-                .inputs[0]
-                .script_sig
-                .extend_from_slice(format!("extra:{extra_nonce}").as_bytes());
+    wtxs[0].inputs[0].script_sig.push(0x00);
+    wtxs[0].inputs[0].script_sig.extend_from_slice(&marker);
 
-            whdr.merkle = merkle_root(&wtxs);
-            whdr.nonce = worker_id as u32;
-        }
+    whdr.merkle = merkle_root(&wtxs);
+    whdr.nonce = worker_id as u32;
+}
 
         checks = checks.wrapping_add(1);
 
