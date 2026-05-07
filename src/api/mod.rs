@@ -324,6 +324,10 @@ connected_peers,
             "/recent/proposals/:domain/:limit",
             get(recent_proposals_by_domain),
         )
+
+        .route("/proposals/:limit", get(all_proposals))
+        .route("/proposals/:domain/:limit", get(all_proposals_by_domain))
+    
         .route("/recent/attestations/:limit", get(most_attested_global))
         .route(
             "/recent/attestations/:domain/:limit",
@@ -1474,6 +1478,105 @@ async fn recent_proposals_by_domain(
         tip: format!("0x{}", hex::encode(tip)),
         height,
         scanned_blocks: scanned,
+        count: proposals.len(),
+        proposals,
+    })
+}
+
+fn scan_all_proposals_from_app(
+    st: &ApiState,
+    domain_filter: Option<&str>,
+    want: u64,
+) -> (Hash32, u64, Vec<RecentProposalItem>) {
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let mut props: Vec<Proposal> = vec![];
+
+    for item in st.db.app.iter() {
+        let Ok((k, v)) = item else { continue };
+
+        if k.len() != 1 + 32 || k[0] != b'P' {
+            continue;
+        }
+
+        let prop: Proposal = match c().deserialize(&v) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if let Some(df) = domain_filter {
+            if prop.domain != df {
+                continue;
+            }
+        }
+
+        props.push(prop);
+    }
+
+    props.sort_by(|a, b| {
+        b.created_height
+            .cmp(&a.created_height)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    props.truncate(want as usize);
+
+    let proposals = props
+        .into_iter()
+        .map(|p| RecentProposalItem {
+            proposal_id: format!("0x{}", hex::encode(p.id)),
+            txid: format!("0x{}", hex::encode(p.id)),
+            block_hash: "".to_string(),
+            height: p.created_height,
+            time: 0,
+            domain: p.domain,
+            payload_hash: format!("0x{}", hex::encode(p.payload_hash)),
+            uri: p.uri,
+            expires_epoch: p.expires_epoch,
+        })
+        .collect();
+
+    (tip, hi.height, proposals)
+}
+
+/// GET /proposals/:limit
+async fn all_proposals(
+    Path(limit): Path<u64>,
+    State(st): State<ApiState>,
+) -> Json<RecentProposalsResp> {
+    const MAX_LIMIT: u64 = 500;
+    let want = limit.min(MAX_LIMIT).max(1);
+
+    let (tip, height, proposals) = scan_all_proposals_from_app(&st, None, want);
+
+    Json(RecentProposalsResp {
+        ok: true,
+        tip: format!("0x{}", hex::encode(tip)),
+        height,
+        scanned_blocks: 0,
+        count: proposals.len(),
+        proposals,
+    })
+}
+
+/// GET /proposals/:domain/:limit
+async fn all_proposals_by_domain(
+    Path((domain, limit)): Path<(String, u64)>,
+    State(st): State<ApiState>,
+) -> Json<RecentProposalsResp> {
+    const MAX_LIMIT: u64 = 500;
+    let want = limit.min(MAX_LIMIT).max(1);
+
+    let (tip, height, proposals) = scan_all_proposals_from_app(&st, Some(&domain), want);
+
+    Json(RecentProposalsResp {
+        ok: true,
+        tip: format!("0x{}", hex::encode(tip)),
+        height,
+        scanned_blocks: 0,
         count: proposals.len(),
         proposals,
     })
