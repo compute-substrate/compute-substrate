@@ -18,7 +18,7 @@ use crate::types::{
     AppPayload, Block, BlockHeader, Hash20, Hash32, OutPoint, Transaction, TxIn, TxOut,
 };
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
     Arc,
 };
@@ -364,7 +364,8 @@ pub fn mine_one(
     max_mempool_txs: usize,
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
-const TIP_CHECK_EVERY_NONCES: u64 = 1_048_576;
+const TIP_CHECK_EVERY_NONCES: u64 = 4_194_304;
+
     
     let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
     let parent_hi_opt = if parent_tip != [0u8; 32] {
@@ -406,12 +407,38 @@ let workers = miner_thread_count().min(u32::MAX as usize).max(1);
 println!("[mine] workers={}", workers);
 
 let stop = Arc::new(AtomicBool::new(false));
+let stale = Arc::new(AtomicBool::new(false));
+let hash_counter = Arc::new(AtomicU64::new(0));
 let (tx_found, rx_found) = mpsc::channel::<MineMsg>();
 
 thread::scope(|scope| {
+    {
+        let stop = stop.clone();
+        let stale = stale.clone();
+        let tx_found = tx_found.clone();
+
+        scope.spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+
+                let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
+                if cur_tip != parent_tip {
+                    stale.store(true, Ordering::Relaxed);
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = tx_found.send(MineMsg::Stale);
+                    return;
+                }
+            }
+        });
+    }
+
     for worker_id in 0..workers {
+
         let stop = stop.clone();
         let tx_found = tx_found.clone();
+
+let stale = stale.clone();
+let hash_counter = hash_counter.clone();
 
 let parent_hi_for_worker = parent_hi_opt.clone();
 let mut whdr = hdr.clone();
@@ -432,103 +459,55 @@ whdr.merkle = merkle_root(&wtxs);
         whdr.nonce = worker_id as u32;
         let step = workers as u32;
 
-        scope.spawn(move || {
-            let mut checks: u64 = 0;
-            let mut extra_nonce: u64 = 0;
+scope.spawn(move || {
+    let mut checks: u64 = 0;
+    let mut extra_nonce: u64 = 0;
 
-            loop {
-                if stop.load(Ordering::Relaxed) {
-                    return;
-                }
+    loop {
+        if stop.load(Ordering::Relaxed) || stale.load(Ordering::Relaxed) {
+            return;
+        }
 
-                let h = header_hash(&whdr);
+        let h = header_hash(&whdr);
 
-                if pow_ok(&h, whdr.bits) {
-                    stop.store(true, Ordering::Relaxed);
+        if pow_ok(&h, whdr.bits) {
+            stop.store(true, Ordering::Relaxed);
 
-let block = Block {
-    header: whdr.clone(),
-    txs: wtxs.clone(),
-};
+            let block = Block {
+                header: whdr.clone(),
+                txs: wtxs.clone(),
+            };
 
-let _ = tx_found.send(MineMsg::Found(h, block));
+            let _ = tx_found.send(MineMsg::Found(h, block));
+            return;
+        }
 
-                    return;
-                }
+        let old_nonce = whdr.nonce;
+        whdr.nonce = whdr.nonce.wrapping_add(step);
 
-let old_nonce = whdr.nonce;
-whdr.nonce = whdr.nonce.wrapping_add(step);
+        if whdr.nonce < old_nonce {
+            extra_nonce = extra_nonce.wrapping_add(1);
 
-if whdr.nonce < old_nonce {
-    extra_nonce = extra_nonce.wrapping_add(1);
+            whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
 
-    whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+            wtxs[0].inputs[0].script_sig.push(0x00);
+            wtxs[0]
+                .inputs[0]
+                .script_sig
+                .extend_from_slice(format!("extra:{extra_nonce}").as_bytes());
 
-    wtxs[0].inputs[0].script_sig.push(0x00);
-    wtxs[0]
-        .inputs[0]
-        .script_sig
-        .extend_from_slice(format!("extra:{extra_nonce}").as_bytes());
+            whdr.merkle = merkle_root(&wtxs);
+            whdr.nonce = worker_id as u32;
+        }
 
-    whdr.merkle = merkle_root(&wtxs);
-    whdr.nonce = worker_id as u32;
-}
+        checks = checks.wrapping_add(1);
 
-checks = checks.wrapping_add(1);
-
-                if checks >= TIP_CHECK_EVERY_NONCES {
-                    checks = 0;
-                    std::thread::yield_now();
-
-                    // Abort stale work quickly if another node advanced the tip.
-                    let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
-                    if cur_tip != whdr.prev {
-                        stop.store(true, Ordering::Relaxed);
-                        let _ = tx_found.send(MineMsg::Stale);
-                        return;
-                    }
-
-if mempool.len() > 0 && wtxs.len() == 1 {
-    if let Ok((mut new_txs, _new_ids, _fees)) =
-        build_template(db, mempool, miner_h160, height, max_mempool_txs)
-    {
-        // Preserve per-worker unique coinbase search space.
-        new_txs[0].inputs[0].script_sig.push(0x00);
-        new_txs[0]
-            .inputs[0]
-            .script_sig
-            .extend_from_slice(format!("worker:{worker_id}").as_bytes());
-
-        wtxs = new_txs;
-        whdr.merkle = merkle_root(&wtxs);
-        whdr.nonce = worker_id as u32;
-
-        println!(
-            "[mine] worker {} template refresh: height={} txs={}",
-            worker_id,
-            height,
-            wtxs.len().saturating_sub(1)
-        );
+        if checks >= TIP_CHECK_EVERY_NONCES {
+            checks = 0;
+            hash_counter.fetch_add(TIP_CHECK_EVERY_NONCES, Ordering::Relaxed);
+        }
     }
-}
-
-                    // Refresh timestamp occasionally.
-
-if let Some(p) = parent_hi_for_worker.as_ref() {
-    let new_time = choose_block_time(db, &parent_tip, Some(p));
-
-                        if new_time != whdr.time {
-                            whdr.time = new_time;
-                            whdr.nonce = worker_id as u32;
-
-                            whdr.merkle = merkle_root(&wtxs);
-
-                        }
-                    }
-                }
-            }
-        });
-    }
+});
 
     drop(tx_found);
 
