@@ -148,8 +148,8 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
 /// - time <= now + MAX_FUTURE_DRIFT_SECS
 ///
 /// This MUST track wall-clock time (clamped), or LWMA will drift the wrong way.
+
 fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
-    // Genesis mining case (should basically never happen here).
     if *parent_tip == [0u8; 32] || parent_hi.is_none() {
         return 0;
     }
@@ -158,16 +158,28 @@ fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&Header
 
     let mtp = median_time_past(db, &p.hash).unwrap_or(p.time);
 
-    // Lower bound: must satisfy spacing and be > MTP
     let min_ok = p.time
         .saturating_add(MIN_BLOCK_SPACING_SECS)
         .max(mtp.saturating_add(1));
 
-    // Upper bound: must not be too far in the future vs wall clock
-    let max_ok = now_secs().saturating_add(MAX_FUTURE_DRIFT_SECS);
+    loop {
+        let now = now_secs();
 
-    // Track reality but stay within consensus bounds
-    now_secs().clamp(min_ok, max_ok)
+        if min_ok <= now {
+            return now;
+        }
+
+        let wait = min_ok.saturating_sub(now).min(5);
+
+        println!(
+            "[mine] waiting for wall clock: next_valid_time={} now={} wait={}s",
+            min_ok,
+            now,
+            wait
+        );
+
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+    }
 }
 
 /// Build a fresh block template from the current tip + current UTXO set.
