@@ -68,11 +68,15 @@ pub fn put_hidx(db: &Stores, hi: &HeaderIndex) -> Result<()> {
 }
 
 /// In tests/integration tests we sometimes want to build toy chains with arbitrary genesis.
-/// This bypass is strictly test-only unless you explicitly enable the crate feature.
-///
 /// IMPORTANT: In release builds, this is always false.
+#[cfg(test)]
 fn allow_foreign_genesis_for_tests() -> bool {
-    cfg!(test) || cfg!(feature = "test-bypass")
+    true
+}
+
+#[cfg(not(test))]
+fn allow_foreign_genesis_for_tests() -> bool {
+    false
 }
 
 /// Insert a header index entry (CONSENSUS CRITICAL)
