@@ -126,16 +126,59 @@ fn bypass_pow() -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct PowTarget {
+    target: [u8; 32],
+    target_hi: u128,
+}
+
+impl PowTarget {
+    pub fn from_bits(bits: u32) -> Option<Self> {
+        if !bits_within_pow_limit(bits) {
+            return None;
+        }
+
+        let target = bits_to_target_bytes(bits);
+        if target == [0u8; 32] {
+            return None;
+        }
+
+        let mut hi = [0u8; 16];
+        hi.copy_from_slice(&target[..16]);
+
+        Some(Self {
+            target,
+            target_hi: u128::from_be_bytes(hi),
+        })
+    }
+
+    #[inline(always)]
+    pub fn check(&self, hash: &Hash32) -> bool {
+        let mut hi = [0u8; 16];
+        hi.copy_from_slice(&hash[..16]);
+
+        let hash_hi = u128::from_be_bytes(hi);
+
+        if hash_hi > self.target_hi {
+            return false;
+        }
+
+        if hash_hi < self.target_hi {
+            return true;
+        }
+
+        hash <= &self.target
+    }
+}
+
 /// STRICT PoW validity: hash <= target (both BE).
+
 pub fn pow_ok_strict(hash: &Hash32, bits: u32) -> bool {
-    if !bits_within_pow_limit(bits) {
+    let Some(target) = PowTarget::from_bits(bits) else {
         return false;
-    }
-    let target = bits_to_target_bytes(bits);
-    if target == [0u8; 32] {
-        return false;
-    }
-    hash <= &target
+    };
+
+    target.check(hash)
 }
 
 /// PoW validity used by consensus code.
