@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 
 use crate::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
 use crate::chain::lock::ChainLock;
-use crate::chain::pow::{expected_bits, pow_ok};
+use crate::chain::pow::{expected_bits, PowTarget};
 use crate::chain::reorg::maybe_reorg_to;
 use crate::chain::time::{median_time_past, now_secs};
 use crate::crypto::{sha256d, txid};
@@ -401,6 +401,9 @@ const TIP_CHECK_EVERY_NONCES: u64 = 4_194_304;
         nonce: 0u32,
     };
 
+let pow_target = PowTarget::from_bits(hdr.bits)
+    .ok_or_else(|| anyhow!("invalid mining bits"))?;
+
 println!(
     "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
     height,
@@ -470,6 +473,7 @@ whdr.merkle = merkle_root(&wtxs);
         // Split nonce space across workers.
         whdr.nonce = worker_id as u32;
         let step = workers as u32;
+let pow_target = pow_target;
 
 scope.spawn(move || {
     let mut checks: u64 = 0;
@@ -482,7 +486,8 @@ scope.spawn(move || {
 
         let h = header_hash(&whdr);
 
-        if pow_ok(&h, whdr.bits) {
+if pow_target.check(&h) {
+
             stop.store(true, Ordering::Relaxed);
 
             let block = Block {
