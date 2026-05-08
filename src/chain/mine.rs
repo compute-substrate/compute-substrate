@@ -333,7 +333,7 @@ let cb = coinbase(miner_h160, cb_value, height, Some(&entropy));
     Ok((final_txs, included_ids, total_fees))
 }
 
-#[doc(hidden)]
+#[cfg(test)]
 pub fn build_template_for_tests(
     db: &Stores,
     mempool: &Mempool,
