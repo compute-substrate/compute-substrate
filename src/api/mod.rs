@@ -131,6 +131,11 @@ pub struct UtxosResp {
     pub ok: bool,
     pub addr20: String,
     pub count: usize,
+    pub confirmed_balance: u64,
+    pub mined_lifetime: u64,
+    pub mined_unspent: u64,
+    pub coinbase_lifetime_outputs: u64,
+    pub coinbase_unspent_outputs: u64,
     pub utxos: Vec<UtxoItem>,
 }
 
@@ -1192,11 +1197,25 @@ async fn utxos_for_addr20(
     let a = match parse_addr20(&addr20) {
         Ok(x) => x,
         Err(_) => {
-            return Json(UtxosResp {
-                ok: false,
-                addr20,
-                count: 0,
-                utxos: vec![],
+return Json(UtxosResp {
+
+    ok: false,
+
+    addr20,
+
+    count: 0,
+
+    confirmed_balance: 0,
+
+    mined_lifetime: 0,
+
+    mined_unspent: 0,
+
+    coinbase_lifetime_outputs: 0,
+
+    coinbase_unspent_outputs: 0,
+
+    utxos: vec![],
             })
         }
     };
@@ -1287,16 +1306,80 @@ out.sort_by(|a, b| {
 
     }
 
-    if let Some(limit) = q.limit {
-        out.truncate(limit);
+if let Some(limit) = q.limit {
+    out.truncate(limit);
+}
+
+let confirmed_balance: u64 = out.iter().map(|u| u.value).sum();
+
+let mined_unspent: u64 = out
+    .iter()
+    .filter(|u| u.coinbase)
+    .map(|u| u.value)
+    .sum();
+
+let coinbase_unspent_outputs: u64 =
+    out.iter().filter(|u| u.coinbase).count() as u64;
+
+// Historical lifetime coinbase scan over canonical chain.
+let mut mined_lifetime: u64 = 0;
+let mut coinbase_lifetime_outputs: u64 = 0;
+
+let tip = get_tip(st.db.as_ref())
+    .ok()
+    .flatten()
+    .unwrap_or([0u8; 32]);
+
+let hi = get_hidx(st.db.as_ref(), &tip)
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| zero_hidx(tip));
+
+let mut cur_hash = tip;
+let mut cur_height = hi.height;
+
+loop {
+    let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+        break;
+    };
+
+    let blk: Block = match c().deserialize(&v) {
+        Ok(b) => b,
+        Err(_) => break,
+    };
+
+    // Coinbase tx is txs[0]
+    if let Some(cb) = blk.txs.first() {
+        for outp in &cb.outputs {
+            if outp.script_pubkey == a {
+                mined_lifetime =
+                    mined_lifetime.saturating_add(outp.value);
+
+                coinbase_lifetime_outputs =
+                    coinbase_lifetime_outputs.saturating_add(1);
+            }
+        }
     }
 
-    Json(UtxosResp {
-        ok: true,
-        addr20: format!("0x{}", hex::encode(a)),
-        count: out.len(),
-        utxos: out,
-    })
+    if blk.header.prev == [0u8; 32] || cur_height == 0 {
+        break;
+    }
+
+    cur_hash = blk.header.prev;
+    cur_height = cur_height.saturating_sub(1);
+}
+
+Json(UtxosResp {
+    ok: true,
+    addr20: format!("0x{}", hex::encode(a)),
+    count: out.len(),
+    confirmed_balance,
+    mined_lifetime,
+    mined_unspent,
+    coinbase_lifetime_outputs,
+    coinbase_unspent_outputs,
+    utxos: out,
+})
 
 }
 
