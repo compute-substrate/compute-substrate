@@ -760,7 +760,6 @@ pub struct NetConfig {
     pub bootnodes: Vec<Multiaddr>,
     pub genesis_hash: Hash32,
     pub is_bootnode: bool,
-    pub test_mode: TestPeerMode,
 }
 
 #[derive(Clone)]
