@@ -750,8 +750,6 @@ fn allow_gossip(
 #[derive(Clone, Debug)]
 pub enum TestPeerMode {
     Normal,
-    StallBlockResponses,
-    UnknownBlockResponses,
 }
 
 
@@ -1852,9 +1850,6 @@ async fn run_p2p_loop(
     chain_lock: ChainLock,
 ) -> Result<()> {
 
-    if let Ok(v) = std::env::var("CSD_CRASH_AT") {
-        eprintln!("[failpoint] CSD_CRASH_AT={}", v);
-    }
 
     println!("[p2p] peer_id: {peer_id}");
 
@@ -2757,23 +2752,6 @@ SyncRequest::GetTip => {
     }
 }
 
-{
-if matches!(request, SyncRequest::GetBlock { .. }) {
-    if matches!(cfg.test_mode, TestPeerMode::StallBlockResponses) {
-        println!("[p2p-test] intentionally stalling GetBlock response from {peer}");
-        continue;
-    }
-
-    if matches!(cfg.test_mode, TestPeerMode::UnknownBlockResponses) {
-        println!("[p2p-test] intentionally returning unknown block to {peer}");
-        let _ = swarm.behaviour_mut().rr.send_response(
-            channel,
-            SyncResponse::Err { msg: "unknown block".into() },
-        );
-        continue;
-    }
-}
-}
 
 let resp = match request {
     SyncRequest::GetPeers { max } => {
