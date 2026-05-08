@@ -114,25 +114,7 @@ pub fn bits_within_pow_limit(bits: u32) -> bool {
     t <= limit
 }
 
-/// Test-only PoW bypass.
-/// Active only under `cargo test`; ignored in release/mainnet binaries.
-fn bypass_pow() -> bool {
-    #[cfg(test)]
-    {
-        match std::env::var("CSD_BYPASS_POW") {
-            Ok(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                v == "1" || v == "true" || v == "yes" || v == "on"
-            }
-            Err(_) => false,
-        }
-    }
 
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct PowTarget {
@@ -189,13 +171,7 @@ pub fn pow_ok_strict(hash: &Hash32, bits: u32) -> bool {
     target.check(hash)
 }
 
-/// PoW validity used by consensus code.
-/// If CSD_BYPASS_POW=1 is set (integration tests), always returns true.
 pub fn pow_ok(hash: &Hash32, bits: u32) -> bool {
-    if bypass_pow() {
-        let _ = (hash, bits);
-        return true;
-    }
     pow_ok_strict(hash, bits)
 }
 
@@ -335,19 +311,6 @@ pub fn expected_bits_strict(db: &Stores, height: u64, parent: Option<&HeaderInde
     Ok(bits)
 }
 
-/// expected_bits used by consensus code.
-/// If CSD_BYPASS_POW=1 is set (integration tests), keep it stable: parent.bits.
 pub fn expected_bits(db: &Stores, height: u64, parent: Option<&HeaderIndex>) -> Result<u32> {
-    if bypass_pow() {
-        let _ = db;
-        if height == 0 {
-            return Ok(INITIAL_BITS);
-        }
-        if let Some(p) = parent {
-            return Ok(p.bits);
-        }
-        bail!("expected_bits(test-bypass): missing parent for height>0");
-    }
-
     expected_bits_strict(db, height, parent)
 }
