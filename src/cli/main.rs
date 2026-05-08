@@ -210,9 +210,6 @@ pub enum Commands {
         #[arg(long, default_value = "")]
         bootnodes: String,
 
-        /// P2P test mode (for staging/tests only)
-        #[arg(long, default_value = "normal", hide = true)]
-        p2p_test_mode: String,
     },
 
     /// Wallet and transaction tools
@@ -1226,20 +1223,16 @@ Commands::Wallet { w } => {
             Ok(())
         }
 
-        Commands::Node {
-            datadir,
-            rpc,
-            mine,
-            miner_addr20,
-            genesis,
-            p2p_listen,
-            bootnodes,
-            p2p_test_mode,
-        } => {
+Commands::Node {
+    datadir,
+    rpc,
+    mine,
+    miner_addr20,
+    genesis,
+    p2p_listen,
+    bootnodes,
+} => {
 
-            if let Ok(v) = std::env::var("CSD_CRASH_AT") {
-        eprintln!("[failpoint] CSD_CRASH_AT={}", v);
-    }
             
             std::fs::create_dir_all(&datadir)?;
             let db = Arc::new(Stores::open(&datadir)?);
@@ -1282,15 +1275,7 @@ Commands::Wallet { w } => {
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
 
-                        let test_mode = match p2p_test_mode.as_str() {
-                "normal" => crate::net::node::TestPeerMode::Normal,
-                "stall-blocks" => crate::net::node::TestPeerMode::StallBlockResponses,
-                "unknown-blocks" => crate::net::node::TestPeerMode::UnknownBlockResponses,
-                other => anyhow::bail!(
-                    "unknown --p2p-test-mode '{}'; expected one of: normal, stall-blocks, unknown-blocks",
-                    other
-                ),
-            };
+
 
             let net_cfg = crate::net::node::NetConfig {
                 datadir: datadir.clone(),
@@ -1298,7 +1283,6 @@ Commands::Wallet { w } => {
                 bootnodes: boots,
                 genesis_hash,
                 is_bootnode: !mine,
-                test_mode,
             };
 
             // Start P2P and keep a handle for miner gating
