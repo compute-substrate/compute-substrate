@@ -114,15 +114,23 @@ pub fn bits_within_pow_limit(bits: u32) -> bool {
     t <= limit
 }
 
-/// Integration-test friendly bypass switch.
-/// Use: `CSD_BYPASS_POW=1 cargo test ...`
+/// Test-only PoW bypass.
+/// Active only under `cargo test`; ignored in release/mainnet binaries.
 fn bypass_pow() -> bool {
-    match std::env::var("CSD_BYPASS_POW") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
+    #[cfg(test)]
+    {
+        match std::env::var("CSD_BYPASS_POW") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
+    }
+
+    #[cfg(not(test))]
+    {
+        false
     }
 }
 
