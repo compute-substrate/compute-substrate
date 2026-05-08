@@ -158,7 +158,6 @@ fn header_min_valid(bh: &Hash32, blk: &Block) -> bool {
     if !crate::chain::pow::bits_within_pow_limit(blk.header.bits) {
         return false;
     }
-    // pow_ok honors CSD_BYPASS_POW=1 in tests; otherwise strict.
     if !crate::chain::pow::pow_ok(bh, blk.header.bits) {
         return false;
     }
