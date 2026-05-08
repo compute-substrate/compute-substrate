@@ -28,16 +28,23 @@ pub struct HeaderIndex {
 /// - time: u64 LE
 /// - bits: u32 LE
 /// - nonce: u32 LE
-pub fn header_hash(h: &BlockHeader) -> Hash32 {
-    // 4 + 32 + 32 + 8 + 4 + 4 = 84 bytes
-    let mut buf = Vec::with_capacity(4 + 32 + 32 + 8 + 4 + 4);
 
-    buf.extend_from_slice(&h.version.to_le_bytes());
-    buf.extend_from_slice(&h.prev);
-    buf.extend_from_slice(&h.merkle);
-    buf.extend_from_slice(&h.time.to_le_bytes());
-    buf.extend_from_slice(&h.bits.to_le_bytes());
-    buf.extend_from_slice(&h.nonce.to_le_bytes());
+pub fn header_hash(h: &BlockHeader) -> Hash32 {
+    // Canonical layout:
+    // version: u32 LE     bytes 0..4
+    // prev:    32 bytes   bytes 4..36
+    // merkle:  32 bytes   bytes 36..68
+    // time:    u64 LE     bytes 68..76
+    // bits:    u32 LE     bytes 76..80
+    // nonce:   u32 LE     bytes 80..84
+    let mut buf = [0u8; 84];
+
+    buf[0..4].copy_from_slice(&h.version.to_le_bytes());
+    buf[4..36].copy_from_slice(&h.prev);
+    buf[36..68].copy_from_slice(&h.merkle);
+    buf[68..76].copy_from_slice(&h.time.to_le_bytes());
+    buf[76..80].copy_from_slice(&h.bits.to_le_bytes());
+    buf[80..84].copy_from_slice(&h.nonce.to_le_bytes());
 
     sha256d(&buf)
 }
