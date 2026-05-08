@@ -1,19 +1,21 @@
 // src/chain/failpoints.rs
 //
 // Test-only failpoints for crash-fuzzing reorg durability.
-// Enabled ONLY when compiled with `--features test-bypass`.
+// In release/mainnet builds, failpoints are always inert.
 
+#[cfg(test)]
 #[inline]
 pub fn hit(point: &str) {
-    #[cfg(feature = "test-bypass")]
-    {
-        if let Ok(want) = std::env::var("CSD_CRASH_AT") {
-            if want == point {
-                eprintln!("[failpoint] aborting at {point}");
-                std::process::abort();
-            }
+    if let Ok(want) = std::env::var("CSD_CRASH_AT") {
+        if want == point {
+            eprintln!("[failpoint] aborting at {point}");
+            std::process::abort();
         }
     }
+}
 
-    let _ = point;
+#[cfg(not(test))]
+#[inline]
+pub fn hit(_point: &str) {
+    // no-op in release/mainnet
 }
