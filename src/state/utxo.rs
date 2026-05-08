@@ -63,7 +63,7 @@ fn is_coinbase(tx: &Transaction) -> bool {
         && tx.inputs[0].prevout.vout == u32::MAX
 }
 
-/// Enforce your "coinbase commits height" uniqueness rule at consensus.
+/// Future consensus rule: enforce coinbase script_sig height prefix after activation.
 fn validate_coinbase_scriptsig_height(cb: &Transaction, height: u64) -> Result<()> {
     let want = height.to_le_bytes(); // 8 bytes
     let got = cb
