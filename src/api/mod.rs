@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use libp2p::PeerId;
 use crate::chain::index::{get_hidx, HeaderIndex};
 use crate::crypto::{sighash, txid};
 use crate::net::mempool::{Mempool, MempoolStats};
@@ -29,6 +30,7 @@ pub struct ApiState {
     // IMPORTANT: must be GossipTxEvent so node.rs can publish it to gossipsub
     pub tx_gossip: tokio::sync::mpsc::UnboundedSender<GossipTxEvent>,
 pub connected_peers: Arc<AtomicUsize>,
+pub peer_id: PeerId,
 }
 
 #[derive(Serialize)]
@@ -50,6 +52,13 @@ pub peer_count: usize,
     pub mempool_bytes: usize,
     pub mempool_min_feerate_ppm: Option<u64>,
     pub mempool_max_feerate_ppm: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct P2pInfoResp {
+    pub ok: bool,
+    pub peer_id: String,
+    pub peer_count: usize,
 }
 
 #[derive(Serialize)]
@@ -301,17 +310,20 @@ pub fn router(
     mempool: Arc<Mempool>,
     tx_gossip: tokio::sync::mpsc::UnboundedSender<GossipTxEvent>,
 connected_peers: Arc<AtomicUsize>,
+peer_id: PeerId,
 ) -> Router {
     let st = ApiState {
         db,
         mempool,
         tx_gossip,
 connected_peers,
+peer_id,
     };
 
     Router::new()
         .route("/health", get(health))
         .route("/peers", get(peers))
+.route("/p2p/info", get(p2p_info))
         .route("/metrics", get(metrics))
         .route("/oracle", get(oracle))
         .route("/tip", get(tip))
@@ -480,6 +492,14 @@ async fn peers(State(st): State<ApiState>) -> Json<serde_json::Value> {
         "ok": true,
         "peer_count": st.connected_peers.load(Ordering::Relaxed),
     }))
+}
+
+async fn p2p_info(State(st): State<ApiState>) -> Json<P2pInfoResp> {
+    Json(P2pInfoResp {
+        ok: true,
+        peer_id: st.peer_id.to_string(),
+        peer_count: st.connected_peers.load(Ordering::Relaxed),
+    })
 }
 
 async fn top_active(State(st): State<ApiState>) -> Json<serde_json::Value> {
