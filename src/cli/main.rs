@@ -1301,6 +1301,7 @@ Commands::Node {
                 mempool.clone(),
                 tx_gossip_tx.clone(),
                 net.connected_peers.clone(),
+                net.peer_id,
             );
 
             let listener = tokio::net::TcpListener::bind(&rpc).await?;
