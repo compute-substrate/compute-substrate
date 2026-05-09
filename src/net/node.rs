@@ -50,7 +50,7 @@ const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
 const RL_MAX_RR_REQS_PER_WINDOW: u32 = 4096;
-const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 128;
+const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 1024;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 12;
 
 const BAN_SECS: u64 = 10 * 60;
