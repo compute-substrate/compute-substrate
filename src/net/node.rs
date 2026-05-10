@@ -91,16 +91,24 @@ const MAX_INFLIGHT_BLOCKS: usize = 8;
 const MAX_WANT_QUEUE: usize = 20_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 90;
 
-const MAX_PEERS_IN_EXCHANGE: usize = 64;
-const PEER_REQ_ON_CONNECT: u16 = 64;
+const MAX_PEERS_IN_EXCHANGE: usize = 128;
+const PEER_REQ_ON_CONNECT: u16 = 128;
 const PEER_REDIAL_EVERY_SECS: u64 = 15;
 const MAX_ADDRS_PER_PEER: usize = 8;
 const BOOTSTRAP_REQ_COOLDOWN_SECS: u64 = 30;
 const PEER_DISCONNECT_COOLDOWN_SECS: u64 = 20;
 
+const COLD_START_SECS: u64 = 180;
+const COLD_START_MIN_PEERS: usize = 24;
+
 const MIN_OUTBOUND_PEERS: usize = 8;
 const PEERS_FILE: &str = "peers.txt";
 const SAVE_PEERS_EVERY_SECS: u64 = 30;
+
+const PEER_SCORES_FILE: &str = "peer_scores.txt";
+
+const STARTUP_PREFERRED_PEERS: usize = 16;
+
 
 // ----------------- time helpers -----------------
 
@@ -541,10 +549,11 @@ fn export_peer_strings(
     self_peer: PeerId,
     requester: PeerId,
     known_addrs: &HashMap<PeerId, HashSet<Multiaddr>>,
+    peer_quality: &HashMap<PeerId, PeerQuality>,
     max: usize,
 ) -> Vec<String> {
     let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
-    peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    sort_peer_ids_by_quality(&mut peer_ids, peer_quality);
 
     let mut out = Vec::<String>::new();
 
@@ -958,6 +967,138 @@ impl request_response::Codec for SyncCodec {
 
 // ----------------- sync hardening helpers -----------------
 
+
+#[derive(Clone, Debug, Default)]
+struct PeerQuality {
+    dial_success: u64,
+    dial_failure: u64,
+    good_tip: u64,
+    good_headers: u64,
+    good_block: u64,
+    timeout: u64,
+    invalid: u64,
+    last_seen_unix: u64,
+    last_tip_height: u64,
+    last_tip_work: u128,
+}
+
+fn peer_quality_score(q: &PeerQuality) -> i128 {
+    let mut s: i128 = 0;
+
+    s += (q.dial_success as i128) * 20;
+    s -= (q.dial_failure as i128) * 25;
+
+    s += (q.good_tip as i128) * 5;
+    s += (q.good_headers as i128) * 15;
+    s += (q.good_block as i128) * 25;
+
+    s -= (q.timeout as i128) * 20;
+    s -= (q.invalid as i128) * 50;
+
+    s += (q.last_tip_height as i128) / 10;
+    s += (q.last_tip_work.min(i128::MAX as u128) as i128) / 1_000_000_000_000i128;
+
+    let age = unix_now().saturating_sub(q.last_seen_unix);
+    if age < 3600 {
+        s += 100;
+    } else if age < 86400 {
+        s += 25;
+    } else {
+        s -= 50;
+    }
+
+    s
+}
+
+fn sort_peer_ids_by_quality(
+    peer_ids: &mut Vec<PeerId>,
+    peer_quality: &HashMap<PeerId, PeerQuality>,
+) {
+    peer_ids.sort_by(|a, b| {
+        let qa = peer_quality.get(a).cloned().unwrap_or_default();
+        let qb = peer_quality.get(b).cloned().unwrap_or_default();
+
+        peer_quality_score(&qb)
+            .cmp(&peer_quality_score(&qa))
+            .then_with(|| a.to_string().cmp(&b.to_string()))
+    });
+}
+
+fn peer_scores_path(datadir: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(datadir).join(PEER_SCORES_FILE)
+}
+
+fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
+    let mut out = HashMap::new();
+    let p = peer_scores_path(datadir);
+
+    let Ok(s) = std::fs::read_to_string(&p) else {
+        return out;
+    };
+
+    for line in s.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 11 {
+            continue;
+        }
+
+        let Ok(pid) = parts[0].parse::<PeerId>() else {
+            continue;
+        };
+
+        let q = PeerQuality {
+            dial_success: parts[1].parse().unwrap_or(0),
+            dial_failure: parts[2].parse().unwrap_or(0),
+            good_tip: parts[3].parse().unwrap_or(0),
+            good_headers: parts[4].parse().unwrap_or(0),
+            good_block: parts[5].parse().unwrap_or(0),
+            timeout: parts[6].parse().unwrap_or(0),
+            invalid: parts[7].parse().unwrap_or(0),
+            last_seen_unix: parts[8].parse().unwrap_or(0),
+            last_tip_height: parts[9].parse().unwrap_or(0),
+last_tip_work: parts[10].parse().unwrap_or(0),
+        };
+
+        out.insert(pid, q);
+    }
+
+    out
+}
+
+fn save_peer_quality(datadir: &str, qmap: &HashMap<PeerId, PeerQuality>) {
+    let p = peer_scores_path(datadir);
+    let tmp = p.with_extension("tmp");
+
+    let mut rows = Vec::new();
+
+    let mut peers: Vec<_> = qmap.keys().copied().collect();
+    peers.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+    for pid in peers {
+        let Some(q) = qmap.get(&pid) else { continue };
+
+        rows.push(format!(
+            "{} {} {} {} {} {} {} {} {} {} {}",
+            pid,
+            q.dial_success,
+            q.dial_failure,
+            q.good_tip,
+            q.good_headers,
+            q.good_block,
+            q.timeout,
+            q.invalid,
+            q.last_seen_unix,
+            q.last_tip_height,
+            q.last_tip_work,
+        ));
+    }
+
+    if std::fs::write(&tmp, rows.join("\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+
 fn accept_header_universe_pow(cfg: &NetConfig, hdr: &BlockHeader, h: &Hash32) -> bool {
     if is_genesis_header(hdr) && *h != cfg.genesis_hash {
         println!("[p2p] ignoring foreign genesis header {}", hex32(h));
@@ -1154,6 +1295,7 @@ fn pump_blocks(
     providers: &HashMap<Hash32, PeerId>,
     bad_providers: &mut HashMap<Hash32, HashMap<PeerId, Instant>>,
     bans: &HashMap<PeerId, Instant>,
+peer_quality: &mut HashMap<PeerId, PeerQuality>,
     peer_score: &mut HashMap<PeerId, i32>,
     quarantine: &mut HashMap<PeerId, Instant>,
     rid_to_hash: &mut HashMap<request_response::OutboundRequestId, Hash32>,
@@ -1180,6 +1322,12 @@ for (h, peer) in timed_out {
     }
 
     bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT);
+
+{
+    let q = peer_quality.entry(peer).or_default();
+    q.timeout = q.timeout.saturating_add(1);
+    q.last_seen_unix = unix_now();
+}
 
 bad_providers.entry(h).or_default().insert(peer, Instant::now());
 
@@ -1938,6 +2086,14 @@ let behaviour = Behaviour {
 let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> =
     load_known_addrs(&cfg.datadir, peer_id);
 
+let mut peer_quality: HashMap<PeerId, PeerQuality> =
+    load_peer_quality(&cfg.datadir);
+
+println!(
+    "[pex] loaded {} peer quality records from disk",
+    peer_quality.len()
+);
+
 println!(
     "[pex] loaded {} known peers from disk",
     known_addrs.len()
@@ -1980,7 +2136,9 @@ for a in &cfg.bootnodes {
 }
 
 let mut startup_peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
-startup_peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+sort_peer_ids_by_quality(&mut startup_peer_ids, &peer_quality);
+startup_peer_ids.truncate(STARTUP_PREFERRED_PEERS);
 
 for pid in startup_peer_ids {
     if pid == peer_id {
@@ -2051,6 +2209,8 @@ let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_bootstrap_req_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_disconnect_at: HashMap<PeerId, Instant> = HashMap::new();
 
+let p2p_started_at = Instant::now();
+
     loop {
         tokio::select! {
 
@@ -2063,6 +2223,7 @@ prune_addr_backoff(&mut addr_backoff);
 
 if last_peer_save.elapsed() >= Duration::from_secs(SAVE_PEERS_EVERY_SECS) {
     save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
+    save_peer_quality(&cfg.datadir, &peer_quality);
     last_peer_save = Instant::now();
 }
 
@@ -2084,7 +2245,13 @@ let _ = compact_and_log_want_queue(
 
                 // bootnode auto-redial (with backoff + connected-skip)
 
-if connected.len() < MIN_OUTBOUND_PEERS && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
+let target_peers = if p2p_started_at.elapsed() < Duration::from_secs(COLD_START_SECS) {
+    COLD_START_MIN_PEERS
+} else {
+    MIN_OUTBOUND_PEERS
+};
+
+if connected.len() < target_peers && last_redial.elapsed() >= Duration::from_secs(REDIAL_EVERY_SECS) {
 
     for a in &cfg.bootnodes {
         if let Some(pid) = peer_id_from_multiaddr(a) {
@@ -2197,7 +2364,7 @@ if !want_blocks.is_empty() || !inflight.is_empty() {
 }
 
 let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
-peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
 for pid in peer_ids {
     if pid == peer_id
@@ -2244,6 +2411,7 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
+&mut peer_quality,
 &mut peer_score,
     &mut quarantine,
     &mut rid_to_hash,
@@ -2262,6 +2430,7 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
+&mut peer_quality,
 &mut peer_score,
     &mut quarantine,
     &mut rid_to_hash,
@@ -2331,6 +2500,12 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
     connected_peers.store(connected.len(), Ordering::Relaxed);
     mark_peer_change(&last_peer_change_unix);
 
+{
+    let q = peer_quality.entry(peer_id).or_default();
+    q.dial_success = q.dial_success.saturating_add(1);
+    q.last_seen_unix = unix_now();
+}
+
 if !is_quarantined(&quarantine, &peer_id) {
     maybe_send_bootstrap_requests(
         &mut swarm,
@@ -2349,6 +2524,11 @@ SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
     println!("[p2p] OutgoingConnectionError peer={:?} err={:?}", peer_id, error);
 
     if let Some(pid) = peer_id {
+
+{
+    let q = peer_quality.entry(pid).or_default();
+    q.dial_failure = q.dial_failure.saturating_add(1);
+}
 
 
 for addr in take_pending_dials(&mut pending_dials, &pid) {
@@ -2610,6 +2790,7 @@ let _ = pump_blocks(
     &providers,
     &mut bad_providers,
     &bans,
+&mut peer_quality,
 &mut peer_score,
     &mut quarantine,
     &mut rid_to_hash,
@@ -2754,12 +2935,14 @@ SyncRequest::GetTip => {
 
 let resp = match request {
     SyncRequest::GetPeers { max } => {
-        let peers = export_peer_strings(
-            peer_id,
-            peer,
-            &known_addrs,
-            (max as usize).min(MAX_PEERS_IN_EXCHANGE),
-        );
+
+let peers = export_peer_strings(
+    peer_id,
+    peer,
+    &known_addrs,
+    &peer_quality,
+    (max as usize).min(MAX_PEERS_IN_EXCHANGE),
+);
         SyncResponse::Peers { peers }
     }
 
@@ -2794,6 +2977,15 @@ let mut resp = resp;
                                             match response {
 
 SyncResponse::Tip { hash: hash, height, chainwork } => {
+
+{
+    let q = peer_quality.entry(peer).or_default();
+    q.good_tip = q.good_tip.saturating_add(1);
+    q.last_seen_unix = unix_now();
+    q.last_tip_height = height;
+    q.last_tip_work = chainwork;
+}
+
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
@@ -2906,6 +3098,12 @@ if better_fork_tip(chainwork, &hash, local_w, &locator_tip) {
         mark_tip_seen(&last_tip_seen_unix);
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
     }
+
+if !headers.is_empty() {
+    let q = peer_quality.entry(peer).or_default();
+    q.good_headers = q.good_headers.saturating_add(headers.len() as u64);
+    q.last_seen_unix = unix_now();
+}
 
     if sync_peer.is_none() {
         sync_peer = Some(peer);
@@ -3124,6 +3322,7 @@ let best_tip_now = recompute_best_peer_tip(
         &providers,
         &mut bad_providers,
         &bans,
+&mut peer_quality,
         &mut peer_score,
         &mut quarantine,
         &mut rid_to_hash,
@@ -3192,6 +3391,12 @@ if let Some(peers) = bad_providers.get_mut(&bh) {
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
         continue;
     }
+
+{
+    let q = peer_quality.entry(peer).or_default();
+    q.good_block = q.good_block.saturating_add(1);
+    q.last_seen_unix = unix_now();
+}
 
     // ---- lock only for raw-block store + header index ----
     {
@@ -3275,6 +3480,7 @@ let best_tip_now = recompute_best_peer_tip(
         &providers,
         &mut bad_providers,
         &bans,
+&mut peer_quality,
         &mut peer_score,
         &mut quarantine,
         &mut rid_to_hash,
@@ -3301,7 +3507,7 @@ save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
     // Try dialing newly learned peers.
 
 let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
-peer_ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
 for pid in peer_ids {
     if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) {
@@ -3414,6 +3620,12 @@ let _ = compact_and_log_want_queue(
 
 Event::OutboundFailure { peer, request_id, error } => {
     println!("[sync] outbound failure to {}: {:?}", peer, error);
+
+{
+    let q = peer_quality.entry(peer).or_default();
+    q.timeout = q.timeout.saturating_add(1);
+    q.last_seen_unix = unix_now();
+}
 
     if let Some(h) = rid_to_hash.remove(&request_id) {
         inflight.remove(&h);
