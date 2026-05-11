@@ -209,6 +209,10 @@ pub enum Commands {
         /// Comma-separated bootnode multiaddrs
         #[arg(long, default_value = "")]
         bootnodes: String,
+        
+        /// Run in bootnode mode: prioritize fresh syncing peers and evict old idle near-tip peers
+        #[arg(long)]
+        bootnode: bool,
 
     },
 
@@ -1231,6 +1235,7 @@ Commands::Node {
     genesis,
     p2p_listen,
     bootnodes,
+    bootnode,
 } => {
 
             
@@ -1282,8 +1287,9 @@ Commands::Node {
                 listen: listen_ma,
                 bootnodes: boots,
                 genesis_hash,
-                is_bootnode: !mine,
+                is_bootnode: bootnode,            
             };
+    println!("[p2p] bootnode mode: {}", bootnode);
 
             // Start P2P and keep a handle for miner gating
             let net = crate::net::node::spawn_p2p(
