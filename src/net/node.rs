@@ -78,6 +78,10 @@ const BAD_PROVIDER_RETRY_SECS: u64 = 120;
 const QUAR_SECS: u64 = 5 * 60;
 const QUAR_SCORE_THRESHOLD: i32 = -30;
 
+const SCORE_BAD_STALE_PEER: i32 = -2;
+const STALE_PEER_LAG_BLOCKS: u64 = 12;
+const STALE_PEER_PENALTY_COOLDOWN_SECS: u64 = 60;
+
 // ----------------- dial backoff tuning -----------------
 
 const REDIAL_EVERY_SECS: u64 = 30;
@@ -1290,6 +1294,42 @@ fn recompute_best_peer_tip(
         .unwrap_or([0u8; 32])
 }
 
+fn penalize_stale_peers(
+    connected: &HashSet<PeerId>,
+    peer_heights: &HashMap<PeerId, u64>,
+    peer_work: &HashMap<PeerId, u128>,
+    peer_score: &mut HashMap<PeerId, i32>,
+    quarantine: &mut HashMap<PeerId, Instant>,
+    last_stale_penalty_at: &mut HashMap<PeerId, Instant>,
+    best_height: u64,
+    best_work: u128,
+) {
+    if best_height < STALE_PEER_LAG_BLOCKS || best_work == 0 {
+        return;
+    }
+
+    for p in connected.iter().copied() {
+        let h = *peer_heights.get(&p).unwrap_or(&0);
+        let w = *peer_work.get(&p).unwrap_or(&0);
+
+        if w > 0
+            && w < best_work
+            && h.saturating_add(STALE_PEER_LAG_BLOCKS) < best_height
+        {
+let due = last_stale_penalty_at
+    .get(&p)
+    .map(|t| t.elapsed().as_secs() >= STALE_PEER_PENALTY_COOLDOWN_SECS)
+    .unwrap_or(true);
+
+if due {
+    bump_score(peer_score, quarantine, p, SCORE_BAD_STALE_PEER);
+    last_stale_penalty_at.insert(p, Instant::now());
+}
+
+        }
+    }
+}
+
 fn maybe_send_bootstrap_requests(
     swarm: &mut Swarm<Behaviour>,
     peer: PeerId,
@@ -2304,6 +2344,7 @@ let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let mut last_bootstrap_req_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_disconnect_at: HashMap<PeerId, Instant> = HashMap::new();
+let mut last_stale_penalty_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let p2p_started_at = Instant::now();
 
@@ -2417,6 +2458,17 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
 *best_peer_work.write().await = best_w;
+
+penalize_stale_peers(
+    &connected,
+    &peer_heights,
+    &peer_work,
+    &mut peer_score,
+    &mut quarantine,
+    &mut last_stale_penalty_at,
+    best_h,
+    best_w,
+);
 
 let (_local_tip, local_height, _local_work) = local_tip_and_work(&db);
 
@@ -2703,6 +2755,8 @@ SwarmEvent::Dialing { peer_id, connection_id } => {
                          peer_tips.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
 
+last_stale_penalty_at.remove(&peer_id);
+
 connected_since.remove(&peer_id);
 last_sync_request_from.remove(&peer_id);
 
@@ -2835,14 +2889,20 @@ if let Some(p) = src {
     providers.entry(h).or_insert(p);
 }
 
+let mut newly_indexed_header = false;
+
 {
     let _g = chain_lock.lock();
 
     if get_hidx(&db, &h)?.is_none() {
         if gh.header.prev == [0u8; 32] {
-            let _ = index_header(&db, &gh.header, None);
+            if index_header(&db, &gh.header, None).is_ok() {
+                newly_indexed_header = true;
+            }
         } else if let Some(parent) = get_hidx(&db, &gh.header.prev)? {
-            let _ = index_header(&db, &gh.header, Some(&parent));
+            if index_header(&db, &gh.header, Some(&parent)).is_ok() {
+                newly_indexed_header = true;
+            }
         } else if let Some(p) = src {
             let tip = get_tip(&db)?.unwrap_or([0u8; 32]);
             let locator = build_locator(&db, &tip);
@@ -2864,6 +2924,10 @@ if let Some(p) = src {
             continue;
         }
     }
+}
+
+if newly_indexed_header {
+    let _ = publish_header(&mut swarm, gh.header.clone());
 }
 
                                 if let Some(p) = src {
@@ -3257,28 +3321,45 @@ if !headers.is_empty() {
 
         providers.entry(h).or_insert(peer);
 
-        let idx_res = {
-            let _g = chain_lock.lock();
+let mut newly_indexed_header = false;
 
-            if hdr.prev == [0u8; 32] {
-                index_header(&db, &hdr, None)
-            } else {
-                let parent = get_hidx(&db, &hdr.prev)?;
-                let Some(p) = parent else {
-                    // Parent header not known locally yet; skip this header for now.
-                    continue;
-                };
-                index_header(&db, &hdr, Some(&p))
-            }
+let idx_res = {
+    let _g = chain_lock.lock();
+
+    if get_hidx(&db, &h)?.is_some() {
+        Ok(())
+    } else if hdr.prev == [0u8; 32] {
+        let r = index_header(&db, &hdr, None);
+        if r.is_ok() {
+            newly_indexed_header = true;
+        }
+        r.map(|_| ())
+    } else {
+        let parent = get_hidx(&db, &hdr.prev)?;
+        let Some(p) = parent else {
+            continue;
         };
 
-        if idx_res.is_err() {
-            note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
-            bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
-            continue;
+        let r = index_header(&db, &hdr, Some(&p));
+        if r.is_ok() {
+            newly_indexed_header = true;
         }
+        r.map(|_| ())
+    }
+};
 
-        indexed_batch.push((h, hdr.clone()));
+if idx_res.is_err() {
+    note_invalid(&mut buckets, &mut bans, peer, "headers: index_header failed");
+    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_INVALID);
+    continue;
+}
+
+// Relay valid/indexed headers immediately.
+// This improves global propagation and reduces orphan advantage.
+if newly_indexed_header {
+    let _ = publish_header(&mut swarm, hdr.clone());
+}
+indexed_batch.push((h, hdr.clone()));
 
         if let Ok(Some(hi2)) = get_hidx(&db, &h) {
 
