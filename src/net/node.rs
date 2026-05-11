@@ -89,11 +89,11 @@ const DIAL_BACKOFF_SECS: u64 = 20;
 
 // ----------------- sync bounds -----------------
 
-const MAX_HEADERS_PER_SYNC: u64 = 1024;
+const MAX_HEADERS_PER_SYNC: u64 = 4096;
 const MAX_LOCATOR_LEN: usize = 128;
-const MAX_INFLIGHT_BLOCKS: usize = 8;
+const MAX_INFLIGHT_BLOCKS: usize = 32;
 const MAX_WANT_QUEUE: usize = 20_000;
-const BLOCK_REQ_TIMEOUT_SECS: u64 = 90;
+const BLOCK_REQ_TIMEOUT_SECS: u64 = 20;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 128;
 const PEER_REQ_ON_CONNECT: u16 = 128;
@@ -103,7 +103,7 @@ const BOOTSTRAP_REQ_COOLDOWN_SECS: u64 = 30;
 const PEER_DISCONNECT_COOLDOWN_SECS: u64 = 20;
 
 const COLD_START_SECS: u64 = 180;
-const COLD_START_MIN_PEERS: usize = 24;
+const COLD_START_MIN_PEERS: usize = 12;
 
 const MIN_OUTBOUND_PEERS: usize = 8;
 const PEERS_FILE: &str = "peers.txt";
@@ -116,9 +116,9 @@ const STARTUP_PREFERRED_PEERS: usize = 16;
 
 const BOOTNODE_MAX_CONNECTED: usize = 48;
 const BOOTNODE_TARGET_CONNECTED: usize = 36;
-const BOOTNODE_PROTECT_NEW_SECS: u64 = 120;
-const BOOTNODE_IDLE_EVICT_SECS: u64 = 300;
-const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
+const BOOTNODE_PROTECT_NEW_SECS: u64 = 20;
+const BOOTNODE_IDLE_EVICT_SECS: u64 = 60;
+const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 20;
 
 // ----------------- time helpers -----------------
 
@@ -283,6 +283,13 @@ fn maybe_evict_bootnode_peers(
         return;
     }
 
+println!(
+    "[bootnode] over capacity: connected={} max={} target={}",
+    connected.len(),
+    BOOTNODE_MAX_CONNECTED,
+    BOOTNODE_TARGET_CONNECTED
+);
+
     let now = Instant::now();
 
     let mut candidates: Vec<(PeerId, u8, u64)> = Vec::new();
@@ -333,12 +340,28 @@ fn maybe_evict_bootnode_peers(
 
     let over = connected.len().saturating_sub(BOOTNODE_TARGET_CONNECTED);
 
+let selected: Vec<_> = candidates.into_iter().take(over).collect();
+
     for (p, class, age) in candidates.into_iter().take(over) {
         println!(
             "[bootnode] evicting peer {} class={} age={}s to free bootstrap capacity",
             p, class, age
         );
         let _ = swarm.disconnect_peer_id(p);
+    }
+
+if selected.len() < over {
+
+    let mut fallback: Vec<PeerId> = connected.iter().copied().collect();
+
+    fallback.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+
+    for p in fallback.into_iter().take(over - selected.len()) {
+
+        println!("[bootnode] hard-cap evicting peer {}", p);
+
+        let _ = swarm.disconnect_peer_id(p);
+
     }
 }
 
