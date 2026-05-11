@@ -283,14 +283,15 @@ fn maybe_evict_bootnode_peers(
         return;
     }
 
-println!(
-    "[bootnode] over capacity: connected={} max={} target={}",
-    connected.len(),
-    BOOTNODE_MAX_CONNECTED,
-    BOOTNODE_TARGET_CONNECTED
-);
+    println!(
+        "[bootnode] over capacity: connected={} max={} target={}",
+        connected.len(),
+        BOOTNODE_MAX_CONNECTED,
+        BOOTNODE_TARGET_CONNECTED
+    );
 
     let now = Instant::now();
+    let over = connected.len().saturating_sub(BOOTNODE_TARGET_CONNECTED);
 
     let mut candidates: Vec<(PeerId, u8, u64)> = Vec::new();
 
@@ -325,10 +326,7 @@ println!(
             continue;
         }
 
-        // Higher class gets evicted first.
-        // 2 = old + near tip, 1 = old idle, 0 = fallback.
         let class = if near_tip { 2 } else { 1 };
-
         candidates.push((p, class, age));
     }
 
@@ -338,11 +336,9 @@ println!(
             .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
     });
 
-    let over = connected.len().saturating_sub(BOOTNODE_TARGET_CONNECTED);
+    let selected: Vec<(PeerId, u8, u64)> = candidates.into_iter().take(over).collect();
 
-let selected: Vec<_> = candidates.into_iter().take(over).collect();
-
-    for (p, class, age) in candidates.into_iter().take(over) {
+    for (p, class, age) in selected.iter().copied() {
         println!(
             "[bootnode] evicting peer {} class={} age={}s to free bootstrap capacity",
             p, class, age
@@ -350,18 +346,14 @@ let selected: Vec<_> = candidates.into_iter().take(over).collect();
         let _ = swarm.disconnect_peer_id(p);
     }
 
-if selected.len() < over {
+    if selected.len() < over {
+        let mut fallback: Vec<PeerId> = connected.iter().copied().collect();
+        fallback.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 
-    let mut fallback: Vec<PeerId> = connected.iter().copied().collect();
-
-    fallback.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
-
-    for p in fallback.into_iter().take(over - selected.len()) {
-
-        println!("[bootnode] hard-cap evicting peer {}", p);
-
-        let _ = swarm.disconnect_peer_id(p);
-
+        for p in fallback.into_iter().take(over - selected.len()) {
+            println!("[bootnode] hard-cap evicting peer {}", p);
+            let _ = swarm.disconnect_peer_id(p);
+        }
     }
 }
 
