@@ -1242,10 +1242,8 @@ fn recompute_best_peer_metrics(
         let h = *peer_heights.get(p).unwrap_or(&0);
         let w = *peer_work.get(p).unwrap_or(&0);
 
-        if h > best_h {
+        if w > best_w || (w == best_w && h > best_h) {
             best_h = h;
-            best_w = w;
-        } else if h == best_h && w > best_w {
             best_w = w;
         }
     }
@@ -1977,6 +1975,20 @@ fn handle_gossipsub_event(event: &OutEvent) -> Option<(Option<PeerId>, Vec<u8>, 
     }
 }
 
+fn publish_header(swarm: &mut Swarm<Behaviour>, header: BlockHeader) -> Result<()> {
+    let gh = GossipHeader { header };
+    let bytes = crate::codec::consensus_bincode().serialize(&gh)?;
+
+    if bytes.len() <= MAX_GOSSIP_MSG_BYTES {
+        let _ = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(IdentTopic::new(TOPIC_HDR), bytes);
+    }
+
+    Ok(())
+}
+
 fn as_rr_event(event: OutEvent) -> Option<request_response::Event<SyncRequest, SyncResponse>> {
     match event {
         OutEvent::Rr(ev) => Some(ev),
@@ -2538,13 +2550,9 @@ let _ = pump_blocks(
 
             }
 
-            Some(ev) = mined_rx.recv() => {
-                let gh = GossipHeader { header: ev.header };
-                let bytes = crate::codec::consensus_bincode().serialize(&gh)?;
-                if bytes.len() <= MAX_GOSSIP_MSG_BYTES {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(IdentTopic::new(TOPIC_HDR), bytes);
-                }
-            }
+Some(ev) = mined_rx.recv() => {
+    let _ = publish_header(&mut swarm, ev.header);
+}
 
             Some(ev) = tx_gossip_rx.recv() => {
                 if let Ok(tx_bytes) = crate::codec::consensus_bincode().serialize(&ev.tx) {
@@ -3100,9 +3108,24 @@ SyncResponse::Tip { hash: hash, height, chainwork } => {
     mark_tip_seen(&last_tip_seen_unix);
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 
-peer_heights.insert(peer, height);
-peer_work.insert(peer, chainwork);
-peer_tips.insert(peer, hash);
+// A peer's Tip response is only an advertisement.
+// It must NOT become trusted best-peer state unless we have indexed that header.
+if hash == [0u8; 32] {
+    peer_heights.insert(peer, 0);
+    peer_work.insert(peer, 0);
+    peer_tips.insert(peer, hash);
+} else if let Ok(Some(hi)) = get_hidx(&db, &hash) {
+    peer_heights.insert(peer, hi.height);
+    peer_work.insert(peer, hi.chainwork);
+    peer_tips.insert(peer, hash);
+
+} else {
+    // Unknown advertised tip: request headers only.
+    // Do not let unindexed peer claims affect miner gating.
+    peer_heights.remove(&peer);
+    peer_work.remove(&peer);
+    peer_tips.remove(&peer);
+}
 
 let (best_h, best_w) = recompute_best_peer_metrics(
     &connected,
@@ -3527,10 +3550,13 @@ if let Some(peers) = bad_providers.get_mut(&bh) {
             index_header(&db, &block.header, None)
         } else if let Some(p) = get_hidx(&db, &block.header.prev)? {
             index_header(&db, &block.header, Some(&p))
-        } else {
-            // parent header not known yet; keep raw block pending
-            pending_apply.insert(bh, block);
-            continue;
+
+} else {
+    // parent header not known yet; keep raw block pending
+    pending_apply.insert(bh, block);
+    continue;
+};
+
         };
 
         if idx_res.is_err() {
@@ -3562,6 +3588,10 @@ if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
     }
 }
     }
+
+// We now possess the full block and indexed its header,
+// so it is safe to relay the header as a real provider.
+let _ = publish_header(&mut swarm, block.header.clone());
 
 let best_tip_now = recompute_best_peer_tip(
     &connected,
