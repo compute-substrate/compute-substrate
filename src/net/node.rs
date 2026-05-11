@@ -113,9 +113,9 @@ const PEER_SCORES_FILE: &str = "peer_scores.txt";
 
 const STARTUP_PREFERRED_PEERS: usize = 16;
 
-const MAX_CONNECTED_PEERS: usize = 64;
-const TARGET_CONNECTED_PEERS: usize = 48;
-const PROTECT_NEW_PEER_SECS: u64 = 20;
+const MAX_CONNECTED_PEERS: usize = 256;
+const TARGET_CONNECTED_PEERS: usize = 128;
+const PROTECT_NEW_PEER_SECS: u64 = 60;
 
 
 const BOOTNODE_MAX_CONNECTED: usize = 48;
