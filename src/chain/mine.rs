@@ -23,6 +23,11 @@ atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::thread;
+use std::collections::HashSet;
+
+const MINER_BLOCK_SIZE_SAFETY_BYTES: usize = 16 * 1024;
+
+
 
 /// Bitcoin-ish merkle root from txids.
 /// - leaves are txid bytes
@@ -203,7 +208,7 @@ fn build_template(
         miner_h160,
         height,
         max_mempool_txs,
-        MAX_BLOCK_BYTES,
+        MAX_BLOCK_BYTES.saturating_sub(MINER_BLOCK_SIZE_SAFETY_BYTES),
     )
 }
 
@@ -253,27 +258,23 @@ fn build_template_with_byte_cap(
     }
 
     // feerate desc; tie-break by txid ASC
-    candidates.sort_by(|a, b| match b.0.cmp(&a.0) {
-        std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-        o => o,
-    });
+candidates.sort_by(|a, b| {
+    use std::cmp::Ordering;
 
-    // Ensure proposals are always included before attests.
-    // Without this, attests can reference proposals not yet applied in the same block.
-    candidates.sort_by(|a, b| {
-        use std::cmp::Ordering;
+    let prio = |tx: &Transaction| match &tx.app {
+        AppPayload::Propose { .. } => 0u8,
+        AppPayload::Attest { .. } => 1u8,
+        _ => 2u8,
+    };
 
-        let prio = |tx: &Transaction| match &tx.app {
-            AppPayload::Propose { .. } => 0u8,
-            AppPayload::Attest { .. } => 1u8,
-            _ => 2u8,
-        };
-
-        match prio(&a.2).cmp(&prio(&b.2)) {
-            Ordering::Equal => Ordering::Equal, // keep fee ordering within same class
+    match prio(&a.2).cmp(&prio(&b.2)) {
+        Ordering::Equal => match b.0.cmp(&a.0) {
+            Ordering::Equal => a.1.cmp(&b.1),
             o => o,
-        }
-    });
+        },
+        o => o,
+    }
+});
 
 let entropy = miner_entropy();
 let cb_placeholder = coinbase(miner_h160, reward, height, Some(&entropy));
@@ -287,6 +288,8 @@ let cb_placeholder = coinbase(miner_h160, reward, height, Some(&entropy));
     let mut included_ids: Vec<Hash32> = Vec::with_capacity(max_mempool_txs);
     let mut included_bytes: usize = 0;
 
+let mut spent_in_template: HashSet<OutPoint> = HashSet::new();
+
     for (_feerate_ppm, id, tx, fee, tx_bytes_u64) in candidates.into_iter() {
         if included.len() >= max_mempool_txs {
             break;
@@ -294,16 +297,33 @@ let cb_placeholder = coinbase(miner_h160, reward, height, Some(&entropy));
 
         let tx_bytes = tx_bytes_u64 as usize;
 
+
+
         if tx_bytes > remaining {
             continue;
         }
+
+let conflicts_with_template = tx
+    .inputs
+    .iter()
+    .any(|inp| spent_in_template.contains(&inp.prevout));
+
+if conflicts_with_template {
+    continue;
+}
 
         total_fees = total_fees
             .checked_add(fee)
             .ok_or_else(|| anyhow!("fee overflow"))?;
 
-        included_ids.push(id);
-        included.push(tx);
+for inp in &tx.inputs {
+    spent_in_template.insert(inp.prevout.clone());
+}
+
+included_ids.push(id);
+included.push(tx);
+
+
 
         remaining = remaining.saturating_sub(tx_bytes);
         included_bytes = included_bytes.saturating_add(tx_bytes);
@@ -387,6 +407,7 @@ const TIP_CHECK_EVERY_NONCES: u64 = 4_194_304;
     };
 
     let height = parent_hi_opt.as_ref().map(|h| h.height + 1).unwrap_or(0);
+
     let _epoch = epoch_of(height);
 
     let (mut txs, mut included_ids, _fees) =
@@ -434,13 +455,15 @@ thread::scope(|scope| {
 
         scope.spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                std::thread::sleep(std::time::Duration::from_millis(50));
 
                 let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
                 if cur_tip != parent_tip {
                     stale.store(true, Ordering::Relaxed);
                     stop.store(true, Ordering::Relaxed);
-                    let _ = tx_found.send(MineMsg::Stale);
+if tx_found.send(MineMsg::Stale).is_err() {
+    return;
+}
                     return;
                 }
             }
@@ -470,6 +493,9 @@ wtxs[0]
 
 whdr.merkle = merkle_root(&wtxs);
 
+let base_script_sig = wtxs[0].inputs[0].script_sig.clone();
+
+
         // Split nonce space across workers.
         whdr.nonce = worker_id as u32;
         let step = workers as u32;
@@ -480,22 +506,31 @@ scope.spawn(move || {
     let mut extra_nonce: u64 = 0;
 
     loop {
-        if stop.load(Ordering::Relaxed) || stale.load(Ordering::Relaxed) {
-            return;
-        }
+if stop.load(Ordering::Relaxed) || stale.load(Ordering::Relaxed) {
+    if checks > 0 {
+        hash_counter.fetch_add(checks, Ordering::Relaxed);
+    }
+    return;
+}
 
         let h = header_hash(&whdr);
 
 if pow_target.check(&h) {
 
-            stop.store(true, Ordering::Relaxed);
+    if checks > 0 {
+        hash_counter.fetch_add(checks, Ordering::Relaxed);
+    }
 
-            let block = Block {
+    stop.store(true, Ordering::Relaxed);
+
+    let block = Block {
                 header: whdr.clone(),
                 txs: wtxs.clone(),
             };
 
-            let _ = tx_found.send(MineMsg::Found(h, block));
+if tx_found.send(MineMsg::Found(h, block)).is_err() {
+    return;
+}
             return;
         }
 
@@ -509,8 +544,12 @@ if whdr.nonce < old_nonce {
 
     let marker = extra_nonce.to_le_bytes();
 
+    wtxs[0].inputs[0].script_sig = base_script_sig.clone();
     wtxs[0].inputs[0].script_sig.push(0x00);
-    wtxs[0].inputs[0].script_sig.extend_from_slice(&marker);
+    wtxs[0]
+        .inputs[0]
+        .script_sig
+        .extend_from_slice(&marker);
 
     whdr.merkle = merkle_root(&wtxs);
     whdr.nonce = worker_id as u32;
@@ -532,6 +571,18 @@ if whdr.nonce < old_nonce {
 
 Ok(MineMsg::Found(h, block)) => {
     let solved_hdr = block.header.clone();
+
+if header_hash(&solved_hdr) != h {
+    return Err(anyhow!("solved block hash/header mismatch"));
+}
+
+if solved_hdr.merkle != merkle_root(&block.txs) {
+    return Err(anyhow!("solved block merkle mismatch"));
+}
+
+if !pow_target.check(&h) {
+    return Err(anyhow!("solved block failed local pow check"));
+}
 
             let _g = chain_lock.lock();
 
