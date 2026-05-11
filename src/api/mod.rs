@@ -30,6 +30,7 @@ pub struct ApiState {
     // IMPORTANT: must be GossipTxEvent so node.rs can publish it to gossipsub
     pub tx_gossip: tokio::sync::mpsc::UnboundedSender<GossipTxEvent>,
 pub connected_peers: Arc<AtomicUsize>,
+pub known_peers: Arc<AtomicUsize>,
 pub peer_id: PeerId,
 }
 
@@ -47,6 +48,7 @@ struct HealthResp {
     pub height: u64,
     pub chainwork: String,
 pub peer_count: usize,
+pub known_peers: usize,
     pub mempool_tx_count: usize,
     pub mempool_spent_outpoints: usize,
     pub mempool_bytes: usize,
@@ -59,6 +61,7 @@ struct P2pInfoResp {
     pub ok: bool,
     pub peer_id: String,
     pub peer_count: usize,
+    pub known_peers: usize,
 }
 
 #[derive(Serialize)]
@@ -68,6 +71,7 @@ struct MetricsResp {
     pub height: u64,
     pub chainwork: String,
 pub peer_count: usize,
+pub known_peers: usize,
     pub mempool_tx_count: usize,
     pub mempool_spent_outpoints: usize,
     pub mempool_bytes: usize,
@@ -310,6 +314,7 @@ pub fn router(
     mempool: Arc<Mempool>,
     tx_gossip: tokio::sync::mpsc::UnboundedSender<GossipTxEvent>,
 connected_peers: Arc<AtomicUsize>,
+known_peers: Arc<AtomicUsize>,
 peer_id: PeerId,
 ) -> Router {
     let st = ApiState {
@@ -317,6 +322,7 @@ peer_id: PeerId,
         mempool,
         tx_gossip,
 connected_peers,
+known_peers,
 peer_id,
     };
 
@@ -384,6 +390,7 @@ async fn health(State(st): State<ApiState>) -> Json<HealthResp> {
         height: hi.height,
         chainwork: hi.chainwork.to_string(),
   peer_count: st.connected_peers.load(Ordering::Relaxed),
+known_peers: st.known_peers.load(Ordering::Relaxed),
         mempool_tx_count: s.txs,
         mempool_spent_outpoints: s.spent_len,
         mempool_bytes: s.total_bytes,
@@ -491,6 +498,7 @@ async fn peers(State(st): State<ApiState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
         "peer_count": st.connected_peers.load(Ordering::Relaxed),
+ "known_peers": st.known_peers.load(Ordering::Relaxed),
     }))
 }
 
@@ -499,6 +507,7 @@ async fn p2p_info(State(st): State<ApiState>) -> Json<P2pInfoResp> {
         ok: true,
         peer_id: st.peer_id.to_string(),
         peer_count: st.connected_peers.load(Ordering::Relaxed),
+known_peers: st.known_peers.load(Ordering::Relaxed),
     })
 }
 
