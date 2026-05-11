@@ -116,7 +116,7 @@ const STARTUP_PREFERRED_PEERS: usize = 16;
 const MAX_CONNECTED_PEERS: usize = 128;
 const TARGET_CONNECTED_PEERS: usize = 96;
 const PROTECT_NEW_PEER_SECS: u64 = 60;
-
+const PEER_CAP_BURST: usize = 64;
 
 const BOOTNODE_MAX_CONNECTED: usize = 512;
 const BOOTNODE_TARGET_CONNECTED: usize = 384;
@@ -2784,7 +2784,7 @@ let max_connected = if cfg.is_bootnode {
     MAX_CONNECTED_PEERS
 };
 
-if connected.len() > max_connected {
+if connected.len() > max_connected.saturating_add(PEER_CAP_BURST) {
     println!(
         "[p2p] over hard cap after connect: connected={} max={}, disconnecting {}",
         connected.len(),
