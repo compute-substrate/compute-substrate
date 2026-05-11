@@ -379,9 +379,16 @@ fn miner_thread_count() -> usize {
         }
     }
 
-    std::thread::available_parallelism()
+    let cores = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(1)
+        .unwrap_or(1);
+
+    let reserve = std::env::var("CSD_MINER_RESERVED_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+
+    cores.saturating_sub(reserve).max(1)
 }
 
 /// Mine exactly one block.
@@ -397,8 +404,7 @@ pub fn mine_one(
     chain_lock: &ChainLock,
 ) -> Result<Hash32> {
 
-const TIP_CHECK_EVERY_NONCES: u64 = 262_144;
-const TIME_REFRESH_EVERY_NONCES: u64 = 1_048_576;
+const HASH_COUNTER_FLUSH_EVERY_NONCES: u64 = 4_194_304;
 
     
     let parent_tip: Hash32 = get_tip(db)?.unwrap_or([0u8; 32]);
@@ -457,7 +463,7 @@ thread::scope(|scope| {
 
         scope.spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(200));
 
                 let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
                 if cur_tip != parent_tip {
@@ -559,22 +565,9 @@ if whdr.nonce < old_nonce {
 
         checks = checks.wrapping_add(1);
 
-if checks >= TIP_CHECK_EVERY_NONCES {
+if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
     hash_counter.fetch_add(checks, Ordering::Relaxed);
     checks = 0;
-
-    let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
-    if cur_tip != parent_tip {
-        stale.store(true, Ordering::Relaxed);
-        stop.store(true, Ordering::Relaxed);
-        return;
-    }
-
-    let new_time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
-    if new_time != whdr.time {
-        whdr.time = new_time;
-        whdr.nonce = worker_id as u32;
-    }
 }
 
     }
