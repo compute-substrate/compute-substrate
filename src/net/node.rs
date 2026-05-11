@@ -3170,7 +3170,7 @@ SyncResponse::Tip { hash: hash, height, chainwork } => {
 }
 
     mark_tip_seen(&last_tip_seen_unix);
-    bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
+
 
 // A peer's Tip response is only an advertisement.
 // It must NOT become trusted best-peer state unless we have indexed that header.
@@ -3178,6 +3178,7 @@ if hash == [0u8; 32] {
     peer_heights.insert(peer, 0);
     peer_work.insert(peer, 0);
     peer_tips.insert(peer, hash);
+bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_TIP);
 } else if let Ok(Some(hi)) = get_hidx(&db, &hash) {
     peer_heights.insert(peer, hi.height);
     peer_work.insert(peer, hi.chainwork);
@@ -3255,7 +3256,7 @@ sync_peer = next_sync_peer;
     let locator_tip = applied_tip;
 
 if better_fork_tip(chainwork, &hash, local_w, &locator_tip) {
-    sync_peer = Some(peer);
+
         let locator = build_locator(&db, &locator_tip);
         let locator_len = locator.len();
 
