@@ -91,9 +91,9 @@ const DIAL_BACKOFF_SECS: u64 = 20;
 
 const MAX_HEADERS_PER_SYNC: u64 = 4096;
 const MAX_LOCATOR_LEN: usize = 128;
-const MAX_INFLIGHT_BLOCKS: usize = 32;
+const MAX_INFLIGHT_BLOCKS: usize = 16;
 const MAX_WANT_QUEUE: usize = 20_000;
-const BLOCK_REQ_TIMEOUT_SECS: u64 = 20;
+const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 128;
 const PEER_REQ_ON_CONNECT: u16 = 128;
@@ -112,6 +112,10 @@ const SAVE_PEERS_EVERY_SECS: u64 = 30;
 const PEER_SCORES_FILE: &str = "peer_scores.txt";
 
 const STARTUP_PREFERRED_PEERS: usize = 16;
+
+const MAX_CONNECTED_PEERS: usize = 64;
+const TARGET_CONNECTED_PEERS: usize = 48;
+const PROTECT_NEW_PEER_SECS: u64 = 20;
 
 
 const BOOTNODE_MAX_CONNECTED: usize = 48;
@@ -354,6 +358,78 @@ fn maybe_evict_bootnode_peers(
             println!("[bootnode] hard-cap evicting peer {}", p);
             let _ = swarm.disconnect_peer_id(p);
         }
+    }
+}
+
+fn maybe_evict_excess_peers(
+    swarm: &mut Swarm<Behaviour>,
+    cfg: &NetConfig,
+    connected: &HashSet<PeerId>,
+    connected_since: &HashMap<PeerId, Instant>,
+    peer_score: &HashMap<PeerId, i32>,
+    peer_work: &HashMap<PeerId, u128>,
+) {
+    let max_connected = if cfg.is_bootnode {
+        BOOTNODE_MAX_CONNECTED
+    } else {
+        MAX_CONNECTED_PEERS
+    };
+
+    let target_connected = if cfg.is_bootnode {
+        BOOTNODE_TARGET_CONNECTED
+    } else {
+        TARGET_CONNECTED_PEERS
+    };
+
+    if connected.len() <= max_connected {
+        return;
+    }
+
+    println!(
+        "[p2p] over peer cap: connected={} max={} target={}",
+        connected.len(),
+        max_connected,
+        target_connected
+    );
+
+    let now = Instant::now();
+    let over = connected.len().saturating_sub(target_connected);
+
+    let mut candidates: Vec<(PeerId, i32, u128, u64)> = connected
+        .iter()
+        .copied()
+        .filter_map(|p| {
+            let age = connected_since
+                .get(&p)
+                .map(|t| now.duration_since(*t).as_secs())
+                .unwrap_or(u64::MAX);
+
+            if age < PROTECT_NEW_PEER_SECS {
+                return None;
+            }
+
+            let score = *peer_score.get(&p).unwrap_or(&0);
+            let work = *peer_work.get(&p).unwrap_or(&0);
+
+            Some((p, score, work, age))
+        })
+        .collect();
+
+    // Evict worst first:
+    // lower score first, then lower work, then oldest.
+    candidates.sort_by(|a, b| {
+        a.1.cmp(&b.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+    });
+
+    for (p, score, work, age) in candidates.into_iter().take(over) {
+        println!(
+            "[p2p] cap evicting peer {} score={} work={} age={}s",
+            p, score, work, age
+        );
+        let _ = swarm.disconnect_peer_id(p);
     }
 }
 
@@ -875,6 +951,7 @@ pub struct NetConfig {
 pub struct NetHandle {
     pub peer_id: PeerId,
     pub connected_peers: Arc<AtomicUsize>,
+    pub known_peers: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
     best_peer_height: Arc<AtomicU64>,
@@ -884,6 +961,11 @@ pub struct NetHandle {
 }
 
 impl NetHandle {
+
+pub fn known_peers(&self) -> usize {
+    self.known_peers.load(Ordering::Relaxed)
+}
+
     pub fn connected_peers(&self) -> usize {
         self.connected_peers.load(Ordering::Relaxed)
     }
@@ -2065,6 +2147,7 @@ pub async fn spawn_p2p(
     let peer_id = PeerId::from(local_key.public());
 
 let connected_peers = Arc::new(AtomicUsize::new(0));
+let known_peers = Arc::new(AtomicUsize::new(0));
 let last_tip_seen_unix = Arc::new(AtomicU64::new(0));
 let last_peer_change_unix = Arc::new(AtomicU64::new(unix_now()));
 let best_peer_height = Arc::new(AtomicU64::new(0));
@@ -2076,6 +2159,7 @@ let listen_addr = Arc::new(RwLock::new(None));
 let handle = NetHandle {
     peer_id,
     connected_peers: connected_peers.clone(),
+    known_peers: known_peers.clone(),
     last_tip_seen_unix: last_tip_seen_unix.clone(),
     last_peer_change_unix: last_peer_change_unix.clone(),
     best_peer_height: best_peer_height.clone(),
@@ -2093,6 +2177,7 @@ if let Err(e) = run_p2p_loop(
     local_key,
     peer_id,
     connected_peers,
+    known_peers,
     last_tip_seen_unix,
     last_peer_change_unix,
     best_peer_height,
@@ -2133,6 +2218,7 @@ async fn run_p2p_loop(
     local_key: identity::Keypair,
     peer_id: PeerId,
     connected_peers: Arc<AtomicUsize>,
+     known_peers_atomic: Arc<AtomicUsize>,
     last_tip_seen_unix: Arc<AtomicU64>,
     last_peer_change_unix: Arc<AtomicU64>,
     best_peer_height_atomic: Arc<AtomicU64>,
@@ -2233,6 +2319,8 @@ let behaviour = Behaviour {
 
 let mut known_addrs: HashMap<PeerId, HashSet<Multiaddr>> =
     load_known_addrs(&cfg.datadir, peer_id);
+
+known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
 
 let mut peer_quality: HashMap<PeerId, PeerQuality> =
     load_peer_quality(&cfg.datadir);
@@ -2375,6 +2463,9 @@ prune_addr_backoff(&mut addr_backoff);
 
 if last_peer_save.elapsed() >= Duration::from_secs(SAVE_PEERS_EVERY_SECS) {
     save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
+
+known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
+
     save_peer_quality(&cfg.datadir, &peer_quality);
     last_peer_save = Instant::now();
 }
@@ -2497,6 +2588,15 @@ maybe_evict_bootnode_peers(
     local_height,
 );
 
+maybe_evict_excess_peers(
+    &mut swarm,
+    &cfg,
+    &connected,
+    &connected_since,
+    &peer_score,
+    &peer_work,
+);
+
 // Pick best candidate, but keep current sync_peer unless the candidate is strictly better.
 let candidate_sync_peer = choose_best_sync_peer(
     &connected,
@@ -2542,6 +2642,17 @@ let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
 sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
 for pid in peer_ids {
+
+    let max_connected = if cfg.is_bootnode {
+        BOOTNODE_MAX_CONNECTED
+    } else {
+        MAX_CONNECTED_PEERS
+    };
+
+    if connected.len() >= max_connected {
+        break;
+    }
+
     if pid == peer_id
         || connected.contains(&pid)
         || is_banned(&bans, &pid)
@@ -2667,6 +2778,28 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
         continue;
     }
 
+let max_connected = if cfg.is_bootnode {
+    BOOTNODE_MAX_CONNECTED
+} else {
+    MAX_CONNECTED_PEERS
+};
+
+if connected.len() > max_connected {
+    println!(
+        "[p2p] over hard cap after connect: connected={} max={}, disconnecting {}",
+        connected.len(),
+        max_connected,
+        peer_id
+    );
+
+    connected.remove(&peer_id);
+    conn_refcnt.remove(&peer_id);
+    connected_peers.store(connected.len(), Ordering::Relaxed);
+
+    let _ = swarm.disconnect_peer_id(peer_id);
+    continue;
+}
+
     println!("[p2p] connected: {peer_id}");
     connected_peers.store(connected.len(), Ordering::Relaxed);
     mark_peer_change(&last_peer_change_unix);
@@ -2721,6 +2854,9 @@ for addr in take_pending_dials(&mut pending_dials, &pid) {
             for addr in addrs {
                 println!("[pex] removing refused addr for {} -> {}", pid, addr);
                 remove_known_addr(&mut known_addrs, &pid, &addr);
+
+known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
+
             }
         } else if err_s.contains("InvalidData")
             || err_s.contains("error: Input")
@@ -2843,6 +2979,9 @@ if let OutEvent::Identify(identify::Event::Received { peer_id: remote_peer, info
             if should_store_discovered_addr(peer_id, pid, &full) {
                 insert_known_addr(&mut known_addrs, pid, full.clone());
                 println!("[pex] learned addr for {} -> {}", pid, full);
+
+known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
+
             }
         }
 
@@ -3733,6 +3872,10 @@ SyncResponse::Peers { peers } => {
 
 parse_peer_strings_into_known_addrs(&mut known_addrs, peer_id, peers);
 
+known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
+
+
+
 save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
 
     let after = known_addrs.len();
@@ -3747,6 +3890,17 @@ let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
 sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
 for pid in peer_ids {
+
+    let max_connected = if cfg.is_bootnode {
+        BOOTNODE_MAX_CONNECTED
+    } else {
+        MAX_CONNECTED_PEERS
+    };
+
+    if connected.len() >= max_connected {
+        break;
+    }
+
     if pid == peer_id || connected.contains(&pid) || is_banned(&bans, &pid) {
         continue;
     }
