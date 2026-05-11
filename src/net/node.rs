@@ -113,16 +113,16 @@ const PEER_SCORES_FILE: &str = "peer_scores.txt";
 
 const STARTUP_PREFERRED_PEERS: usize = 16;
 
-const MAX_CONNECTED_PEERS: usize = 256;
-const TARGET_CONNECTED_PEERS: usize = 128;
+const MAX_CONNECTED_PEERS: usize = 128;
+const TARGET_CONNECTED_PEERS: usize = 96;
 const PROTECT_NEW_PEER_SECS: u64 = 60;
 
 
-const BOOTNODE_MAX_CONNECTED: usize = 256;
-const BOOTNODE_TARGET_CONNECTED: usize = 192;
-const BOOTNODE_PROTECT_NEW_SECS: u64 = 20;
-const BOOTNODE_IDLE_EVICT_SECS: u64 = 60;
-const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 20;
+const BOOTNODE_MAX_CONNECTED: usize = 512;
+const BOOTNODE_TARGET_CONNECTED: usize = 384;
+const BOOTNODE_PROTECT_NEW_SECS: u64 = 60;
+const BOOTNODE_IDLE_EVICT_SECS: u64 = 120;
+const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
 
 // ----------------- time helpers -----------------
 
