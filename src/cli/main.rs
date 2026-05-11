@@ -1320,6 +1320,7 @@ println!("[p2p] bootnode mode: {}", is_bootnode);
                 mempool.clone(),
                 tx_gossip_tx.clone(),
                 net.connected_peers.clone(),
+                      net.known_peers.clone(),
                 net.peer_id,
             );
 
