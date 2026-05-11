@@ -3557,7 +3557,6 @@ if let Some(peers) = bad_providers.get_mut(&bh) {
     continue;
 };
 
-        };
 
         if idx_res.is_err() {
             note_invalid(&mut buckets, &mut bans, peer, "block: index_header failed");
