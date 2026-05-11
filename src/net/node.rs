@@ -110,6 +110,12 @@ const PEER_SCORES_FILE: &str = "peer_scores.txt";
 const STARTUP_PREFERRED_PEERS: usize = 16;
 
 
+const BOOTNODE_MAX_CONNECTED: usize = 48;
+const BOOTNODE_TARGET_CONNECTED: usize = 36;
+const BOOTNODE_PROTECT_NEW_SECS: u64 = 120;
+const BOOTNODE_IDLE_EVICT_SECS: u64 = 300;
+const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
+
 // ----------------- time helpers -----------------
 
 fn unix_now() -> u64 {
@@ -256,6 +262,81 @@ fn peer_id_from_multiaddr(a: &Multiaddr) -> Option<PeerId> {
     })
 }
 
+fn maybe_evict_bootnode_peers(
+    swarm: &mut Swarm<Behaviour>,
+    cfg: &NetConfig,
+    connected: &HashSet<PeerId>,
+    connected_since: &HashMap<PeerId, Instant>,
+    last_sync_request_from: &HashMap<PeerId, Instant>,
+    peer_heights: &HashMap<PeerId, u64>,
+    local_height: u64,
+) {
+    if !cfg.is_bootnode {
+        return;
+    }
+
+    if connected.len() <= BOOTNODE_MAX_CONNECTED {
+        return;
+    }
+
+    let now = Instant::now();
+
+    let mut candidates: Vec<(PeerId, u8, u64)> = Vec::new();
+
+    for p in connected.iter().copied() {
+        let age = connected_since
+            .get(&p)
+            .map(|t| now.duration_since(*t).as_secs())
+            .unwrap_or(u64::MAX);
+
+        if age < BOOTNODE_PROTECT_NEW_SECS {
+            continue;
+        }
+
+        let sync_recent = last_sync_request_from
+            .get(&p)
+            .map(|t| now.duration_since(*t).as_secs() < BOOTNODE_SYNC_ACTIVE_SECS)
+            .unwrap_or(false);
+
+        if sync_recent {
+            continue;
+        }
+
+        let ph = *peer_heights.get(&p).unwrap_or(&0);
+        let near_tip = local_height > 0 && ph.saturating_add(2) >= local_height;
+
+        let idle_secs = last_sync_request_from
+            .get(&p)
+            .map(|t| now.duration_since(*t).as_secs())
+            .unwrap_or(u64::MAX);
+
+        if idle_secs < BOOTNODE_IDLE_EVICT_SECS && !near_tip {
+            continue;
+        }
+
+        // Higher class gets evicted first.
+        // 2 = old + near tip, 1 = old idle, 0 = fallback.
+        let class = if near_tip { 2 } else { 1 };
+
+        candidates.push((p, class, age));
+    }
+
+    candidates.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+    });
+
+    let over = connected.len().saturating_sub(BOOTNODE_TARGET_CONNECTED);
+
+    for (p, class, age) in candidates.into_iter().take(over) {
+        println!(
+            "[bootnode] evicting peer {} class={} age={}s to free bootstrap capacity",
+            p, class, age
+        );
+        let _ = swarm.disconnect_peer_id(p);
+    }
+}
 
 fn with_p2p_suffix(mut addr: Multiaddr, peer: PeerId) -> Multiaddr {
     use libp2p::multiaddr::Protocol;
@@ -2166,6 +2247,9 @@ for pid in startup_peer_ids {
     // NEW: connection refcount to avoid duplicate “connected” spam
     let mut conn_refcnt: HashMap<PeerId, usize> = HashMap::new();
 
+let mut connected_since: HashMap<PeerId, Instant> = HashMap::new();
+let mut last_sync_request_from: HashMap<PeerId, Instant> = HashMap::new();
+
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
 let mut peer_tips: HashMap<PeerId, Hash32> = HashMap::new();
@@ -2321,6 +2405,18 @@ let (best_h, best_w) = recompute_best_peer_metrics(
 
 best_peer_height_atomic.store(best_h, Ordering::Relaxed);
 *best_peer_work.write().await = best_w;
+
+let (_local_tip, local_height, _local_work) = local_tip_and_work(&db);
+
+maybe_evict_bootnode_peers(
+    &mut swarm,
+    &cfg,
+    &connected,
+    &connected_since,
+    &last_sync_request_from,
+    &peer_heights,
+    local_height,
+);
 
 // Pick best candidate, but keep current sync_peer unless the candidate is strictly better.
 let candidate_sync_peer = choose_best_sync_peer(
@@ -2500,6 +2596,8 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
     connected_peers.store(connected.len(), Ordering::Relaxed);
     mark_peer_change(&last_peer_change_unix);
 
+connected_since.insert(peer_id, Instant::now());
+
 {
     let q = peer_quality.entry(peer_id).or_default();
     q.dial_success = q.dial_success.saturating_add(1);
@@ -2596,6 +2694,9 @@ SwarmEvent::Dialing { peer_id, connection_id } => {
                         peer_work.remove(&peer_id);
                          peer_tips.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
+
+connected_since.remove(&peer_id);
+last_sync_request_from.remove(&peer_id);
 
 let (best_h, best_w) = recompute_best_peer_metrics(
     &connected,
@@ -2862,6 +2963,16 @@ if !allow_rr_req(&mut buckets, &mut bans, peer) {
         SyncResponse::Err { msg: "rate limited".into() },
     );
     continue;
+}
+
+match &request {
+      SyncRequest::GetTip
+    | SyncRequest::GetHeadersByLocator { .. }
+    | SyncRequest::GetHeaders { .. }
+    | SyncRequest::GetBlock { .. } => {
+        last_sync_request_from.insert(peer, Instant::now());
+    }
+    _ => {}
 }
 
 match &request {
