@@ -575,6 +575,16 @@ fn resolve_datadir(
     cli.or_else(|| cfg.default_datadir.clone())
         .unwrap_or_else(|| "cs.db".to_string())
 }
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 fn resolve_privkey(
     cli: Option<String>,
@@ -1281,15 +1291,18 @@ Commands::Node {
             };
 
 
-
+            let is_bootnode = bootnode || env_flag("CSD_BOOTNODE");
+    
             let net_cfg = crate::net::node::NetConfig {
                 datadir: datadir.clone(),
                 listen: listen_ma,
                 bootnodes: boots,
                 genesis_hash,
-                is_bootnode: bootnode,            
+                is_bootnode,            
             };
-    println!("[p2p] bootnode mode: {}", bootnode);
+    
+
+println!("[p2p] bootnode mode: {}", is_bootnode);
 
             // Start P2P and keep a handle for miner gating
             let net = crate::net::node::spawn_p2p(
