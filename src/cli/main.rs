@@ -1389,7 +1389,7 @@ let best_peer_tip = net2.best_peer_tip().await;
 // Do NOT gate on want_blocks, same tip, or height equality.
 let sync_close_enough = best_peer_work <= local_work;
 
-if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
+if peers < 1 || !tip_fresh || !sync_close_enough {
     if last_gate_log.elapsed() >= std::time::Duration::from_secs(30) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
@@ -1417,6 +1417,17 @@ eprintln!(
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     continue;
 }
+
+eprintln!(
+    "[miner] gate: MINING (peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, local_work={}, best_peer_work={})",
+    peers,
+    tip_fresh,
+    peer_stable,
+    local_height,
+    best_peer_height,
+    local_work,
+    best_peer_work,
+);
 
                         prune_mempool(&db2, &mp2);
 
