@@ -1376,36 +1376,26 @@ let local_hi = crate::chain::index::get_hidx(db2.as_ref(), &local_tip)
     .flatten();
 
 let local_height = local_hi.as_ref().map(|h| h.height).unwrap_or(0);
-let local_work = local_hi
+
+let local_work: u128 = local_hi
     .as_ref()
-    .map(|h| (h.chainwork & (u64::MAX as u128)) as u64)
+    .map(|h| h.chainwork)
     .unwrap_or(0);
 
 let sync_lag = best_peer_height.saturating_sub(local_height);
 let best_peer_tip = net2.best_peer_tip().await;
 
-// Bootstrap only when nobody has progressed beyond genesis.
-let bootstrap_genesis = best_peer_height == 0;
-
-// True only when we are on the same tip as the selected best peer.
-let same_tip_as_best_peer =
-    best_peer_tip != [0u8; 32] && local_tip == best_peer_tip;
-
-// Optional very-early startup allowance:
-// if we are exactly at genesis and the network is also effectively at genesis.
-let genesis_aligned =
-    local_height == 0 && (best_peer_height == 0 || best_peer_height == 1);
-
-// Final mining permission.
-let sync_close_enough =
-    bootstrap_genesis || genesis_aligned || same_tip_as_best_peer;
+// Mine if no peer has more proven/indexed chainwork than us.
+// Do NOT gate on want_blocks, same tip, or height equality.
+let sync_close_enough = best_peer_work <= local_work;
 
 if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
     if last_gate_log.elapsed() >= std::time::Duration::from_secs(30) {
         let last_tip = net2.last_tip_seen_unix();
         let last_peer_change = net2.last_peer_change_unix();
-        eprintln!(
-    "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, bootstrap_genesis={}, genesis_aligned={}, same_tip_as_best_peer={}, local_tip=0x{}, best_peer_tip=0x{}, local_work={}, best_peer_work={}, last_tip_seen_unix={}, last_peer_change_unix={})",
+
+eprintln!(
+    "[miner] gate: NOT mining (peers={}, effective_peers={}, tip_fresh={}, peer_stable={}, local_height={}, best_peer_height={}, sync_lag={}, sync_close_enough={}, local_tip=0x{}, best_peer_tip=0x{}, local_work={}, best_peer_work={}, last_tip_seen_unix={}, last_peer_change_unix={})",
     peers,
     peers,
     tip_fresh,
@@ -1413,9 +1403,7 @@ if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
     local_height,
     best_peer_height,
     sync_lag,
-    bootstrap_genesis,
-    genesis_aligned,
-    same_tip_as_best_peer,
+    sync_close_enough,
     hex::encode(local_tip),
     hex::encode(best_peer_tip),
     local_work,
@@ -1423,6 +1411,7 @@ if peers < 1 || !peer_stable || !tip_fresh || !sync_close_enough {
     last_tip,
     last_peer_change
 );
+
         last_gate_log = std::time::Instant::now();
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
