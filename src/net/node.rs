@@ -1521,6 +1521,7 @@ peer_quality: &mut HashMap<PeerId, PeerQuality>,
     inflight: &mut HashMap<Hash32, (request_response::OutboundRequestId, Instant, PeerId)>,
 ) -> Result<()> {
 
+let (_local_tip, _local_height, local_work) = local_tip_and_work(db);
 
             let now = Instant::now();
             let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
@@ -1604,6 +1605,7 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
         };
 
         let Some(hi) = get_hidx(db, &target_h)? else {
+
             skip_no_hidx += 1;
 
             if sample_reasons.len() < 8 {
@@ -1616,6 +1618,12 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
 
             continue;
         };
+
+// Do not request stale/fork blocks that cannot improve local canonical work.
+// This prevents polluted want_blocks from blocking mining forever.
+if hi.chainwork <= local_work {
+    continue;
+}
 
         let mut target_peer: Option<PeerId> = None;
         let mut peer_reason = String::new();
@@ -1939,16 +1947,23 @@ fn compact_want_queue(
     let old: Vec<Hash32> = want_blocks.drain(..).collect();
     let mut seen: HashSet<Hash32> = HashSet::new();
 
+let (_local_tip, _local_height, local_work) = local_tip_and_work(db);
+
     for h in old {
         // Drop entries already satisfied locally.
         if has_raw_or_pending(db, pending_apply, &h) {
             continue;
         }
 
-        // Drop entries whose header index is gone / unknown.
-        if get_hidx(db, &h)?.is_none() {
-            continue;
-        }
+// Drop entries whose header index is gone / unknown,
+// or whose chainwork cannot improve our current canonical work.
+let Some(hi) = get_hidx(db, &h)? else {
+    continue;
+};
+
+if hi.chainwork <= local_work {
+    continue;
+}
 
         // Keep descendants in the queue.
         // Do NOT collapse them onto the current frontier here.
@@ -3090,12 +3105,9 @@ if newly_indexed_header {
                                 }
 
 if seen_blocks.insert(h) {
-    if db.blocks.get(k_block(&h))?.is_none()
-        && !inflight.contains_key(&h)
-        && want_blocks.len() < MAX_WANT_QUEUE
-    {
-        want_blocks.push_back(h);
-    }
+    // Gossip headers are relay hints only.
+    // Do not enqueue block downloads from gossip alone.
+    // Headers responses will enqueue real provider-backed blocks.
 
 let _ = compact_and_log_want_queue(
     &db,
