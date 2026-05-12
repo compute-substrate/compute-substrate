@@ -334,11 +334,11 @@ fn maybe_evict_bootnode_peers(
         candidates.push((p, class, age));
     }
 
-    candidates.sort_by(|a, b| {
-        b.1.cmp(&a.1)
-            .then_with(|| b.2.cmp(&a.2))
-            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
-    });
+candidates.sort_by(|a, b| {
+    a.1.cmp(&b.1)
+        .then_with(|| b.2.cmp(&a.2))
+        .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+});
 
     let selected: Vec<(PeerId, u8, u64)> = candidates.into_iter().take(over).collect();
 
@@ -3039,9 +3039,9 @@ maybe_send_bootstrap_requests(
 
                                 mark_tip_seen(&last_tip_seen_unix);
 
-if let Some(p) = src {
-    providers.entry(h).or_insert(p);
-}
+// Do not treat gossip source as block provider.
+// It may only be relaying the header.
+// providers.entry(h).or_insert(p);
 
 let mut newly_indexed_header = false;
 
