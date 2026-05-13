@@ -484,6 +484,39 @@ fn zero_hidx(tip: Hash32) -> HeaderIndex {
     }
 }
 
+
+fn app_payload_json(app: &AppPayload) -> serde_json::Value {
+    match app {
+        AppPayload::None => serde_json::json!({
+            "type": "None"
+        }),
+
+        AppPayload::Propose {
+            domain,
+            payload_hash,
+            uri,
+            expires_epoch,
+        } => serde_json::json!({
+            "type": "Propose",
+            "domain": domain,
+            "payload_hash": format!("0x{}", hex::encode(payload_hash)),
+            "uri": uri,
+            "expires_epoch": expires_epoch
+        }),
+
+        AppPayload::Attest {
+            proposal_id,
+            score,
+            confidence,
+        } => serde_json::json!({
+            "type": "Attest",
+            "proposal_id": format!("0x{}", hex::encode(proposal_id)),
+            "score": score,
+            "confidence": confidence
+        }),
+    }
+}
+
 fn parse_hash32(s: &str) -> Result<Hash32, String> {
     let s = s.trim().strip_prefix("0x").unwrap_or(s.trim());
     let bytes = hex::decode(s).map_err(|_| "bad hex".to_string())?;
@@ -1032,7 +1065,7 @@ let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u3
                 })
             }).collect::<Vec<_>>(),
             "locktime": tx.locktime,
-            "app": format!("{:?}", tx.app),
+"app": app_payload_json(&tx.app),
         })
     })
     .collect();
@@ -1182,7 +1215,7 @@ async fn tx_get(
                         })
                     }).collect::<Vec<_>>(),
                     "locktime": tx.locktime,
-                    "app": format!("{:?}", tx.app),
+"app": app_payload_json(&tx.app),
                 });
 
                 return Json(TxResp {
