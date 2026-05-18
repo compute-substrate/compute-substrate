@@ -24,6 +24,7 @@ atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::collections::HashSet;
+use std::time::Instant;
 
 const MINER_BLOCK_SIZE_SAFETY_BYTES: usize = 16 * 1024;
 
@@ -68,6 +69,24 @@ fn miner_entropy() -> Vec<u8> {
     let instance = std::env::var("CSD_MINER_ID").unwrap_or_else(|_| "default".to_string());
 
     format!("{host}:{pid}:{instance}").into_bytes()
+}
+
+fn mine_log_event(event: &str, height: u64, hash: Option<&Hash32>, msg: &str) {
+    match hash {
+        Some(h) => println!(
+            "[mine-event] event={} height={} hash=0x{} {}",
+            event,
+            height,
+            hex::encode(h),
+            msg
+        ),
+        None => println!(
+            "[mine-event] event={} height={} {}",
+            event,
+            height,
+            msg
+        ),
+    }
 }
 
 
@@ -421,6 +440,19 @@ const HASH_COUNTER_FLUSH_EVERY_NONCES: u64 = 4_194_304;
     let (mut txs, mut included_ids, _fees) =
         build_template(db, mempool, miner_h160, height, max_mempool_txs)?;
 
+mine_log_event(
+    "candidate_created",
+    height,
+    None,
+    &format!(
+        "prev=0x{} txs={} included_mempool_txs={} mempool_len={}",
+        hex::encode(parent_tip),
+        txs.len(),
+        included_ids.len(),
+        mempool.len()
+    ),
+);
+
     let mut hdr = BlockHeader {
         version: 1,
         prev: parent_tip,
@@ -439,6 +471,19 @@ println!(
     hex::encode(hdr.prev),
     hdr.bits,
     hdr.time
+);
+
+mine_log_event(
+    "pow_search_started",
+    height,
+    None,
+    &format!(
+        "prev=0x{} bits=0x{:08x} time={} workers={}",
+        hex::encode(hdr.prev),
+        hdr.bits,
+        hdr.time,
+        miner_thread_count()
+    ),
 );
 
 #[derive(Clone)]
@@ -466,14 +511,28 @@ thread::scope(|scope| {
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
                 let cur_tip = get_tip(db).ok().flatten().unwrap_or([0u8; 32]);
-                if cur_tip != parent_tip {
-                    stale.store(true, Ordering::Relaxed);
-                    stop.store(true, Ordering::Relaxed);
-if tx_found.send(MineMsg::Stale).is_err() {
+
+if cur_tip != parent_tip {
+    mine_log_event(
+        "candidate_stale_before_solution",
+        height,
+        None,
+        &format!(
+            "old_prev=0x{} new_tip=0x{}",
+            hex::encode(parent_tip),
+            hex::encode(cur_tip)
+        ),
+    );
+
+    stale.store(true, Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
+
+    if tx_found.send(MineMsg::Stale).is_err() {
+        return;
+    }
     return;
 }
-                    return;
-                }
+
             }
         });
     }
@@ -531,6 +590,20 @@ if pow_target.check(&h) {
 
     stop.store(true, Ordering::Relaxed);
 
+mine_log_event(
+    "pow_solution_found",
+    height,
+    Some(&h),
+    &format!(
+        "prev=0x{} bits=0x{:08x} time={} nonce={} worker_id={}",
+        hex::encode(whdr.prev),
+        whdr.bits,
+        whdr.time,
+        whdr.nonce,
+        worker_id
+    ),
+);
+
     let block = Block {
                 header: whdr.clone(),
                 txs: wtxs.clone(),
@@ -581,6 +654,19 @@ if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
 Ok(MineMsg::Found(h, block)) => {
     let solved_hdr = block.header.clone();
 
+let solved_at = Instant::now();
+
+mine_log_event(
+    "solution_received",
+    height,
+    Some(&h),
+    &format!(
+        "prev=0x{} txs={}",
+        hex::encode(block.header.prev),
+        block.txs.len()
+    ),
+);
+
 if header_hash(&solved_hdr) != h {
     return Err(anyhow!("solved block hash/header mismatch"));
 }
@@ -618,7 +704,28 @@ if !pow_target.check(&h) {
 
             db.blocks.insert(k_block(&h), block_bytes)?;
 
+mine_log_event(
+    "block_stored",
+    height,
+    Some(&h),
+    &format!(
+        "elapsed_ms={}",
+        solved_at.elapsed().as_millis()
+    ),
+);
+
             let _hi = index_header(db, &solved_hdr, parent_hi_opt.as_ref())?;
+
+mine_log_event(
+    "block_indexed",
+    height,
+    Some(&h),
+    &format!(
+        "chainwork={} elapsed_ms={}",
+        _hi.chainwork,
+        solved_at.elapsed().as_millis()
+    ),
+);
 
             db.db.flush()?;
 
@@ -630,7 +737,18 @@ if !pow_target.check(&h) {
             let tip_after = get_tip(db)?.unwrap_or([0u8; 32]);
             let accepted_as_tip = tip_after == h;
 
-            if accepted_as_tip {
+if accepted_as_tip {
+    mine_log_event(
+        "block_accepted_canonical",
+        height,
+        Some(&h),
+        &format!(
+            "tip_after=0x{} elapsed_ms={}",
+            hex::encode(tip_after),
+            solved_at.elapsed().as_millis()
+        ),
+    );
+
                 let removed = mempool.remove_mined_block(&block);
 
                 if removed > 0 {
@@ -642,6 +760,19 @@ if !pow_target.check(&h) {
                     );
                 }
             } else {
+
+    mine_log_event(
+        "block_orphaned",
+        height,
+        Some(&h),
+        &format!(
+            "tip_after=0x{} elapsed_ms={} included_mempool_txs={}",
+            hex::encode(tip_after),
+            solved_at.elapsed().as_millis(),
+            included_ids.len()
+        ),
+    );
+
                 println!(
                     "[mine] orphaned local win: 0x{} (tip_after=0x{})",
                     hex::encode(h),
