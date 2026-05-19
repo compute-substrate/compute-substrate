@@ -1634,60 +1634,79 @@ fn scan_all_proposals_from_app(
     domain_filter: Option<&str>,
     want: u64,
 ) -> (Hash32, u64, Vec<RecentProposalItem>) {
+    use std::collections::HashSet;
+
     let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
     let hi = get_hidx(&st.db, &tip)
         .unwrap()
         .unwrap_or_else(|| zero_hidx(tip));
 
-    let mut props: Vec<Proposal> = vec![];
+    let mut proposals: Vec<RecentProposalItem> = vec![];
+    let mut seen: HashSet<Hash32> = HashSet::new();
 
-    for item in st.db.app.iter() {
-        let Ok((k, v)) = item else { continue };
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
 
-        if k.len() != 1 + 32 || k[0] != b'P' {
-            continue;
-        }
-
-        let prop: Proposal = match c().deserialize(&v) {
-            Ok(p) => p,
-            Err(_) => continue,
+    loop {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            break;
         };
 
-        if let Some(df) = domain_filter {
-            if prop.domain != df {
-                continue;
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+
+        for tx in blk.txs.iter().skip(1) {
+            if let AppPayload::Propose {
+                domain,
+                payload_hash,
+                uri,
+                expires_epoch,
+            } = &tx.app
+            {
+                if let Some(df) = domain_filter {
+                    if domain != df {
+                        continue;
+                    }
+                }
+
+                let pid = txid(tx);
+
+                if seen.insert(pid) {
+                    proposals.push(RecentProposalItem {
+                        proposal_id: format!("0x{}", hex::encode(pid)),
+                        txid: format!("0x{}", hex::encode(pid)),
+                        block_hash: format!("0x{}", hex::encode(cur_hash)),
+                        height: cur_height,
+                        time: blk.header.time,
+                        domain: domain.clone(),
+                        payload_hash: format!("0x{}", hex::encode(payload_hash)),
+                        uri: uri.clone(),
+                        expires_epoch: *expires_epoch,
+                    });
+                }
             }
         }
 
-        props.push(prop);
+        if blk.header.prev == [0u8; 32] || cur_height == 0 {
+            break;
+        }
+
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
     }
 
-    props.sort_by(|a, b| {
-        b.created_height
-            .cmp(&a.created_height)
-            .then_with(|| a.id.cmp(&b.id))
+    proposals.sort_by(|a, b| {
+        b.height
+            .cmp(&a.height)
+            .then_with(|| a.proposal_id.cmp(&b.proposal_id))
     });
 
-    props.truncate(want as usize);
-
-    let proposals = props
-        .into_iter()
-        .map(|p| RecentProposalItem {
-            proposal_id: format!("0x{}", hex::encode(p.id)),
-            txid: format!("0x{}", hex::encode(p.id)),
-            block_hash: "".to_string(),
-            height: p.created_height,
-            time: 0,
-            domain: p.domain,
-            payload_hash: format!("0x{}", hex::encode(p.payload_hash)),
-            uri: p.uri,
-            expires_epoch: p.expires_epoch,
-        })
-        .collect();
+    proposals.truncate(want as usize);
 
     (tip, hi.height, proposals)
 }
-
 /// GET /proposals/:limit
 async fn all_proposals(
     Path(limit): Path<u64>,
