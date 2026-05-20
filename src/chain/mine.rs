@@ -569,6 +569,7 @@ let base_script_sig = wtxs[0].inputs[0].script_sig.clone();
 let pow_target = pow_target;
 
 scope.spawn(move || {
+    #[allow(unused_assignments)]
     let mut checks: u64 = 0;
     let mut extra_nonce: u64 = 0;
 
@@ -646,6 +647,168 @@ if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
     }
 });
 }
+
+// -------------------------------------------------------------------------
+// Optional GPU worker. Compiled in when --features cuda and enabled when
+// CSD_GPU env var is set (1/true/yes/on). It runs alongside the CPU workers
+// inside the same thread::scope and uses the same MineMsg channel.
+// -------------------------------------------------------------------------
+#[cfg(feature = "cuda")]
+{
+    if crate::gpu::enabled_via_env() && crate::gpu::ensure_initialized().is_ok() {
+        let stop          = stop.clone();
+        let stale         = stale.clone();
+        let hash_counter  = hash_counter.clone();
+        let tx_found      = tx_found.clone();
+        let parent_hi_for_worker = parent_hi_opt.clone();
+        let parent_tip_for_worker = parent_tip;
+        let pow_target_for_worker = pow_target;
+
+        let mut whdr_gpu = hdr.clone();
+        let mut wtxs_gpu = txs.clone();
+
+        // Give the GPU worker its own coinbase script_sig so its merkle is
+        // unique from CPU workers (mirrors the CPU worker pattern above).
+        wtxs_gpu[0].inputs[0].script_sig.push(0x00);
+        wtxs_gpu[0]
+            .inputs[0]
+            .script_sig
+            .extend_from_slice(b"worker:gpu");
+        whdr_gpu.merkle = merkle_root(&wtxs_gpu);
+        let base_script_sig_gpu = wtxs_gpu[0].inputs[0].script_sig.clone();
+
+        let target_be = crate::chain::pow::bits_to_target_bytes(whdr_gpu.bits);
+
+        scope.spawn(move || {
+            // ~96M hashes per batch on a 2080 (~43 ms). Short enough that
+            // stop/stale signals get checked promptly.
+            const NONCES_PER_THREAD: u32 = 256;
+
+            let (n_threads, hashes_per_batch) =
+                match crate::gpu::with_global(|m| (m.n_threads(), m.hashes_per_batch(NONCES_PER_THREAD))) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("[gpu] worker: global miner not available, exiting");
+                        return;
+                    }
+                };
+            let batch_nonce_span: u32 = n_threads.saturating_mul(NONCES_PER_THREAD);
+
+            let (mut midstate, mut block2_pre) =
+                crate::gpu::header_to_gpu_params(&whdr_gpu);
+            let mut nonce_base: u32 = 0;
+            let mut extra_nonce: u64 = 0;
+
+            println!(
+                "[gpu] worker started: {} threads, {} nonces/thread => {} hashes/batch (~{} batches per nonce-space wrap)",
+                n_threads,
+                NONCES_PER_THREAD,
+                hashes_per_batch,
+                (u64::from(u32::MAX) / u64::from(batch_nonce_span).max(1)).max(1),
+            );
+
+            loop {
+                if stop.load(Ordering::Relaxed) || stale.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                let result = crate::gpu::with_global(|m| {
+                    m.search_batch(
+                        &midstate,
+                        &block2_pre,
+                        &target_be,
+                        nonce_base,
+                        NONCES_PER_THREAD,
+                    )
+                });
+
+                let hit = match result {
+                    Some(Ok(r)) => r,
+                    Some(Err(e)) => {
+                        eprintln!("[gpu] search_batch failed: {e}");
+                        return;
+                    }
+                    None => {
+                        eprintln!("[gpu] global miner disappeared mid-run");
+                        return;
+                    }
+                };
+
+                hash_counter.fetch_add(hashes_per_batch, Ordering::Relaxed);
+
+                if let Some((winning_nonce, _gpu_hash_be)) = hit {
+                    whdr_gpu.nonce = winning_nonce;
+                    let h = header_hash(&whdr_gpu);
+                    if !pow_target_for_worker.check(&h) {
+                        // GPU claimed a hit that the host doesn't agree with.
+                        // This should never happen with a correct kernel but
+                        // we defensively skip and keep searching.
+                        eprintln!(
+                            "[gpu] WARN: GPU hit failed host PoW check (nonce={}, extra_nonce={}); skipping batch",
+                            winning_nonce, extra_nonce,
+                        );
+                        match nonce_base.checked_add(batch_nonce_span) {
+                            Some(b) => nonce_base = b,
+                            None => nonce_base = 0,
+                        }
+                        continue;
+                    }
+
+                    stop.store(true, Ordering::Relaxed);
+
+                    mine_log_event(
+                        "pow_solution_found",
+                        height,
+                        Some(&h),
+                        &format!(
+                            "prev=0x{} bits=0x{:08x} time={} nonce={} worker_id=gpu",
+                            hex::encode(whdr_gpu.prev),
+                            whdr_gpu.bits,
+                            whdr_gpu.time,
+                            whdr_gpu.nonce,
+                        ),
+                    );
+
+                    let block = Block {
+                        header: whdr_gpu.clone(),
+                        txs: wtxs_gpu.clone(),
+                    };
+                    let _ = tx_found.send(MineMsg::Found(h, block));
+                    return;
+                }
+
+                // Advance nonce. On u32 wrap, rotate the extra_nonce and
+                // refresh midstate/merkle exactly like the CPU workers do.
+                match nonce_base.checked_add(batch_nonce_span) {
+                    Some(b) => nonce_base = b,
+                    None => {
+                        extra_nonce = extra_nonce.wrapping_add(1);
+                        whdr_gpu.time = choose_block_time(
+                            db,
+                            &parent_tip_for_worker,
+                            parent_hi_for_worker.as_ref(),
+                        );
+                        let marker = extra_nonce.to_le_bytes();
+                        wtxs_gpu[0].inputs[0].script_sig = base_script_sig_gpu.clone();
+                        wtxs_gpu[0].inputs[0].script_sig.push(0x00);
+                        wtxs_gpu[0]
+                            .inputs[0]
+                            .script_sig
+                            .extend_from_slice(&marker);
+                        whdr_gpu.merkle = merkle_root(&wtxs_gpu);
+                        let (m, p) = crate::gpu::header_to_gpu_params(&whdr_gpu);
+                        midstate = m;
+                        block2_pre = p;
+                        nonce_base = 0;
+                    }
+                }
+            }
+        });
+    } else if crate::gpu::enabled_via_env() {
+        eprintln!("[gpu] CSD_GPU=1 set but GPU init failed; mining CPU-only this block");
+    }
+}
+
     drop(tx_found);
 
     match rx_found.recv() {
