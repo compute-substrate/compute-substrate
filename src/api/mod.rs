@@ -338,6 +338,8 @@ peer_id,
 .route("/block/height/:height", get(block_by_height_get))
         .route("/block/:hash", get(block_get))
         .route("/tx/:id", get(tx_get))
+//tx proof endpoint for authorization object
+.route("/proof/tx/:txid", get(tx_proof_get))
         .route("/utxos/:addr20", get(utxos_for_addr20))
         // Recent blocks:
         .route("/recent/blocks/:limit", get(recent_blocks))
@@ -374,6 +376,7 @@ peer_id,
         // Optional write endpoint:
         .route("/tx/submit", post(tx_submit))
         .with_state(st)
+
 }
 
 async fn health(State(st): State<ApiState>) -> Json<HealthResp> {
@@ -1249,6 +1252,109 @@ async fn tx_get(
         tx: None,
         err: Some("not found".to_string()),
     })
+}
+
+fn merkle_branch(txids: &[[u8; 32]], index: usize) -> Vec<serde_json::Value> {
+    let mut branch = vec![];
+    let mut layer = txids.to_vec();
+    let mut idx = index;
+
+    while layer.len() > 1 {
+        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling = if sibling_idx < layer.len() {
+            layer[sibling_idx]
+        } else {
+            layer[idx]
+        };
+
+        branch.push(serde_json::json!({
+            "hash": format!("0x{}", hex::encode(sibling)),
+            "position": if idx % 2 == 0 { "right" } else { "left" }
+        }));
+
+        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut i = 0usize;
+
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { layer[i] };
+
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&left);
+            buf[32..].copy_from_slice(&right);
+            next.push(crate::crypto::sha256d(&buf));
+
+            i += 2;
+        }
+
+        idx /= 2;
+        layer = next;
+    }
+
+    branch
+}
+
+async fn tx_proof_get(
+    State(st): State<ApiState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let want = match parse_hash32(&id) {
+        Ok(h) => h,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+
+    let tip = get_tip(&st.db).unwrap();
+    let mut cur = tip.hash;
+
+    loop {
+        let Some(v) = st.db.blocks.get(k_block(&cur)).unwrap() else {
+            break;
+        };
+
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("decode block: {e}") })),
+        };
+
+        let txids: Vec<[u8; 32]> = blk.txs.iter().map(|tx| txid(tx)).collect();
+
+        for (i, tx) in blk.txs.iter().enumerate() {
+            if txids[i] == want {
+                let block_hash = crate::chain::index::header_hash(&blk.header);
+                let hi = get_hidx(&st.db, &block_hash).unwrap();
+
+                return Json(serde_json::json!({
+                    "ok": true,
+                    "txid": format!("0x{}", hex::encode(want)),
+                    "tx_index": i,
+                    "tx_raw": format!("0x{}", hex::encode(c().serialize(tx).unwrap())),
+                    "tx": tx,
+                    "block_hash": format!("0x{}", hex::encode(block_hash)),
+                    "height": hi.map(|h| h.height),
+                    "header": {
+                        "version": blk.header.version,
+                        "prev": format!("0x{}", hex::encode(blk.header.prev)),
+                        "merkle": format!("0x{}", hex::encode(blk.header.merkle)),
+                        "time": blk.header.time,
+                        "bits": blk.header.bits,
+                        "nonce": blk.header.nonce,
+                    },
+                    "merkle_branch": merkle_branch(&txids, i),
+                }));
+            }
+        }
+
+        if blk.header.prev == [0u8; 32] {
+            break;
+        }
+
+        cur = blk.header.prev;
+    }
+
+    Json(serde_json::json!({
+        "ok": false,
+        "error": "tx not found in main chain"
+    }))
 }
 
 /// GET /utxos/:addr20
