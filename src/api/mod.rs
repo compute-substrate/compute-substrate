@@ -8,6 +8,7 @@ use axum::{
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::collections::HashSet;
 
 use libp2p::PeerId;
 use crate::chain::index::{get_hidx, HeaderIndex};
@@ -1303,34 +1304,82 @@ async fn tx_proof_get(
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
 
-    let tip = get_tip(&st.db).unwrap();
-    let mut cur = tip.hash;
+    let tip = match get_tip(&st.db) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "txid": format!("0x{}", hex::encode(want)),
+                "error": "no chain tip"
+            }));
+        }
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "txid": format!("0x{}", hex::encode(want)),
+                "error": format!("get tip failed: {e}")
+            }));
+        }
+    };
 
-    loop {
-        let Some(v) = st.db.blocks.get(k_block(&cur)).unwrap() else {
-            break;
+    let hi = get_hidx(&st.db, &tip)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    const MAX_BACK: u64 = 100_000;
+
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
+    let mut scanned: u64 = 0;
+    let mut seen = HashSet::<Hash32>::new();
+
+    while scanned < MAX_BACK {
+        if !seen.insert(cur_hash) {
+            return Json(serde_json::json!({
+                "ok": false,
+                "txid": format!("0x{}", hex::encode(want)),
+                "error": "chain traversal loop detected",
+                "scanned": scanned,
+                "at": format!("0x{}", hex::encode(cur_hash))
+            }));
+        }
+
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            return Json(serde_json::json!({
+                "ok": false,
+                "txid": format!("0x{}", hex::encode(want)),
+                "error": "block missing during traversal",
+                "scanned": scanned,
+                "missing_block": format!("0x{}", hex::encode(cur_hash))
+            }));
         };
 
         let blk: Block = match c().deserialize(&v) {
             Ok(b) => b,
-            Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("decode block: {e}") })),
+            Err(e) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "txid": format!("0x{}", hex::encode(want)),
+                    "error": format!("decode block failed: {e}"),
+                    "block_hash": format!("0x{}", hex::encode(cur_hash))
+                }));
+            }
         };
 
         let txids: Vec<[u8; 32]> = blk.txs.iter().map(|tx| txid(tx)).collect();
 
         for (i, tx) in blk.txs.iter().enumerate() {
             if txids[i] == want {
-                let block_hash = crate::chain::index::header_hash(&blk.header);
-                let hi = get_hidx(&st.db, &block_hash).unwrap();
-
                 return Json(serde_json::json!({
                     "ok": true,
                     "txid": format!("0x{}", hex::encode(want)),
                     "tx_index": i,
                     "tx_raw": format!("0x{}", hex::encode(c().serialize(tx).unwrap())),
                     "tx": tx,
-                    "block_hash": format!("0x{}", hex::encode(block_hash)),
-                    "height": hi.map(|h| h.height),
+                    "block_hash": format!("0x{}", hex::encode(cur_hash)),
+                    "height": cur_height,
+                    "confirmations": hi.height.saturating_sub(cur_height).saturating_add(1),
                     "header": {
                         "version": blk.header.version,
                         "prev": format!("0x{}", hex::encode(blk.header.prev)),
@@ -1340,20 +1389,26 @@ async fn tx_proof_get(
                         "nonce": blk.header.nonce,
                     },
                     "merkle_branch": merkle_branch(&txids, i),
+                    "scanned": scanned + 1
                 }));
             }
         }
 
-        if blk.header.prev == [0u8; 32] {
+        scanned += 1;
+
+        if blk.header.prev == [0u8; 32] || cur_height == 0 {
             break;
         }
 
-        cur = blk.header.prev;
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
     }
 
     Json(serde_json::json!({
         "ok": false,
-        "error": "tx not found in main chain"
+        "txid": format!("0x{}", hex::encode(want)),
+        "error": "tx not found in main chain",
+        "scanned": scanned
     }))
 }
 
