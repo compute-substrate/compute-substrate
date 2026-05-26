@@ -2,6 +2,7 @@
 use anyhow::{anyhow, Result};
 
 use crate::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
+use crate::chain::shani::PowMidstate;
 use crate::chain::lock::ChainLock;
 use crate::chain::pow::{expected_bits, PowTarget};
 use crate::chain::reorg::maybe_reorg_to;
@@ -505,8 +506,14 @@ thread::scope(|scope| {
         let stop = stop.clone();
         let stale = stale.clone();
         let tx_found = tx_found.clone();
+        let hc = hash_counter.clone();
 
         scope.spawn(move || {
+            // Periodic hashrate readout. hash_counter is summed across all workers
+            // (flushed in 4.2M-nonce chunks), so a 15s delta gives an accurate rate.
+            // Lets us tune CSD_MINER_THREADS by observing MH/s directly.
+            let mut last_report = std::time::Instant::now();
+            let mut last_count: u64 = 0;
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
@@ -532,6 +539,21 @@ if cur_tip != parent_tip {
     }
     return;
 }
+
+                let now = std::time::Instant::now();
+                if now.duration_since(last_report).as_secs_f64() >= 15.0 {
+                    let c = hc.load(Ordering::Relaxed);
+                    let dc = c.wrapping_sub(last_count);
+                    let secs = now.duration_since(last_report).as_secs_f64();
+                    println!(
+                        "[mine] hashrate={:.1} MH/s height={} workers={}",
+                        dc as f64 / secs / 1e6,
+                        height,
+                        workers
+                    );
+                    last_report = now;
+                    last_count = c;
+                }
 
             }
         });
@@ -569,8 +591,23 @@ let base_script_sig = wtxs[0].inputs[0].script_sig.clone();
 let pow_target = pow_target;
 
 scope.spawn(move || {
+    // Run PoW workers at idle OS scheduling priority so the async sync /
+    // networking threads (normal priority) always preempt them. This lets us
+    // mine on every core without starving block-apply (the stutter we hit when
+    // grind threads oversubscribed the CPU). Best-effort; ignored on failure.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let p = libc::sched_param { sched_priority: 0 };
+        let _ = libc::sched_setscheduler(0, libc::SCHED_IDLE, &p);
+    }
+
     let mut checks: u64 = 0;
     let mut extra_nonce: u64 = 0;
+
+    // Cached PoW midstate (block1 absorbed). Hashes 2 nonces/iter via 2-way
+    // interleaved SHA-NI (falls back to sha2 midstate on non-SHA-NI CPUs).
+    // Rebuilt only on nonce wrap (when merkle/time change below).
+    let mut mid = PowMidstate::new(&whdr);
 
     loop {
 if stop.load(Ordering::Relaxed) || stale.load(Ordering::Relaxed) {
@@ -580,63 +617,66 @@ if stop.load(Ordering::Relaxed) || stale.load(Ordering::Relaxed) {
     return;
 }
 
-        let h = header_hash(&whdr);
+        let na = whdr.nonce;
+        let nb = na.wrapping_add(step);
+        let (ha, hb) = mid.hash2(na, nb);
 
-if pow_target.check(&h) {
-
-    if checks > 0 {
-        hash_counter.fetch_add(checks, Ordering::Relaxed);
-    }
-
-    stop.store(true, Ordering::Relaxed);
-
-mine_log_event(
-    "pow_solution_found",
-    height,
-    Some(&h),
-    &format!(
-        "prev=0x{} bits=0x{:08x} time={} nonce={} worker_id={}",
-        hex::encode(whdr.prev),
-        whdr.bits,
-        whdr.time,
-        whdr.nonce,
-        worker_id
-    ),
-);
-
-    let block = Block {
-                header: whdr.clone(),
-                txs: wtxs.clone(),
-            };
-
-if tx_found.send(MineMsg::Found(h, block)).is_err() {
-    return;
-}
-            return;
+        // On a hit, set whdr.nonce to the winning value, emit, and stop.
+        macro_rules! found {
+            ($h:expr, $n:expr) => {{
+                whdr.nonce = $n;
+                if checks > 0 {
+                    hash_counter.fetch_add(checks, Ordering::Relaxed);
+                }
+                stop.store(true, Ordering::Relaxed);
+                mine_log_event(
+                    "pow_solution_found",
+                    height,
+                    Some(&$h),
+                    &format!(
+                        "prev=0x{} bits=0x{:08x} time={} nonce={} worker_id={}",
+                        hex::encode(whdr.prev),
+                        whdr.bits,
+                        whdr.time,
+                        whdr.nonce,
+                        worker_id
+                    ),
+                );
+                let block = Block {
+                    header: whdr.clone(),
+                    txs: wtxs.clone(),
+                };
+                let _ = tx_found.send(MineMsg::Found($h, block));
+                return;
+            }};
+        }
+        if pow_target.check(&ha) {
+            found!(ha, na);
+        }
+        if pow_target.check(&hb) {
+            found!(hb, nb);
         }
 
-        let old_nonce = whdr.nonce;
-        whdr.nonce = whdr.nonce.wrapping_add(step);
+        checks = checks.wrapping_add(2);
 
-if whdr.nonce < old_nonce {
-    extra_nonce = extra_nonce.wrapping_add(1);
+        whdr.nonce = na.wrapping_add(step.wrapping_mul(2));
+        if whdr.nonce < na {
+            // nonce space exhausted -> roll extranonce/time, rebuild midstate.
+            extra_nonce = extra_nonce.wrapping_add(1);
 
-    whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+            whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
 
-    let marker = extra_nonce.to_le_bytes();
+            let marker = extra_nonce.to_le_bytes();
 
-    wtxs[0].inputs[0].script_sig = base_script_sig.clone();
-    wtxs[0].inputs[0].script_sig.push(0x00);
-    wtxs[0]
-        .inputs[0]
-        .script_sig
-        .extend_from_slice(&marker);
+            wtxs[0].inputs[0].script_sig = base_script_sig.clone();
+            wtxs[0].inputs[0].script_sig.push(0x00);
+            wtxs[0].inputs[0].script_sig.extend_from_slice(&marker);
 
-    whdr.merkle = merkle_root(&wtxs);
-    whdr.nonce = worker_id as u32;
-}
+            whdr.merkle = merkle_root(&wtxs);
+            whdr.nonce = worker_id as u32;
 
-        checks = checks.wrapping_add(1);
+            mid = PowMidstate::new(&whdr);
+        }
 
 if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
     hash_counter.fetch_add(checks, Ordering::Relaxed);

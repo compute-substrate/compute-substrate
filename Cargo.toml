@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 
 parking_lot = "0.12"
+libc = "0.2"  # set PoW worker threads to SCHED_IDLE (Linux) so sync never starves
 
 # --- Error handling ---
 anyhow = "1.0"
