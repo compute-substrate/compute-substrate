@@ -1295,6 +1295,29 @@ fn merkle_branch(txids: &[[u8; 32]], index: usize) -> Vec<serde_json::Value> {
     branch
 }
 
+fn tx_json(tx: &Transaction, id: Hash32) -> serde_json::Value {
+    serde_json::json!({
+        "txid": format!("0x{}", hex::encode(id)),
+        "version": tx.version,
+        "locktime": tx.locktime,
+        "app": app_payload_json(&tx.app),
+        "inputs": tx.inputs.iter().map(|inp| {
+            serde_json::json!({
+                "prev_txid": format!("0x{}", hex::encode(inp.prevout.txid)),
+                "vout": inp.prevout.vout,
+                "script_sig": format!("0x{}", hex::encode(&inp.script_sig)),
+            })
+        }).collect::<Vec<_>>(),
+        "outputs": tx.outputs.iter().enumerate().map(|(i, o)| {
+            serde_json::json!({
+                "vout": i,
+                "value": o.value,
+                "script_pubkey": format!("0x{}", hex::encode(o.script_pubkey)),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 async fn tx_proof_get(
     State(st): State<ApiState>,
     Path(id): Path<String>,
@@ -1376,7 +1399,7 @@ async fn tx_proof_get(
                     "txid": format!("0x{}", hex::encode(want)),
                     "tx_index": i,
                     "tx_raw": format!("0x{}", hex::encode(c().serialize(tx).unwrap())),
-                    "tx": tx,
+"tx": tx_json(tx, want),
                     "block_hash": format!("0x{}", hex::encode(cur_hash)),
                     "height": cur_height,
                     "confirmations": hi.height.saturating_sub(cur_height).saturating_add(1),
