@@ -5,5 +5,6 @@ pub mod mine;
 pub mod pow;
 pub mod reorg;
 pub mod reorg_journal;
+pub mod shani;
 pub mod time;
 pub mod failpoints;
