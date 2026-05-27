@@ -208,78 +208,75 @@ fn hash_from_block_key(k: &[u8]) -> Option<Hash32> {
 // Best tip selection WITHOUT hdr (blocks-only)
 // ----------------------
 
-
-
+//Iterative. No recursive chain walk
 fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>> {
-    // memo[hash] = Some((height, chainwork_to_here)) OR None while visiting (cycle guard)
-    let mut memo: HashMap<Hash32, Option<(u64, u128)>> = HashMap::new();
-
-    fn calc(
-        db: &Stores,
-        h: Hash32,
-        memo: &mut HashMap<Hash32, Option<(u64, u128)>>,
-    ) -> Result<Option<(u64, u128)>> {
-        if let Some(v) = memo.get(&h) {
-            return Ok(*v);
-        }
-
-        // mark visiting (cycle guard)
-        memo.insert(h, None);
-
-        let blk = match load_block(db, &h) {
-            Ok(b) => b,
-            Err(_) => {
-                memo.remove(&h);
-                return Ok(None);
-            }
-        };
-
-        if !header_min_valid(&h, &blk) {
-            memo.remove(&h);
-            return Ok(None);
-        }
-
-        let parent = blk.header.prev;
-
-        let my_work = match crate::chain::pow::work_from_bits(blk.header.bits) {
-            Ok(w) => w,
-            Err(_) => {
-                memo.remove(&h);
-                return Ok(None);
-            }
-        };
-
-        // genesis terminator convention: prev == 0
-        if parent == [0u8; 32] {
-            let out = Some((0u64, my_work));
-            memo.insert(h, out);
-            return Ok(out);
-        }
-
-        // parent must exist to be rebuildable
-        let p = calc(db, parent, memo)?;
-        let out = match p {
-            Some((ph, pw)) => Some((ph + 1, pw.saturating_add(my_work))),
-            None => None,
-        };
-
-        memo.insert(h, out);
-        Ok(out)
-    }
-
     let mut best: Option<(Hash32, u64, u128)> = None;
 
     for kv in db.blocks.iter() {
         let (k, _v) = kv.context("blocks.iter()")?;
-        let Some(h) = hash_from_block_key(&k) else { continue };
+        let Some(start) = hash_from_block_key(&k) else { continue };
 
-        let Some((height, cw)) = calc(db, h, &mut memo)? else { continue };
+        let mut path: Vec<(Hash32, u128)> = Vec::new();
+        let mut seen: std::collections::HashSet<Hash32> = std::collections::HashSet::new();
+
+        let mut cur = start;
+        let mut valid = true;
+
+        loop {
+            if !seen.insert(cur) {
+                valid = false;
+                break;
+            }
+
+            let blk = match load_block(db, &cur) {
+                Ok(b) => b,
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            };
+
+            if !header_min_valid(&cur, &blk) {
+                valid = false;
+                break;
+            }
+
+            let my_work = match crate::chain::pow::work_from_bits(blk.header.bits) {
+                Ok(w) => w,
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            };
+
+            path.push((cur, my_work));
+
+            if blk.header.prev == [0u8; 32] {
+                break;
+            }
+
+            cur = blk.header.prev;
+        }
+
+        if !valid {
+            continue;
+        }
+
+        path.reverse();
+
+        let mut height: u64 = 0;
+        let mut cw: u128 = 0;
+
+        for (i, (_h, work)) in path.iter().enumerate() {
+            height = i as u64;
+            cw = cw.saturating_add(*work);
+        }
 
         best = match best {
-            None => Some((h, height, cw)),
+            None => Some((start, height, cw)),
             Some((bh, bhgt, bcw)) => {
-                if better_candidate(cw, height, &h, bcw, bhgt, &bh) {
-                    Some((h, height, cw))
+                if better_candidate(cw, height, &start, bcw, bhgt, &bh) {
+                    Some((start, height, cw))
                 } else {
                     Some((bh, bhgt, bcw))
                 }
