@@ -178,7 +178,13 @@ pub enum Commands {
         /// Optional change addr20; defaults to sender addr20 or wallet config
         #[arg(long)]
         change: Option<String>,
+
+        /// Optional CSD/USDC trade intent hash to embed in tx app payload
+        #[arg(long)]
+        csd_intent_hash: Option<String>,
     },
+
+
 
     /// Run a node or miner
     Node {
@@ -332,7 +338,12 @@ pub enum WalletCmd {
         /// Optional change addr20; defaults to sender addr20
         #[arg(long)]
         change: Option<String>,
+
+        /// Optional CSD/USDC trade intent hash to embed in tx app payload
+        #[arg(long)]
+        csd_intent_hash: Option<String>,
     },
+
 
     /// Build and sign a proposal transaction without submitting it
     ProposeBuild {
@@ -851,6 +862,7 @@ pub async fn run() -> Result<()> {
             output,
             fee,
             change,
+            csd_intent_hash,
         } => {
             use crate::cli::wallet::*;
 
@@ -876,7 +888,7 @@ let picked = pick_inputs_from_rpc(&rpc_url, &addr20, min_needed)?;
 input.extend(picked);
             }
 
-wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change)?;
+wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change, csd_intent_hash)?;
             Ok(())
         }
 
