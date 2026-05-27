@@ -687,52 +687,59 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
     Ok(())
 }
 
+fn consider_best_tip(
+    best: &mut Option<(Hash32, u64, u128, &'static str)>,
+    h: Hash32,
+    height: u64,
+    cw: u128,
+    tag: &'static str,
+) {
+    *best = match *best {
+        None => Some((h, height, cw, tag)),
+        Some((bh, bhgt, bcw, btag)) => {
+            if better_candidate(cw, height, &h, bcw, bhgt, &bh) {
+                Some((h, height, cw, tag))
+            } else {
+                Some((bh, bhgt, bcw, btag))
+            }
+        }
+    };
+}
+
 fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &'static str)>> {
     let meta_tip = get_tip(db).ok().flatten();
 
     let mut best: Option<(Hash32, u64, u128, &'static str)> = None;
 
-    let mut consider = |h: Hash32, height: u64, cw: u128, tag: &'static str| {
-        best = match best {
-            None => Some((h, height, cw, tag)),
-            Some((bh, bhgt, bcw, btag)) => {
-                if better_candidate(cw, height, &h, bcw, bhgt, &bh) {
-                    Some((h, height, cw, tag))
-                } else {
-                    Some((bh, bhgt, bcw, btag))
-                }
-            }
-        };
-    };
-
-    // 1) Prefer durable meta_tip if rebuildable.
     if let Some(t) = meta_tip {
         if can_rebuild_to_tip(db, &t).unwrap_or(false) {
             if let Ok(Some(hi)) = get_hidx(db, &t) {
-                consider(hi.hash, hi.height, hi.chainwork, "meta_tip");
+                consider_best_tip(&mut best, hi.hash, hi.height, hi.chainwork, "meta_tip");
             }
         }
     }
 
-    // 2) Prefer best header that also has block bytes.
     if let Some(hi) = best_tip_with_block_bytes(db)? {
         if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
-            consider(hi.hash, hi.height, hi.chainwork, "hdr_best_with_block_bytes");
+            consider_best_tip(
+                &mut best,
+                hi.hash,
+                hi.height,
+                hi.chainwork,
+                "hdr_best_with_block_bytes",
+            );
         }
     }
 
-    // If we already found a normal candidate, return immediately.
-    // Do NOT run the expensive blocks-only fallback unless needed.
     if best.is_some() {
         return Ok(best);
     }
 
-    // 3) Last-resort fallback only.
     if let Some((h, height, cw)) =
         best_tip_from_blocks_only(db).context("pick_best best_tip_from_blocks_only")?
     {
         if can_rebuild_to_tip(db, &h).unwrap_or(false) {
-            consider(h, height, cw, "blocks_only_best");
+            consider_best_tip(&mut best, h, height, cw, "blocks_only_best");
         }
     }
 
