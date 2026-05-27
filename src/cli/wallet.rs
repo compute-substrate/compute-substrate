@@ -601,6 +601,7 @@ pub fn wallet_spend_submit(
     outputs: Vec<String>,
     fee: u64,
     change_addr20: Option<String>,
+    csd_intent_hash: Option<String>,
 ) -> Result<()> {
     let sk = sk_from_hex(privkey)?;
     let (pk33, self_addr) = pub_from_sk(&sk);
@@ -616,6 +617,12 @@ pub fn wallet_spend_submit(
         .collect::<Result<Vec<_>>>()?;
 
     let (mut tx, in_sum, out_sum) = build_base_tx(&ins, &outs0, fee, 0)?;
+
+    if let Some(h) = csd_intent_hash {
+    tx.app = AppPayload::CsdUsdcIntent {
+        intent_hash: parse_hash32(&h)?,
+    };
+}
 
     let ch20 = match change_addr20 {
         Some(ch) => parse_addr20(&ch)?,
