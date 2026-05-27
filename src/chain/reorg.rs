@@ -689,12 +689,9 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 
 fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &'static str)>> {
     let meta_tip = get_tip(db).ok().flatten();
-    let hdr_best = best_header_tip(db).ok().flatten();
-    let blocks_best = best_tip_from_blocks_only(db).context("pick_best best_tip_from_blocks_only")?;
 
     let mut best: Option<(Hash32, u64, u128, &'static str)> = None;
 
-    // helper closure to consider a candidate
     let mut consider = |h: Hash32, height: u64, cw: u128, tag: &'static str| {
         best = match best {
             None => Some((h, height, cw, tag)),
@@ -708,7 +705,7 @@ fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &
         };
     };
 
-    // 1) meta_tip (only if it has a header index we can score, AND is rebuildable)
+    // 1) Prefer durable meta_tip if rebuildable.
     if let Some(t) = meta_tip {
         if can_rebuild_to_tip(db, &t).unwrap_or(false) {
             if let Ok(Some(hi)) = get_hidx(db, &t) {
@@ -717,15 +714,23 @@ fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &
         }
     }
 
-    // 2) hdr_best
-    if let Some(hi) = hdr_best {
+    // 2) Prefer best header that also has block bytes.
+    if let Some(hi) = best_tip_with_block_bytes(db)? {
         if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
-            consider(hi.hash, hi.height, hi.chainwork, "hdr_best");
+            consider(hi.hash, hi.height, hi.chainwork, "hdr_best_with_block_bytes");
         }
     }
 
-    // 3) blocks-only best
-    if let Some((h, height, cw)) = blocks_best {
+    // If we already found a normal candidate, return immediately.
+    // Do NOT run the expensive blocks-only fallback unless needed.
+    if best.is_some() {
+        return Ok(best);
+    }
+
+    // 3) Last-resort fallback only.
+    if let Some((h, height, cw)) =
+        best_tip_from_blocks_only(db).context("pick_best best_tip_from_blocks_only")?
+    {
         if can_rebuild_to_tip(db, &h).unwrap_or(false) {
             consider(h, height, cw, "blocks_only_best");
         }
