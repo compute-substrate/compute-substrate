@@ -179,9 +179,6 @@ pub enum Commands {
         #[arg(long)]
         change: Option<String>,
 
-        /// Optional CSD/USDC trade intent hash to embed in tx app payload
-        #[arg(long)]
-        csd_intent_hash: Option<String>,
     },
 
 
@@ -339,9 +336,6 @@ pub enum WalletCmd {
         #[arg(long)]
         change: Option<String>,
 
-        /// Optional CSD/USDC trade intent hash to embed in tx app payload
-        #[arg(long)]
-        csd_intent_hash: Option<String>,
     },
 
 
@@ -862,7 +856,6 @@ pub async fn run() -> Result<()> {
             output,
             fee,
             change,
-            csd_intent_hash,
         } => {
             use crate::cli::wallet::*;
 
@@ -888,7 +881,7 @@ let picked = pick_inputs_from_rpc(&rpc_url, &addr20, min_needed)?;
 input.extend(picked);
             }
 
-wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change, csd_intent_hash)?;
+wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change)?;
             Ok(())
         }
 
