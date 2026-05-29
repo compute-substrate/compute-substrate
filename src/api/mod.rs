@@ -180,6 +180,12 @@ pub struct AddressActivityResp {
 }
 
 #[derive(Deserialize, Default)]
+pub struct AddressActivityQuery {
+    pub limit: Option<usize>,
+    pub include_mined: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
 pub struct UtxosQuery {
     pub available: Option<bool>,
     pub min_value: Option<u64>,
@@ -1661,8 +1667,10 @@ Json(UtxosResp {
 
 async fn address_activity_get(
     Path(addr20): Path<String>,
+    Query(q): Query<AddressActivityQuery>,
     State(st): State<ApiState>,
 ) -> Json<AddressActivityResp> {
+
     let a = match parse_addr20(&addr20) {
         Ok(x) => x,
         Err(_) => {
@@ -1716,6 +1724,12 @@ async fn address_activity_get(
         for tx in &blk.txs {
             let id = txid(tx);
 
+let is_coinbase = tx
+    .inputs
+    .first()
+    .map(|inp| inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX)
+    .unwrap_or(false);
+
             for (vout, out) in tx.outputs.iter().enumerate() {
                 outpoint_map.insert(
                     OutPoint {
@@ -1753,6 +1767,10 @@ async fn address_activity_get(
             if output_to_addr == 0 && input_from_addr == 0 {
                 continue;
             }
+
+if is_coinbase && !q.include_mined.unwrap_or(false) {
+    continue;
+}
 
             let value_delta: i128 = output_to_addr as i128 - input_from_addr as i128;
             let fee_paid = input_from_addr.saturating_sub(output_to_addr);
@@ -1822,6 +1840,9 @@ async fn address_activity_get(
             .cmp(&a.height)
             .then_with(|| a.txid.cmp(&b.txid))
     });
+
+let limit = q.limit.unwrap_or(100).min(500);
+activity.truncate(limit);
 
     Json(AddressActivityResp {
         ok: true,
