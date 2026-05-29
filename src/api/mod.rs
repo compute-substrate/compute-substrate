@@ -8,7 +8,8 @@ use axum::{
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::collections::HashSet;
+
+use std::collections::{HashMap, HashSet};
 
 use libp2p::PeerId;
 use crate::chain::index::{get_hidx, HeaderIndex};
@@ -151,6 +152,31 @@ pub struct UtxosResp {
     pub coinbase_lifetime_outputs: u64,
     pub coinbase_unspent_outputs: u64,
     pub utxos: Vec<UtxoItem>,
+}
+
+#[derive(Serialize)]
+pub struct AddressActivityItem {
+    pub kind: String,
+    pub txid: String,
+    pub block_hash: String,
+    pub height: u64,
+    pub time: u64,
+    pub value_delta: i128,
+    pub domain: Option<String>,
+    pub proposal_id: Option<String>,
+    pub payload_hash: Option<String>,
+    pub uri: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AddressActivityResp {
+    pub ok: bool,
+    pub addr20: String,
+    pub count: usize,
+    pub proposals_created: u64,
+    pub attestations_submitted: u64,
+    pub total_fees_paid: u64,
+    pub activity: Vec<AddressActivityItem>,
 }
 
 #[derive(Deserialize, Default)]
@@ -342,6 +368,9 @@ peer_id,
 //tx proof endpoint for authorization object
 .route("/proof/tx/:txid", get(tx_proof_get))
         .route("/utxos/:addr20", get(utxos_for_addr20))
+
+.route("/address/:addr20/activity", get(address_activity_get))
+
         // Recent blocks:
         .route("/recent/blocks/:limit", get(recent_blocks))
         // Recent computations:
@@ -1628,6 +1657,181 @@ Json(UtxosResp {
     utxos: out,
 })
 
+}
+
+async fn address_activity_get(
+    Path(addr20): Path<String>,
+    State(st): State<ApiState>,
+) -> Json<AddressActivityResp> {
+    let a = match parse_addr20(&addr20) {
+        Ok(x) => x,
+        Err(_) => {
+            return Json(AddressActivityResp {
+                ok: false,
+                addr20,
+                count: 0,
+                proposals_created: 0,
+                attestations_submitted: 0,
+                total_fees_paid: 0,
+                activity: vec![],
+            })
+        }
+    };
+
+    let tip = get_tip(st.db.as_ref()).ok().flatten().unwrap_or([0u8; 32]);
+    let hi = get_hidx(st.db.as_ref(), &tip)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| zero_hidx(tip));
+
+    let mut blocks: Vec<(Hash32, u64, Block)> = vec![];
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
+
+    loop {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            break;
+        };
+
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+
+        blocks.push((cur_hash, cur_height, blk.clone()));
+
+        if blk.header.prev == [0u8; 32] || cur_height == 0 {
+            break;
+        }
+
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
+    }
+
+    blocks.reverse();
+
+    let mut outpoint_map: HashMap<OutPoint, TxOut> = HashMap::new();
+
+    for (_bh, _height, blk) in &blocks {
+        for tx in &blk.txs {
+            let id = txid(tx);
+
+            for (vout, out) in tx.outputs.iter().enumerate() {
+                outpoint_map.insert(
+                    OutPoint {
+                        txid: id,
+                        vout: vout as u32,
+                    },
+                    out.clone(),
+                );
+            }
+        }
+    }
+
+    let mut activity: Vec<AddressActivityItem> = vec![];
+    let mut proposals_created: u64 = 0;
+    let mut attestations_submitted: u64 = 0;
+    let mut total_fees_paid: u64 = 0;
+
+    for (bh, height, blk) in blocks {
+        for tx in &blk.txs {
+            let id = txid(tx);
+
+            let output_to_addr: u64 = tx.outputs
+                .iter()
+                .filter(|o| o.script_pubkey == a)
+                .map(|o| o.value)
+                .sum();
+
+            let input_from_addr: u64 = tx.inputs
+                .iter()
+                .filter_map(|inp| outpoint_map.get(&inp.prevout))
+                .filter(|o| o.script_pubkey == a)
+                .map(|o| o.value)
+                .sum();
+
+            if output_to_addr == 0 && input_from_addr == 0 {
+                continue;
+            }
+
+            let value_delta: i128 = output_to_addr as i128 - input_from_addr as i128;
+            let fee_paid = input_from_addr.saturating_sub(output_to_addr);
+
+            match &tx.app {
+                AppPayload::Propose {
+                    domain,
+                    payload_hash,
+                    uri,
+                    ..
+                } => {
+                    proposals_created = proposals_created.saturating_add(1);
+                    total_fees_paid = total_fees_paid.saturating_add(fee_paid);
+
+                    activity.push(AddressActivityItem {
+                        kind: "proposal".to_string(),
+                        txid: format!("0x{}", hex::encode(id)),
+                        block_hash: format!("0x{}", hex::encode(bh)),
+                        height,
+                        time: blk.header.time,
+                        value_delta,
+                        domain: Some(domain.clone()),
+                        proposal_id: Some(format!("0x{}", hex::encode(id))),
+                        payload_hash: Some(format!("0x{}", hex::encode(payload_hash))),
+                        uri: Some(uri.clone()),
+                    });
+                }
+
+                AppPayload::Attest { proposal_id, .. } => {
+                    attestations_submitted = attestations_submitted.saturating_add(1);
+                    total_fees_paid = total_fees_paid.saturating_add(fee_paid);
+
+                    activity.push(AddressActivityItem {
+                        kind: "attestation".to_string(),
+                        txid: format!("0x{}", hex::encode(id)),
+                        block_hash: format!("0x{}", hex::encode(bh)),
+                        height,
+                        time: blk.header.time,
+                        value_delta,
+                        domain: None,
+                        proposal_id: Some(format!("0x{}", hex::encode(proposal_id))),
+                        payload_hash: None,
+                        uri: None,
+                    });
+                }
+
+                AppPayload::None => {
+                    activity.push(AddressActivityItem {
+                        kind: if input_from_addr == 0 { "received" } else { "transfer" }.to_string(),
+                        txid: format!("0x{}", hex::encode(id)),
+                        block_hash: format!("0x{}", hex::encode(bh)),
+                        height,
+                        time: blk.header.time,
+                        value_delta,
+                        domain: None,
+                        proposal_id: None,
+                        payload_hash: None,
+                        uri: None,
+                    });
+                }
+            }
+        }
+    }
+
+    activity.sort_by(|a, b| {
+        b.height
+            .cmp(&a.height)
+            .then_with(|| a.txid.cmp(&b.txid))
+    });
+
+    Json(AddressActivityResp {
+        ok: true,
+        addr20: format!("0x{}", hex::encode(a)),
+        count: activity.len(),
+        proposals_created,
+        attestations_submitted,
+        total_fees_paid,
+        activity,
+    })
 }
 
 // ===========================
