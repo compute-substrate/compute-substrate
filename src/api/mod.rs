@@ -1724,11 +1724,6 @@ async fn address_activity_get(
         for tx in &blk.txs {
             let id = txid(tx);
 
-let is_coinbase = tx
-    .inputs
-    .first()
-    .map(|inp| inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX)
-    .unwrap_or(false);
 
             for (vout, out) in tx.outputs.iter().enumerate() {
                 outpoint_map.insert(
@@ -1747,11 +1742,18 @@ let is_coinbase = tx
     let mut attestations_submitted: u64 = 0;
     let mut total_fees_paid: u64 = 0;
 
-    for (bh, height, blk) in blocks {
-        for tx in &blk.txs {
-            let id = txid(tx);
+for (bh, height, blk) in blocks {
+    for tx in &blk.txs {
+        let id = txid(tx);
 
-            let output_to_addr: u64 = tx.outputs
+        let is_coinbase = tx
+            .inputs
+            .first()
+            .map(|inp| inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX)
+            .unwrap_or(false);
+
+        let output_to_addr: u64 = tx.outputs
+
                 .iter()
                 .filter(|o| o.script_pubkey == a)
                 .map(|o| o.value)
