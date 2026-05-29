@@ -404,6 +404,7 @@ peer_id,
 
         // Canonical app endpoints:
         .route("/proposal/:id", get(proposal_get))
+        .route("/proposal/:id/attestations", get(attestations_for_proposal))
         .route("/topk/:epoch/:domain", get(topk_get))
         .route("/domains", get(domains_list))
         // Tx template helpers (public attestation surface):
@@ -2161,6 +2162,111 @@ async fn all_proposals_by_domain(
 // ===========================
 // Recent attestations feed
 // ===========================
+
+#[derive(Serialize)]
+pub struct AttestationRecord {
+    pub txid: String,
+    pub attester: String,
+    pub score: u32,
+    pub confidence: u32,
+    pub height: u64,
+}
+
+#[derive(Serialize)]
+pub struct AttestationsForResp {
+    pub ok: bool,
+    pub proposal_id: String,
+    pub scanned_blocks: u64,
+    pub count: usize,
+    pub items: Vec<AttestationRecord>,
+}
+
+/// Individual attestations for one proposal: the attester address, score, confidence,
+/// txid and height of every attestation referencing `:id`. The existing
+/// `/recent/attestations*` endpoints intentionally collapse these into per-proposal
+/// aggregates (count + score/confidence sums), which is lossy: indexers, wallets and
+/// curation UIs cannot recover *who* attested, dedup distinct supporters, exclude
+/// interested parties, or reputation-weight votes without re-scanning every block and
+/// re-deriving signer addresses themselves. This exposes that detail directly.
+/// Attester = hash160(pubkey) recovered from the CSD_SIG_V1 script_sig
+/// (`[0x40][sig64][0x21][pub33]`). Oldest-first.
+async fn attestations_for_proposal(
+    Path(id): Path<String>,
+    State(st): State<ApiState>,
+) -> Json<AttestationsForResp> {
+    const MAX_BACK: u64 = 50_000;
+    let want = match parse_hash32(&id) {
+        Ok(x) => x,
+        Err(e) => {
+            return Json(AttestationsForResp {
+                ok: false,
+                proposal_id: format!("err:{e}"),
+                scanned_blocks: 0,
+                count: 0,
+                items: vec![],
+            })
+        }
+    };
+
+    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    let hi = get_hidx(&st.db, &tip)
+        .unwrap()
+        .unwrap_or_else(|| zero_hidx(tip));
+    let mut cur_hash = tip;
+    let mut cur_height = hi.height;
+    let mut scanned: u64 = 0;
+    let mut items: Vec<AttestationRecord> = vec![];
+
+    while scanned < MAX_BACK {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
+            break;
+        };
+        let blk: Block = match c().deserialize(&v) {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+        for tx in blk.txs.iter().skip(1) {
+            if let AppPayload::Attest {
+                proposal_id,
+                score,
+                confidence,
+            } = &tx.app
+            {
+                if proposal_id != &want {
+                    continue;
+                }
+                // CSD_SIG_V1: script_sig = [0x40][sig 64][0x21][pub 33] = 99 bytes.
+                let attester = tx
+                    .inputs
+                    .first()
+                    .filter(|i| i.script_sig.len() >= 99)
+                    .map(|i| format!("0x{}", hex::encode(crate::crypto::hash160(&i.script_sig[66..99]))))
+                    .unwrap_or_else(|| "0x".to_string());
+                items.push(AttestationRecord {
+                    txid: format!("0x{}", hex::encode(txid(tx))),
+                    attester,
+                    score: *score,
+                    confidence: *confidence,
+                    height: cur_height,
+                });
+            }
+        }
+        scanned += 1;
+        if blk.header.prev == [0u8; 32] || cur_height == 0 {
+            break;
+        }
+        cur_hash = blk.header.prev;
+        cur_height = cur_height.saturating_sub(1);
+    }
+    items.reverse(); // oldest-first
+    Json(AttestationsForResp {
+        ok: true,
+        proposal_id: format!("0x{}", hex::encode(want)),
+        scanned_blocks: scanned,
+        count: items.len(),
+        items,
+    })
+}
 
 fn scan_attestations(
     st: &ApiState,
