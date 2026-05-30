@@ -20,6 +20,7 @@ use crate::state::app_state::{get_proposal, get_topk, k_proposal, Attestation, P
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
 use crate::types::{AppPayload, Block, Hash32, OutPoint, Transaction, TxOut};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::params::GENESIS_HASH;
 
 fn c() -> crate::codec::ConsensusBincode {
     crate::codec::consensus_bincode()
@@ -1431,6 +1432,7 @@ async fn tx_proof_get(
             if txids[i] == want {
                 return Json(serde_json::json!({
                     "ok": true,
+                    "genesis_hash": format!("0x{}", hex::encode(GENESIS_HASH)),
                     "txid": format!("0x{}", hex::encode(want)),
                     "tx_index": i,
                     "tx_raw": format!("0x{}", hex::encode(c().serialize(tx).unwrap())),
