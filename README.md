@@ -23,6 +23,6 @@ your addr20 once, and starts mining.
 
 Run the binary directly:
 
-```sh
+```
 csd-pool-miner --address <YOUR_ADDR20>
 ```
