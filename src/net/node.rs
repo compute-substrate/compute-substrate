@@ -49,8 +49,8 @@ const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 4096;
-const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 1024;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 128;
+const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 256;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 12;
 
 const BAN_SECS: u64 = 10 * 60;
@@ -89,10 +89,10 @@ const DIAL_BACKOFF_SECS: u64 = 20;
 
 // ----------------- sync bounds -----------------
 
-const MAX_HEADERS_PER_SYNC: u64 = 4096;
+const MAX_HEADERS_PER_SYNC: u64 = 1024;
 const MAX_LOCATOR_LEN: usize = 128;
-const MAX_INFLIGHT_BLOCKS: usize = 16;
-const MAX_WANT_QUEUE: usize = 20_000;
+const MAX_INFLIGHT_BLOCKS: usize = 8;
+const MAX_WANT_QUEUE: usize = 5_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 128;
@@ -113,13 +113,13 @@ const PEER_SCORES_FILE: &str = "peer_scores.txt";
 
 const STARTUP_PREFERRED_PEERS: usize = 16;
 
-const MAX_CONNECTED_PEERS: usize = 128;
-const TARGET_CONNECTED_PEERS: usize = 96;
+const MAX_CONNECTED_PEERS: usize = 96;
+const TARGET_CONNECTED_PEERS: usize = 64;
 const PROTECT_NEW_PEER_SECS: u64 = 60;
 const PEER_CAP_BURST: usize = 64;
 
-const BOOTNODE_MAX_CONNECTED: usize = 512;
-const BOOTNODE_TARGET_CONNECTED: usize = 384;
+const BOOTNODE_MAX_CONNECTED: usize = 192;
+const BOOTNODE_TARGET_CONNECTED: usize = 128;
 const BOOTNODE_PROTECT_NEW_SECS: u64 = 60;
 const BOOTNODE_IDLE_EVICT_SECS: u64 = 120;
 const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
@@ -2307,8 +2307,8 @@ async fn run_p2p_loop(
     gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
 
 let rr_cfg = request_response::Config::default()
-    .with_request_timeout(Duration::from_secs(45))
-    .with_max_concurrent_streams(128);
+    .with_request_timeout(Duration::from_secs(30))
+    .with_max_concurrent_streams(32);
 
 let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
 
@@ -2465,6 +2465,8 @@ let mut last_disconnect_at: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_stale_penalty_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let p2p_started_at = Instant::now();
+
+let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(32));
 
     loop {
         tokio::select! {
@@ -3296,13 +3298,20 @@ let peers = export_peer_strings(
     }
 
     other => {
-        let db2 = db.clone();
-        tokio::task::spawn_blocking(move || {
-            handle_request_blocking(&db2, other)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
-        .unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
+
+let Ok(permit) = rr_serve_sem.clone().try_acquire_owned() else {
+    SyncResponse::Err { msg: "server busy".into() }
+};
+
+let db2 = db.clone();
+tokio::task::spawn_blocking(move || {
+    let _permit = permit;
+    handle_request_blocking(&db2, other)
+})
+.await
+.map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
+.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
+
     }
 };
 
