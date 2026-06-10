@@ -3299,18 +3299,44 @@ let peers = export_peer_strings(
 
     other => {
 
-let Ok(permit) = rr_serve_sem.clone().try_acquire_owned() else {
-    SyncResponse::Err { msg: "server busy".into() }
-};
 
-let db2 = db.clone();
-tokio::task::spawn_blocking(move || {
-    let _permit = permit;
-    handle_request_blocking(&db2, other)
-})
-.await
-.map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
-.unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
+
+
+
+match rr_serve_sem.clone().try_acquire_owned() {
+
+        Ok(permit) => {
+
+            let db2 = db.clone();
+
+            tokio::task::spawn_blocking(move || {
+
+                let _permit = permit;
+
+                handle_request_blocking(&db2, other)
+
+            })
+
+            .await
+
+            .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
+
+            .unwrap_or_else(|e| SyncResponse::Err { msg: e.to_string() })
+
+        }
+
+        Err(_) => {
+
+            SyncResponse::Err { msg: "server busy".into() }
+
+        }
+
+    }
+
+
+
+
+
 
     }
 };
