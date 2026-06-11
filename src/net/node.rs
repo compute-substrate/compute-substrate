@@ -43,13 +43,12 @@ const SYNC_PROTOCOL: &str = SYNC_PROTO;
 
 // ----------------- hardening constants -----------------
 
-const MAX_RR_SLACK_BYTES: u64 = 64 * 1024; // 64 KiB
-const MAX_RR_MSG_BYTES: u64 = (MAX_BLOCK_BYTES as u64) + MAX_RR_SLACK_BYTES;
+const MAX_RR_MSG_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB hard network cap
 
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 128;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 32;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 256;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 12;
 
@@ -2307,8 +2306,8 @@ async fn run_p2p_loop(
     gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
 
 let rr_cfg = request_response::Config::default()
-    .with_request_timeout(Duration::from_secs(30))
-    .with_max_concurrent_streams(32);
+    .with_request_timeout(Duration::from_secs(15))
+    .with_max_concurrent_streams(4);
 
 let protocols = std::iter::once((SYNC_PROTOCOL, ProtocolSupport::Full));
 
@@ -2466,7 +2465,7 @@ let mut last_stale_penalty_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let p2p_started_at = Instant::now();
 
-let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(32));
+let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(4));
 
     loop {
         tokio::select! {
