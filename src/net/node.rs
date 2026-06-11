@@ -4251,58 +4251,58 @@ let Some(anchor_h) = anchor_height else {
     return Ok(SyncResponse::Headers { headers: vec![] });
 };
 
-            // Build canonical path from tip back to anchor, then reverse it so we can
-            // return the NEXT contiguous chunk after the anchor.
-            let mut rev_path: Vec<(Hash32, BlockHeader, u64)> = Vec::new();
-            let mut cur = tip;
+// Memory-bounded header collection.
+// Keep only the first `max` headers after the anchor.
+let mut outq: VecDeque<BlockHeader> =
+    VecDeque::with_capacity(max as usize);
 
-            while cur != [0u8; 32] {
-                let hi = get_hidx(db, &cur)?
-                    .ok_or_else(|| anyhow::anyhow!("missing idx for {}", hex32(&cur)))?;
+let mut cur = tip;
 
-                let Some(bv) = db.blocks.get(k_block(&cur))? else {
-                    break;
-                };
+while cur != [0u8; 32] {
+    let hi = get_hidx(db, &cur)?
+        .ok_or_else(|| anyhow::anyhow!("missing idx for {}", hex32(&cur)))?;
 
-                if bv.len() > MAX_BLOCK_BYTES {
-                    bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
-                }
+    if hi.height <= anchor_h {
+        break;
+    }
 
-                let blk: Block = crate::codec::consensus_bincode().deserialize::<Block>(&bv)?;
+    let Some(bv) = db.blocks.get(k_block(&cur))? else {
+        break;
+    };
 
-                let computed = header_hash(&blk.header);
-                if computed != cur {
-                    bail!("db corruption: header hash mismatch for {}", hex32(&cur));
-                }
+    if bv.len() > MAX_BLOCK_BYTES {
+        bail!("db corruption: stored block exceeds MAX_BLOCK_BYTES");
+    }
 
-                rev_path.push((cur, blk.header.clone(), hi.height));
+    let blk: Block =
+        crate::codec::consensus_bincode().deserialize::<Block>(&bv)?;
 
-                if hi.height <= anchor_h {
-                    break;
-                }
+    let computed = header_hash(&blk.header);
+    if computed != cur {
+        bail!(
+            "db corruption: header hash mismatch for {}",
+            hex32(&cur)
+        );
+    }
 
-                cur = hi.parent;
-            }
+    outq.push_front(blk.header.clone());
 
-            rev_path.reverse();
+    // Never retain more than max headers.
+    if outq.len() as u64 > max {
+        outq.pop_back();
+    }
 
-            let mut out: Vec<BlockHeader> = Vec::new();
-            for (_h, hdr, hgt) in rev_path {
-                if hgt <= anchor_h {
-                    continue;
-                }
-                out.push(hdr);
-                if out.len() as u64 >= max {
-                    break;
-                }
-            }
+    cur = hi.parent;
+}
 
-            println!(
-                "[sync-serve] GetHeadersByLocator: anchor_h={} returning={} tip={}",
-                anchor_h,
-                out.len(),
-                hex32(&tip),
-            );
+let out: Vec<BlockHeader> = outq.into_iter().collect();
+
+println!(
+    "[sync-serve] GetHeadersByLocator: anchor_h={} returning={} tip={}",
+    anchor_h,
+    out.len(),
+    hex32(&tip),
+);
 
             Ok(SyncResponse::Headers { headers: out })
         }
