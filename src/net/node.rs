@@ -3126,13 +3126,14 @@ maybe_send_bootstrap_requests(
                             }
 
                             if topic == TOPIC_HDR {
-                                let gh: GossipHeader = bincode::options()
+                                let gh: GossipHeader = match bincode::options()
     .with_fixint_encoding()
     .allow_trailing_bytes()
     .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
-    .deserialize::<GossipHeader>(&data) {
-                                    Ok(x) => x,
-                                    Err(_) => {
+    .deserialize::<GossipHeader>(&data)
+{
+    Ok(x) => x,
+    Err(_) => {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "bad gossip header decode");
                                             bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
@@ -3248,13 +3249,14 @@ let _ = pump_blocks(
 );
 
                             } else if topic == TOPIC_TX {
-                                let gt: GossipTx = bincode::options()
+                                let gt: GossipTx = match bincode::options()
     .with_fixint_encoding()
     .allow_trailing_bytes()
     .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
-    .deserialize::<GossipTx>(&data) {
-                                    Ok(x) => x,
-                                    Err(_) => {
+    .deserialize::<GossipTx>(&data)
+{
+    Ok(x) => x,
+    Err(_) => {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "bad gossip tx decode");
                                             bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
