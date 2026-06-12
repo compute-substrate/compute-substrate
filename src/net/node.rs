@@ -96,6 +96,12 @@ const MAX_INFLIGHT_BLOCKS: usize = 8;
 const MAX_WANT_QUEUE: usize = 5_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
 
+const MAX_DIALS_PER_POLL: usize = 8;
+const MAX_DIALS_FROM_PEERS_RESPONSE: usize = 8;
+const MAX_STARTUP_DIALS: usize = 16;
+
+const MAX_KNOWN_PEERS: usize = 512;
+
 const MAX_PENDING_APPLY: usize = 512;
 const MAX_PROVIDERS: usize = 50_000;
 const MAX_SEEN_BLOCKS: usize = 50_000;
@@ -512,7 +518,7 @@ fn is_dialable_addr(addr: &Multiaddr) -> bool {
     use libp2p::multiaddr::Protocol;
 
     let mut has_ip_or_dns = false;
-    let mut has_tcp = false;
+    let mut tcp_port: Option<u16> = None;
 
     for p in addr.iter() {
         match p {
@@ -522,12 +528,12 @@ fn is_dialable_addr(addr: &Multiaddr) -> bool {
             | Protocol::Dns4(_)
             | Protocol::Dns6(_)
             | Protocol::Dnsaddr(_) => has_ip_or_dns = true,
-            Protocol::Tcp(_) => has_tcp = true,
+            Protocol::Tcp(port) => tcp_port = Some(port),
             _ => {}
         }
     }
 
-    has_ip_or_dns && has_tcp
+    has_ip_or_dns && tcp_port.map(|p| p > 0).unwrap_or(false)
 }
 
 fn is_routable_ipv4(ip: Ipv4Addr) -> bool {
@@ -758,10 +764,16 @@ fn insert_known_addr(
     peer: PeerId,
     addr: Multiaddr,
 ) {
+    if !known_addrs.contains_key(&peer) && known_addrs.len() >= MAX_KNOWN_PEERS {
+        return;
+    }
+
     let entry = known_addrs.entry(peer).or_default();
+
     if entry.len() >= MAX_ADDRS_PER_PEER && !entry.contains(&addr) {
         return;
     }
+
     entry.insert(addr);
 }
 
@@ -2464,6 +2476,8 @@ let mut startup_peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
 sort_peer_ids_by_quality(&mut startup_peer_ids, &peer_quality);
 startup_peer_ids.truncate(STARTUP_PREFERRED_PEERS);
 
+let mut startup_dials = 0usize;
+
 for pid in startup_peer_ids {
     if pid == peer_id {
         continue;
@@ -2479,6 +2493,7 @@ for pid in startup_peer_ids {
         println!("[pex] startup dial known peer {} via {}", pid, addr);
 
         let _ = swarm.dial(addr.clone());
+startup_dials += 1;
         last_dial_by_addr.insert(addr.clone(), Instant::now());
         note_pending_dial(&mut pending_dials, pid, addr);
     }
@@ -2747,6 +2762,8 @@ if !want_blocks.is_empty() || !inflight.is_empty() {
 let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
 sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
+let mut dials_this_poll = 0usize;
+
 for pid in peer_ids {
 
     let max_connected = if cfg.is_bootnode {
@@ -2787,9 +2804,14 @@ if addr_is_backed_off(&addr_backoff, &addr) {
             }
         }
 
+if dials_this_poll >= MAX_DIALS_PER_POLL {
+    break;
+}
+
         println!("[pex] periodic redial {} via {}", pid, addr);
 
 let _ = swarm.dial(addr.clone());
+dials_this_poll += 1;
 last_dial_by_addr.insert(addr.clone(), Instant::now());
 note_pending_dial(&mut pending_dials, pid, addr);
 
@@ -2965,6 +2987,15 @@ for addr in take_pending_dials(&mut pending_dials, &pid) {
 known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
 
             }
+
+} else if err_s.contains("MultiaddrNotSupported") {
+    let addrs = known_addrs_for_peer(&known_addrs, &pid);
+    for addr in addrs {
+        println!("[pex] removing unsupported addr for {} -> {}", pid, addr);
+        remove_known_addr(&mut known_addrs, &pid, &addr);
+    }
+    known_peers_atomic.store(known_addrs.len(), Ordering::Relaxed);
+
         } else if err_s.contains("InvalidData")
             || err_s.contains("error: Input")
             || err_s.contains("kind: InvalidData")
@@ -4062,6 +4093,8 @@ save_known_addrs(&cfg.datadir, peer_id, &known_addrs);
 let mut peer_ids: Vec<PeerId> = known_addrs.keys().copied().collect();
 sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
+let mut dials_from_peers_response = 0usize;
+
 for pid in peer_ids {
 
     let max_connected = if cfg.is_bootnode {
@@ -4097,11 +4130,17 @@ for addr in addrs {
         }
     }
 
+
+if dials_from_peers_response >= MAX_DIALS_FROM_PEERS_RESPONSE {
+    break;
+}
+
     println!("[pex] dialing learned peer {} via {}", pid, addr);
 
     let _ = swarm.dial(addr.clone());
     last_dial_by_addr.insert(addr.clone(), Instant::now());
     note_pending_dial(&mut pending_dials, pid, addr);
+dials_from_peers_response += 1;
 }
 
 }
