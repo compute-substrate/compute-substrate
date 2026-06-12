@@ -110,7 +110,7 @@ const MAX_OUTBOUND_RR: usize = 16;
 const HEADERS_REQ_COOLDOWN_SECS: u64 = 20;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 64;
-const PEER_REQ_ON_CONNECT: u16 = 128;
+const PEER_REQ_ON_CONNECT: u16 = 64;
 const PEER_REDIAL_EVERY_SECS: u64 = 15;
 const MAX_ADDRS_PER_PEER: usize = 8;
 const BOOTSTRAP_REQ_COOLDOWN_SECS: u64 = 30;
@@ -179,9 +179,10 @@ fn load_known_addrs(datadir: &str, self_peer: PeerId) -> HashMap<PeerId, HashSet
             continue;
         };
 
-        if should_store_discovered_addr(self_peer, pid, &addr) {
-            out.entry(pid).or_default().insert(addr);
-        }
+if should_store_discovered_addr(self_peer, pid, &addr) {
+    insert_known_addr(&mut out, pid, addr);
+}
+
     }
 
     out
@@ -537,12 +538,17 @@ fn is_dialable_addr(addr: &Multiaddr) -> bool {
 }
 
 fn is_routable_ipv4(ip: Ipv4Addr) -> bool {
-    !(ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_multicast())
+
+let o = ip.octets();
+let is_cgnat = o[0] == 100 && (64..=127).contains(&o[1]);
+
+!(ip.is_loopback()
+    || ip.is_private()
+    || ip.is_link_local()
+    || ip.is_unspecified()
+    || ip.is_broadcast()
+    || ip.is_multicast()
+    || is_cgnat)
 }
 
 fn is_routable_ipv6(ip: Ipv6Addr) -> bool {
