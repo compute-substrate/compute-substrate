@@ -94,6 +94,9 @@ const MAX_INFLIGHT_BLOCKS: usize = 8;
 const MAX_WANT_QUEUE: usize = 5_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
 
+const MAX_OUTBOUND_RR: usize = 16;
+const HEADERS_REQ_COOLDOWN_SECS: u64 = 20;
+
 const MAX_PEERS_IN_EXCHANGE: usize = 128;
 const PEER_REQ_ON_CONNECT: u16 = 128;
 const PEER_REDIAL_EVERY_SECS: u64 = 15;
@@ -112,13 +115,13 @@ const PEER_SCORES_FILE: &str = "peer_scores.txt";
 
 const STARTUP_PREFERRED_PEERS: usize = 16;
 
-const MAX_CONNECTED_PEERS: usize = 96;
-const TARGET_CONNECTED_PEERS: usize = 64;
+const MAX_CONNECTED_PEERS: usize = 32;
+const TARGET_CONNECTED_PEERS: usize = 24;
 const PROTECT_NEW_PEER_SECS: u64 = 60;
 const PEER_CAP_BURST: usize = 64;
 
-const BOOTNODE_MAX_CONNECTED: usize = 192;
-const BOOTNODE_TARGET_CONNECTED: usize = 128;
+const BOOTNODE_MAX_CONNECTED: usize = 64;
+const BOOTNODE_TARGET_CONNECTED: usize = 48;
 const BOOTNODE_PROTECT_NEW_SECS: u64 = 60;
 const BOOTNODE_IDLE_EVICT_SECS: u64 = 120;
 const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
@@ -1431,7 +1434,9 @@ fn maybe_send_bootstrap_requests(
     peer: PeerId,
     last_bootstrap_req_at: &mut HashMap<PeerId, Instant>,
     last_tip_req_at: &mut HashMap<PeerId, Instant>,
+    outbound_rr: &mut HashMap<request_response::OutboundRequestId, Instant>,
 ) {
+
     let due = last_bootstrap_req_at
         .get(&peer)
         .map(|t| t.elapsed() >= Duration::from_secs(BOOTSTRAP_REQ_COOLDOWN_SECS))
@@ -1441,22 +1446,31 @@ fn maybe_send_bootstrap_requests(
         return;
     }
 
+if outbound_rr.len() >= MAX_OUTBOUND_RR {
+    return;
+}
+
+let rid = swarm
+    .behaviour_mut()
+    .rr
+    .send_request(&peer, SyncRequest::GetTip);
+
+outbound_rr.insert(rid, Instant::now());
+last_tip_req_at.insert(peer, Instant::now());
+println!("[sync] requested tip ({rid:?})");
+
+if outbound_rr.len() < MAX_OUTBOUND_RR {
     let rid = swarm
-        .behaviour_mut()
-        .rr
-        .send_request(&peer, SyncRequest::GetTip);
-
-    last_tip_req_at.insert(peer, Instant::now());
-    println!("[sync] requested tip ({rid:?})");
-
-    let _ = swarm
         .behaviour_mut()
         .rr
         .send_request(&peer, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
 
-println!("[pex] requested peers from {}", peer);
+    outbound_rr.insert(rid, Instant::now());
+    println!("[pex] requested peers from {}", peer);
+}
 
-    last_bootstrap_req_at.insert(peer, Instant::now());
+last_bootstrap_req_at.insert(peer, Instant::now());
+
 }
 
 fn choose_best_sync_peer(
@@ -2457,6 +2471,9 @@ poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut last_tip_req_at: HashMap<PeerId, Instant> = HashMap::new();
 
+let mut outbound_rr: HashMap<request_response::OutboundRequestId, Instant> = HashMap::new();
+let mut last_headers_req_at: HashMap<PeerId, Instant> = HashMap::new();
+
 let mut last_gettip_log_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let mut last_bootstrap_req_at: HashMap<PeerId, Instant> = HashMap::new();
@@ -2472,6 +2489,7 @@ let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(4));
 
 _ = poll.tick() => {
 
+outbound_rr.retain(|_, t| t.elapsed() < Duration::from_secs(60));
 prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
 prune_bad_providers(&mut bad_providers);
 
@@ -2559,7 +2577,12 @@ for p in connected.iter().cloned() {
     let stale_due = tip_age >= TIP_POLL_SECS;
 
     if regular_due || stale_due {
-        let _ = swarm.behaviour_mut().rr.send_request(&p, SyncRequest::GetTip);
+
+if outbound_rr.len() < MAX_OUTBOUND_RR {
+    let rid = swarm.behaviour_mut().rr.send_request(&p, SyncRequest::GetTip);
+    outbound_rr.insert(rid, Instant::now());
+}
+
         last_tip_req_at.insert(p, Instant::now());
 
         if stale_due {
@@ -2834,6 +2857,7 @@ if !is_quarantined(&quarantine, &peer_id) {
         peer_id,
         &mut last_bootstrap_req_at,
         &mut last_tip_req_at,
+&mut outbound_rr,
     );
 
     if sync_peer.is_none() {
@@ -2922,6 +2946,8 @@ SwarmEvent::Dialing { peer_id, connection_id } => {
                          peer_tips.remove(&peer_id);
                         last_tip_req_at.remove(&peer_id);
 
+last_headers_req_at.remove(&peer_id);
+
 last_stale_penalty_at.remove(&peer_id);
 
 connected_since.remove(&peer_id);
@@ -3008,6 +3034,7 @@ maybe_send_bootstrap_requests(
     pid,
     &mut last_bootstrap_req_at,
     &mut last_tip_req_at,
+&mut outbound_rr,
 );
     }
 }
@@ -3077,20 +3104,29 @@ let mut newly_indexed_header = false;
             let tip = get_tip(&db)?.unwrap_or([0u8; 32]);
             let locator = build_locator(&db, &tip);
 
-            let _ = swarm.behaviour_mut().rr.send_request(
-                &p,
-                SyncRequest::GetHeadersByLocator {
-                    locator,
-                    max: MAX_HEADERS_PER_SYNC,
-                },
-            );
+let headers_due = last_headers_req_at
+    .get(&p)
+    .map(|t| t.elapsed() >= Duration::from_secs(HEADERS_REQ_COOLDOWN_SECS))
+    .unwrap_or(true);
 
-            println!(
-                "[sync] gossip header parent unknown; requesting headers from {} for {}",
-                p,
-                hex32(&h)
-            );
+if headers_due && outbound_rr.len() < MAX_OUTBOUND_RR {
+    let rid = swarm.behaviour_mut().rr.send_request(
+        &p,
+        SyncRequest::GetHeadersByLocator {
+            locator,
+            max: MAX_HEADERS_PER_SYNC,
+        },
+    );
 
+    outbound_rr.insert(rid, Instant::now());
+    last_headers_req_at.insert(p, Instant::now());
+
+    println!(
+        "[sync] gossip header parent unknown; requesting headers from {} for {}",
+        p,
+        hex32(&h)
+    );
+}
             continue;
         }
     }
@@ -3357,6 +3393,9 @@ let mut resp = resp;
                                         }
 
                                         Message::Response { request_id: rid, response } => {
+
+outbound_rr.remove(&rid);
+
                                             match response {
 
 SyncResponse::Tip { hash: hash, height, chainwork } => {
@@ -3460,19 +3499,30 @@ if better_fork_tip(chainwork, &hash, local_w, &locator_tip) {
         let locator = build_locator(&db, &locator_tip);
         let locator_len = locator.len();
 
-        let _ = swarm.behaviour_mut().rr.send_request(
-            &peer,
-            SyncRequest::GetHeadersByLocator {
-                locator,
-                max: MAX_HEADERS_PER_SYNC,
-            },
-        );
+let headers_due = last_headers_req_at
+    .get(&peer)
+    .map(|t| t.elapsed() >= Duration::from_secs(HEADERS_REQ_COOLDOWN_SECS))
+    .unwrap_or(true);
 
-        println!(
-            "[sync] requesting headers-by-locator from {} (locator_len={})",
-            peer,
-            locator_len
-        );
+if headers_due && outbound_rr.len() < MAX_OUTBOUND_RR {
+    let rid = swarm.behaviour_mut().rr.send_request(
+        &peer,
+        SyncRequest::GetHeadersByLocator {
+            locator,
+            max: MAX_HEADERS_PER_SYNC,
+        },
+    );
+
+    outbound_rr.insert(rid, Instant::now());
+    last_headers_req_at.insert(peer, Instant::now());
+
+    println!(
+        "[sync] requesting headers-by-locator from {} (locator_len={})",
+        peer,
+        locator_len
+    );
+}
+
     }
 }
 
@@ -4056,6 +4106,9 @@ let _ = compact_and_log_want_queue(
 
 
 Event::OutboundFailure { peer, request_id, error } => {
+
+outbound_rr.remove(&request_id);
+
     println!("[sync] outbound failure to {}: {:?}", peer, error);
 
 {
