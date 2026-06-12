@@ -27,6 +27,8 @@ use std::{
 use tokio::time::{interval, MissedTickBehavior};
 use tokio::sync::RwLock;
 
+use bincode::Options;
+
 use crate::{
     chain::index::{get_hidx, header_hash, index_header},
     chain::lock::ChainLock,
@@ -1118,8 +1120,10 @@ impl request_response::Codec for SyncCodec {
             ));
         }
 
-        let req: SyncRequest = crate::codec::consensus_bincode()
-            .deserialize::<SyncRequest>(&buf)
+let req: SyncRequest = crate::codec::consensus_bincode()
+    .with_limit(MAX_RR_MSG_BYTES)
+    .deserialize::<SyncRequest>(&buf)
+
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         Ok(req)
@@ -1143,8 +1147,10 @@ impl request_response::Codec for SyncCodec {
             ));
         }
 
-        let resp: SyncResponse = crate::codec::consensus_bincode()
-            .deserialize::<SyncResponse>(&buf)
+let resp: SyncResponse = crate::codec::consensus_bincode()
+    .with_limit(MAX_RR_MSG_BYTES)
+    .deserialize::<SyncResponse>(&buf)
+
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         Ok(resp)
@@ -3116,7 +3122,9 @@ maybe_send_bootstrap_requests(
                             }
 
                             if topic == TOPIC_HDR {
-                                let gh: GossipHeader = match crate::codec::consensus_bincode().deserialize::<GossipHeader>(&data) {
+                                let gh: GossipHeader = match crate::codec::consensus_bincode()
+    .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
+    .deserialize::<GossipHeader>(&data) {
                                     Ok(x) => x,
                                     Err(_) => {
                                         if let Some(p) = src {
@@ -3234,7 +3242,9 @@ let _ = pump_blocks(
 );
 
                             } else if topic == TOPIC_TX {
-                                let gt: GossipTx = match crate::codec::consensus_bincode().deserialize::<GossipTx>(&data) {
+                                let gt: GossipTx = match crate::codec::consensus_bincode()
+    .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
+    .deserialize::<GossipTx>(&data) {
                                     Ok(x) => x,
                                     Err(_) => {
                                         if let Some(p) = src {
