@@ -3126,7 +3126,9 @@ maybe_send_bootstrap_requests(
                             }
 
                             if topic == TOPIC_HDR {
-                                let gh: GossipHeader = match crate::codec::consensus_bincode()
+                                let gh: GossipHeader = bincode::options()
+    .with_fixint_encoding()
+    .allow_trailing_bytes()
     .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
     .deserialize::<GossipHeader>(&data) {
                                     Ok(x) => x,
@@ -3246,7 +3248,9 @@ let _ = pump_blocks(
 );
 
                             } else if topic == TOPIC_TX {
-                                let gt: GossipTx = match crate::codec::consensus_bincode()
+                                let gt: GossipTx = bincode::options()
+    .with_fixint_encoding()
+    .allow_trailing_bytes()
     .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
     .deserialize::<GossipTx>(&data) {
                                     Ok(x) => x,
