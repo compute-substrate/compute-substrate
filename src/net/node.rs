@@ -100,7 +100,7 @@ const MAX_DIALS_PER_POLL: usize = 8;
 const MAX_DIALS_FROM_PEERS_RESPONSE: usize = 8;
 const MAX_STARTUP_DIALS: usize = 16;
 
-const MAX_KNOWN_PEERS: usize = 512;
+const MAX_KNOWN_PEERS: usize = 128;
 
 const MAX_PENDING_APPLY: usize = 512;
 const MAX_PROVIDERS: usize = 50_000;
@@ -109,7 +109,7 @@ const MAX_SEEN_BLOCKS: usize = 50_000;
 const MAX_OUTBOUND_RR: usize = 16;
 const HEADERS_REQ_COOLDOWN_SECS: u64 = 20;
 
-const MAX_PEERS_IN_EXCHANGE: usize = 128;
+const MAX_PEERS_IN_EXCHANGE: usize = 64;
 const PEER_REQ_ON_CONNECT: u16 = 128;
 const PEER_REDIAL_EVERY_SECS: u64 = 15;
 const MAX_ADDRS_PER_PEER: usize = 8;
@@ -2479,6 +2479,10 @@ startup_peer_ids.truncate(STARTUP_PREFERRED_PEERS);
 let mut startup_dials = 0usize;
 
 for pid in startup_peer_ids {
+    if startup_dials >= MAX_STARTUP_DIALS {
+        break;
+    }
+
     if pid == peer_id {
         continue;
     }
@@ -2486,6 +2490,10 @@ for pid in startup_peer_ids {
     let addrs = sorted_peer_addrs_for_export(peer_id, pid, &known_addrs);
 
     for addr in addrs {
+        if startup_dials >= MAX_STARTUP_DIALS {
+            break;
+        }
+
         if addr_is_backed_off(&addr_backoff, &addr) {
             continue;
         }
@@ -2493,12 +2501,11 @@ for pid in startup_peer_ids {
         println!("[pex] startup dial known peer {} via {}", pid, addr);
 
         let _ = swarm.dial(addr.clone());
-startup_dials += 1;
+        startup_dials += 1;
         last_dial_by_addr.insert(addr.clone(), Instant::now());
         note_pending_dial(&mut pending_dials, pid, addr);
     }
 }
-
 
     let mut connected: HashSet<PeerId> = HashSet::new();
 
@@ -2764,6 +2771,18 @@ sort_peer_ids_by_quality(&mut peer_ids, &peer_quality);
 
 let mut dials_this_poll = 0usize;
 
+println!(
+    "[mem] known_peers={} providers={} inflight={} rid_to_hash={} outbound_rr={} pending_apply={} seen_blocks={}",
+    known_addrs.len(),
+    providers.len(),
+    inflight.len(),
+    rid_to_hash.len(),
+    outbound_rr.len(),
+    pending_apply.len(),
+    seen_blocks.len(),
+);
+
+
 for pid in peer_ids {
 
     let max_connected = if cfg.is_bootnode {
@@ -2809,17 +2828,6 @@ if dials_this_poll >= MAX_DIALS_PER_POLL {
 }
 
         println!("[pex] periodic redial {} via {}", pid, addr);
-
-println!(
-    "[mem] known_peers={} providers={} inflight={} rid_to_hash={} outbound_rr={} pending_apply={} seen_blocks={}",
-    known_addrs.len(),
-    providers.len(),
-    inflight.len(),
-    rid_to_hash.len(),
-    outbound_rr.len(),
-    pending_apply.len(),
-    seen_blocks.len(),
-);
 
 let _ = swarm.dial(addr.clone());
 dials_this_poll += 1;
