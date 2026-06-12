@@ -2812,7 +2812,7 @@ if dials_this_poll >= MAX_DIALS_PER_POLL {
 
 println!(
     "[mem] known_peers={} providers={} inflight={} rid_to_hash={} outbound_rr={} pending_apply={} seen_blocks={}",
-    known_peers.len(),
+    known_addrs.len(),
     providers.len(),
     inflight.len(),
     rid_to_hash.len(),
