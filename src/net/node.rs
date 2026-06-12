@@ -94,6 +94,10 @@ const MAX_INFLIGHT_BLOCKS: usize = 8;
 const MAX_WANT_QUEUE: usize = 5_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
 
+const MAX_PENDING_APPLY: usize = 512;
+const MAX_PROVIDERS: usize = 50_000;
+const MAX_SEEN_BLOCKS: usize = 50_000;
+
 const MAX_OUTBOUND_RR: usize = 16;
 const HEADERS_REQ_COOLDOWN_SECS: u64 = 20;
 
@@ -255,6 +259,52 @@ fn prune_bad_providers(
         peers.retain(|_, t| t.elapsed().as_secs() < BAD_PROVIDER_RETRY_SECS);
         !peers.is_empty()
     });
+}
+
+fn prune_ephemeral_sync_state(
+    db: &Stores,
+    pending_apply: &mut HashMap<Hash32, Block>,
+    providers: &mut HashMap<Hash32, PeerId>,
+    seen_blocks: &mut HashSet<Hash32>,
+) {
+    let (_tip, _height, local_work) = local_tip_and_work(db);
+
+    pending_apply.retain(|h, _| {
+        get_hidx(db, h)
+            .ok()
+            .flatten()
+            .map(|hi| hi.chainwork > local_work)
+            .unwrap_or(false)
+    });
+
+    if pending_apply.len() > MAX_PENDING_APPLY {
+        let mut keep: Vec<(Hash32, u128)> = pending_apply
+            .keys()
+            .filter_map(|h| get_hidx(db, h).ok().flatten().map(|hi| (*h, hi.chainwork)))
+            .collect();
+
+        keep.sort_by(|a, b| b.1.cmp(&a.1));
+        keep.truncate(MAX_PENDING_APPLY);
+
+        let keep_set: HashSet<Hash32> = keep.into_iter().map(|x| x.0).collect();
+        pending_apply.retain(|h, _| keep_set.contains(h));
+    }
+
+    providers.retain(|h, _| {
+        get_hidx(db, h)
+            .ok()
+            .flatten()
+            .map(|hi| hi.chainwork > local_work)
+            .unwrap_or(false)
+    });
+
+    if providers.len() > MAX_PROVIDERS {
+        providers.clear();
+    }
+
+    if seen_blocks.len() > MAX_SEEN_BLOCKS {
+        seen_blocks.clear();
+    }
 }
 
 fn hex32(h: &Hash32) -> String {
@@ -2517,6 +2567,13 @@ let _ = compact_and_log_want_queue(
     &inflight,
     &mut want_blocks,
     "poll",
+);
+
+prune_ephemeral_sync_state(
+    &db,
+    &mut pending_apply,
+    &mut providers,
+    &mut seen_blocks,
 );
 
 
