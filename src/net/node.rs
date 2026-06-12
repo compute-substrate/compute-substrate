@@ -2810,6 +2810,17 @@ if dials_this_poll >= MAX_DIALS_PER_POLL {
 
         println!("[pex] periodic redial {} via {}", pid, addr);
 
+println!(
+    "[mem] known_peers={} providers={} inflight={} rid_to_hash={} outbound_rr={} pending_apply={} seen_blocks={}",
+    known_peers.len(),
+    providers.len(),
+    inflight.len(),
+    rid_to_hash.len(),
+    outbound_rr.len(),
+    pending_apply.len(),
+    seen_blocks.len(),
+);
+
 let _ = swarm.dial(addr.clone());
 dials_this_poll += 1;
 last_dial_by_addr.insert(addr.clone(), Instant::now());
