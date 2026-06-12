@@ -1120,7 +1120,9 @@ impl request_response::Codec for SyncCodec {
             ));
         }
 
-let req: SyncRequest = crate::codec::consensus_bincode()
+let req: SyncRequest = bincode::options()
+    .with_fixint_encoding()
+    .allow_trailing_bytes()
     .with_limit(MAX_RR_MSG_BYTES)
     .deserialize::<SyncRequest>(&buf)
 
@@ -1147,7 +1149,9 @@ let req: SyncRequest = crate::codec::consensus_bincode()
             ));
         }
 
-let resp: SyncResponse = crate::codec::consensus_bincode()
+let resp: SyncResponse = bincode::options()
+    .with_fixint_encoding()
+    .allow_trailing_bytes()
     .with_limit(MAX_RR_MSG_BYTES)
     .deserialize::<SyncResponse>(&buf)
 
