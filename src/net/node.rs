@@ -964,7 +964,6 @@ fn note_invalid(
     if b.invalid >= RL_MAX_INVALID_PER_WINDOW {
         ban_peer(bans, p, "too many invalid messages");
 
-let _ = swarm.disconnect_peer_id(peer);
 
     }
 }
@@ -1000,8 +999,6 @@ fn allow_gossip(
     b.gossip_msgs = b.gossip_msgs.saturating_add(1);
     if b.gossip_msgs > RL_MAX_GOSSIP_MSGS_PER_WINDOW {
         ban_peer(bans, p, "gossip rate limit exceeded");
-
-let _ = swarm.disconnect_peer_id(peer);
 
         return false;
     }
@@ -3177,18 +3174,17 @@ maybe_send_bootstrap_requests(
                                 continue;
                             }
 
-                            if let Some(p) = src {
+if let Some(p) = src {
+    if !allow_gossip(&mut buckets, &mut bans, p) {
+        let _ = swarm.disconnect_peer_id(p);
+        continue;
+    }
 
-if !allow_gossip(&mut buckets, &mut bans, p) {
-    let _ = swarm.disconnect_peer_id(p);
-    continue;
+    if is_quarantined(&quarantine, &p) {
+        let _ = swarm.disconnect_peer_id(p);
+        continue;
+    }
 }
-
-                                if is_quarantined(&quarantine, &p) {
-                                    // silently ignore gossip from quarantined peers
-                                    continue;
-                                }
-                            }
 
                             if topic == TOPIC_HDR {
                                 let gh: GossipHeader = match bincode::options()
