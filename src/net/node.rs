@@ -45,14 +45,14 @@ const SYNC_PROTOCOL: &str = SYNC_PROTO;
 
 // ----------------- hardening constants -----------------
 
-const MAX_RR_MSG_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB hard network cap
+const MAX_RR_MSG_BYTES: u64 = 1024 * 1024;
 
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 32;
-const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 256;
-const RL_MAX_INVALID_PER_WINDOW: u32 = 12;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 8;
+const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 32;
+const RL_MAX_INVALID_PER_WINDOW: u32 = 3;
 
 const BAN_SECS: u64 = 10 * 60;
 
@@ -963,6 +963,9 @@ fn note_invalid(
     );
     if b.invalid >= RL_MAX_INVALID_PER_WINDOW {
         ban_peer(bans, p, "too many invalid messages");
+
+let _ = swarm.disconnect_peer_id(peer);
+
     }
 }
 
@@ -997,6 +1000,9 @@ fn allow_gossip(
     b.gossip_msgs = b.gossip_msgs.saturating_add(1);
     if b.gossip_msgs > RL_MAX_GOSSIP_MSGS_PER_WINDOW {
         ban_peer(bans, p, "gossip rate limit exceeded");
+
+let _ = swarm.disconnect_peer_id(peer);
+
         return false;
     }
     true
@@ -2570,7 +2576,7 @@ let mut last_stale_penalty_at: HashMap<PeerId, Instant> = HashMap::new();
 
 let p2p_started_at = Instant::now();
 
-let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(4));
+let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(1));
 
     loop {
         tokio::select! {
@@ -3172,9 +3178,12 @@ maybe_send_bootstrap_requests(
                             }
 
                             if let Some(p) = src {
-                                if !allow_gossip(&mut buckets, &mut bans, p) {
-                                    continue;
-                                }
+
+if !allow_gossip(&mut buckets, &mut bans, p) {
+    let _ = swarm.disconnect_peer_id(p);
+    continue;
+}
+
                                 if is_quarantined(&quarantine, &p) {
                                     // silently ignore gossip from quarantined peers
                                     continue;
@@ -3338,6 +3347,11 @@ match mempool.insert_checked(&db, gt.tx) {
                                         if let Some(p) = src {
                                             note_invalid(&mut buckets, &mut bans, p, "gossip tx failed mempool validation");
                                             bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
+
+if buckets.get(&p).map(|b| b.invalid >= 3).unwrap_or(false) {
+    let _ = swarm.disconnect_peer_id(p);
+}
+
                                         }
                                     }
                                 }
