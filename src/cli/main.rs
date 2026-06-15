@@ -1495,6 +1495,7 @@ eprintln!(
                                         let _ = mined_tx.send(crate::net::MinedHeaderEvent {
                                             hash: bh,
                                             header: blk.header.clone(),
+                                            block: blk.clone(),
                                         });
                                     }
                                     Err(e) => {

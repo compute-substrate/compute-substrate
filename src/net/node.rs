@@ -92,15 +92,15 @@ const DIAL_BACKOFF_SECS: u64 = 20;
 
 const MAX_HEADERS_PER_SYNC: u64 = 1024;
 const MAX_LOCATOR_LEN: usize = 128;
-const MAX_INFLIGHT_BLOCKS: usize = 8;
-const MAX_WANT_QUEUE: usize = 5_000;
+const MAX_INFLIGHT_BLOCKS: usize = 16;
+const MAX_WANT_QUEUE: usize = 10_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
 
-const MAX_PENDING_APPLY: usize = 512;
+const MAX_PENDING_APPLY: usize = 1_024;
 const MAX_PROVIDERS: usize = 50_000;
 const MAX_SEEN_BLOCKS: usize = 50_000;
 
-const MAX_OUTBOUND_RR: usize = 16;
+const MAX_OUTBOUND_RR: usize = 32;
 const HEADERS_REQ_COOLDOWN_SECS: u64 = 20;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 128;
@@ -121,10 +121,10 @@ const PEER_SCORES_FILE: &str = "peer_scores.txt";
 
 const STARTUP_PREFERRED_PEERS: usize = 16;
 
-const MAX_CONNECTED_PEERS: usize = 32;
-const TARGET_CONNECTED_PEERS: usize = 24;
+const MAX_CONNECTED_PEERS: usize = 96;
+const TARGET_CONNECTED_PEERS: usize = 64;
 const PROTECT_NEW_PEER_SECS: u64 = 60;
-const PEER_CAP_BURST: usize = 64;
+const PEER_CAP_BURST: usize = 96;
 
 const BOOTNODE_MAX_CONNECTED: usize = 64;
 const BOOTNODE_TARGET_CONNECTED: usize = 48;
@@ -2214,6 +2214,25 @@ fn publish_header(swarm: &mut Swarm<Behaviour>, header: BlockHeader) -> Result<(
     Ok(())
 }
 
+fn publish_block(swarm: &mut Swarm<Behaviour>, block: Block) -> Result<()> {
+    let gb = GossipBlock { block };
+    let bytes = crate::codec::consensus_bincode().serialize(&gb)?;
+
+    if bytes.len() <= MAX_GOSSIP_MSG_BYTES {
+        let _ = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(IdentTopic::new(TOPIC_BLOCK), bytes);
+    } else {
+        println!(
+            "[p2p] refusing to gossip oversized block message bytes={}",
+            bytes.len()
+        );
+    }
+
+    Ok(())
+}
+
 fn as_rr_event(event: OutEvent) -> Option<request_response::Event<SyncRequest, SyncResponse>> {
     match event {
         OutEvent::Rr(ev) => Some(ev),
@@ -2378,6 +2397,7 @@ async fn run_p2p_loop(
 
     gossipsub.subscribe(&IdentTopic::new(TOPIC_HDR))?;
     gossipsub.subscribe(&IdentTopic::new(TOPIC_TX))?;
+    gossipsub.subscribe(&IdentTopic::new(TOPIC_BLOCK))?;
 
 let rr_cfg = request_response::Config::default()
     .with_request_timeout(Duration::from_secs(15))
@@ -2836,6 +2856,7 @@ let _ = pump_blocks(
 
 Some(ev) = mined_rx.recv() => {
     let _ = publish_header(&mut swarm, ev.header);
+    let _ = publish_block(&mut swarm, ev.block);
 }
 
             Some(ev) = tx_gossip_rx.recv() => {
@@ -3154,9 +3175,11 @@ maybe_send_bootstrap_requests(
 
                                 mark_tip_seen(&last_tip_seen_unix);
 
-// Do not treat gossip source as block provider.
-// It may only be relaying the header.
-// providers.entry(h).or_insert(p);
+if let Some(p) = src {
+    // Treat a valid gossip header source as a provider hint. It may be a relay,
+    // but trying it immediately is faster than waiting for a later headers sync.
+    providers.entry(h).or_insert(p);
+}
 
 let mut newly_indexed_header = false;
 
@@ -3209,14 +3232,21 @@ if newly_indexed_header {
 }
 
                                 if let Some(p) = src {
-                                    // Gossip source is only a relay hint, not a guaranteed block provider.
                                     bump_score(&mut peer_score, &mut quarantine, p, 1);
                                 }
 
 if seen_blocks.insert(h) {
-    // Gossip headers are relay hints only.
-    // Do not enqueue block downloads from gossip alone.
-    // Headers responses will enqueue real provider-backed blocks.
+    let already_have_block = db.blocks.get(k_block(&h))?.is_some();
+    let already_inflight = inflight.contains_key(&h);
+    let already_pending = pending_apply.contains_key(&h);
+    let already_queued = want_blocks.iter().any(|x| x == &h);
+
+    if !already_have_block && !already_inflight && !already_pending && !already_queued {
+        if want_blocks.len() < MAX_WANT_QUEUE {
+            want_blocks.push_back(h);
+            println!("[sync] queued gossip header block {}", hex32(&h));
+        }
+    }
 
 let _ = compact_and_log_want_queue(
     &db,
@@ -3248,6 +3278,101 @@ let _ = pump_blocks(
     &mut inflight,
 );
 
+                            } else if topic == TOPIC_BLOCK {
+                                let gb: GossipBlock = match bincode::options()
+                                    .with_fixint_encoding()
+                                    .allow_trailing_bytes()
+                                    .with_limit(MAX_GOSSIP_MSG_BYTES as u64)
+                                    .deserialize::<GossipBlock>(&data)
+                                {
+                                    Ok(x) => x,
+                                    Err(_) => {
+                                        if let Some(p) = src {
+                                            note_invalid(&mut buckets, &mut bans, p, "bad gossip block decode");
+                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
+                                        }
+                                        continue;
+                                    }
+                                };
+
+                                let block = gb.block;
+                                let bh = header_hash(&block.header);
+
+                                if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
+                                    if bytes.len() > MAX_BLOCK_BYTES {
+                                        if let Some(p) = src {
+                                            note_invalid(&mut buckets, &mut bans, p, "gossip block oversized");
+                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
+                                        }
+                                        continue;
+                                    }
+                                }
+
+                                if !accept_header_universe_pow(&cfg, &block.header, &bh) {
+                                    if let Some(p) = src {
+                                        note_invalid(&mut buckets, &mut bans, p, "gossip block failed pow/limit/universe");
+                                        bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
+                                    }
+                                    continue;
+                                }
+
+                                mark_tip_seen(&last_tip_seen_unix);
+
+                                if let Some(p) = src {
+                                    providers.insert(bh, p);
+                                    bump_score(&mut peer_score, &mut quarantine, p, SCORE_GOOD_BLOCK);
+                                    let q = peer_quality.entry(p).or_default();
+                                    q.good_block = q.good_block.saturating_add(1);
+                                    q.last_seen_unix = unix_now();
+                                }
+
+                                {
+                                    let _g = chain_lock.lock();
+
+                                    if db.blocks.get(k_block(&bh))?.is_none() {
+                                        let bytes = crate::codec::consensus_bincode().serialize(&block)?;
+                                        db.blocks.insert(k_block(&bh), bytes)?;
+                                    }
+
+                                    if get_hidx(&db, &bh)?.is_none() {
+                                        if block.header.prev == [0u8; 32] {
+                                            let _ = index_header(&db, &block.header, None);
+                                        } else if let Some(parent) = get_hidx(&db, &block.header.prev)? {
+                                            let _ = index_header(&db, &block.header, Some(&parent));
+                                        }
+                                    }
+                                }
+
+                                if seen_blocks.insert(bh) {
+                                    println!(
+                                        "[p2p] accepted gossip block {} from {:?}",
+                                        hex32(&bh),
+                                        src
+                                    );
+                                    let _ = publish_header(&mut swarm, block.header.clone());
+                                    let _ = publish_block(&mut swarm, block.clone());
+                                }
+
+                                pending_apply.insert(bh, block);
+                                try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
+
+                                let best_tip_now = recompute_best_peer_tip(
+                                    &connected,
+                                    &peer_tips,
+                                    &peer_work,
+                                    &peer_score,
+                                    &bans,
+                                    &quarantine,
+                                );
+                                *best_peer_tip.write().await = best_tip_now;
+
+                                compact_and_log_want_queue(
+                                    &db,
+                                    &pending_apply,
+                                    &inflight,
+                                    &mut want_blocks,
+                                    "gossip-block",
+                                )?;
                             } else if topic == TOPIC_TX {
                                 let gt: GossipTx = match bincode::options()
     .with_fixint_encoding()

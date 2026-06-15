@@ -47,8 +47,14 @@ pub struct GossipTx {
     pub tx: Transaction,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GossipBlock {
+    pub block: Block,
+}
+
 pub const TOPIC_HDR: &str = "csd/hdr/1";
 pub const TOPIC_TX: &str = "csd/tx/1";
+pub const TOPIC_BLOCK: &str = "csd/block/1";
 
 
 pub const SYNC_PROTO: &str = "/csd/sync/2";

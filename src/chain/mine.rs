@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 
 use crate::chain::index::{get_hidx, header_hash, index_header, HeaderIndex};
 use crate::chain::lock::ChainLock;
-use crate::chain::pow::{expected_bits, PowTarget};
+use crate::chain::pow::{bits_to_target_bytes, expected_bits, PowTarget};
 use crate::chain::reorg::maybe_reorg_to;
 use crate::chain::time::{median_time_past, now_secs};
 use crate::crypto::{sha256d, txid};
@@ -20,11 +20,13 @@ use crate::types::{
 use std::sync::{
 atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::collections::HashSet;
-use std::time::Instant;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const MINER_BLOCK_SIZE_SAFETY_BYTES: usize = 16 * 1024;
 
@@ -171,11 +173,19 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
 /// - time > MTP(parent)
 /// - time <= now + MAX_FUTURE_DRIFT_SECS
 ///
-/// This MUST track wall-clock time (clamped), or LWMA will drift the wrong way.
+/// Prefer wall-clock time when it is already valid, but do not sit idle when
+/// the current chain tip is ahead of local time. Consensus permits a bounded
+/// future timestamp, and miners already using that window can otherwise keep
+/// our templates stale before we even start hashing.
 
-fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
+fn choose_block_time(
+    db: &Stores,
+    parent_tip: &Hash32,
+    parent_hi: Option<&HeaderIndex>,
+    height: u64,
+) -> Result<u64> {
     if *parent_tip == [0u8; 32] || parent_hi.is_none() {
-        return 0;
+        return Ok(0);
     }
 
     let p = parent_hi.unwrap();
@@ -187,23 +197,63 @@ fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&Header
         .max(mtp.saturating_add(1));
 
     loop {
+        ensure_tip_unchanged(db, parent_tip, height)?;
+
         let now = now_secs();
 
         if min_ok <= now {
-            return now;
+            return Ok(now);
         }
 
-        let wait = min_ok.saturating_sub(now).min(5);
+        let max_allowed = now.saturating_add(MAX_FUTURE_DRIFT_SECS);
+        if min_ok <= max_allowed {
+            mine_log_event(
+                "future_time_selected",
+                height,
+                None,
+                &format!(
+                    "time={} now={} max_allowed={} parent=0x{}",
+                    min_ok,
+                    now,
+                    max_allowed,
+                    hex::encode(parent_tip)
+                ),
+            );
+            return Ok(min_ok);
+        }
+
+        let wait = min_ok.saturating_sub(max_allowed).min(5);
 
         println!(
-            "[mine] waiting for wall clock: next_valid_time={} now={} wait={}s",
+            "[mine] waiting for wall clock: next_valid_time={} now={} max_allowed={} wait={}s",
             min_ok,
             now,
+            max_allowed,
             wait
         );
 
         std::thread::sleep(std::time::Duration::from_secs(wait));
     }
+}
+
+fn ensure_tip_unchanged(db: &Stores, parent_tip: &Hash32, height: u64) -> Result<()> {
+    let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
+    if cur_tip == *parent_tip {
+        return Ok(());
+    }
+
+    mine_log_event(
+        "candidate_stale_before_search",
+        height,
+        None,
+        &format!(
+            "old_prev=0x{} new_tip=0x{}",
+            hex::encode(parent_tip),
+            hex::encode(cur_tip)
+        ),
+    );
+
+    Err(anyhow!("stale template"))
 }
 
 /// Build a fresh block template from the current tip + current UTXO set.
@@ -410,6 +460,402 @@ fn miner_thread_count() -> usize {
     cores.saturating_sub(reserve).max(1)
 }
 
+fn cuda_miner_enabled() -> bool {
+    std::env::var("CSD_CUDA_MINER")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false)
+}
+
+fn cuda_persistent_enabled() -> bool {
+    std::env::var("CSD_CUDA_PERSISTENT")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false)
+}
+
+fn header_hex(h: &BlockHeader) -> String {
+    let mut buf = [0u8; 84];
+    buf[0..4].copy_from_slice(&h.version.to_le_bytes());
+    buf[4..36].copy_from_slice(&h.prev);
+    buf[36..68].copy_from_slice(&h.merkle);
+    buf[68..76].copy_from_slice(&h.time.to_le_bytes());
+    buf[76..80].copy_from_slice(&h.bits.to_le_bytes());
+    buf[80..84].copy_from_slice(&h.nonce.to_le_bytes());
+    hex::encode(buf)
+}
+
+fn parse_cuda_found(stdout: &str) -> Result<Option<(u32, Hash32)>> {
+    let Some(line) = stdout.lines().find(|l| l.starts_with("FOUND ")) else {
+        return Ok(None);
+    };
+    let mut nonce = None;
+    let mut hash = None;
+    for part in line.split_whitespace() {
+        if let Some(v) = part.strip_prefix("nonce=") {
+            nonce = Some(v.parse::<u32>()?);
+        } else if let Some(v) = part.strip_prefix("hash=0x") {
+            let bytes = hex::decode(v)?;
+            if bytes.len() != 32 {
+                return Err(anyhow!("cuda miner returned {}-byte hash", bytes.len()));
+            }
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&bytes);
+            hash = Some(h);
+        }
+    }
+    match (nonce, hash) {
+        (Some(n), Some(h)) => Ok(Some((n, h))),
+        _ => Err(anyhow!("malformed cuda miner FOUND line: {line}")),
+    }
+}
+
+struct CudaPersistentWorker {
+    bin: String,
+    device: String,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl CudaPersistentWorker {
+    fn start(bin: String, device: String) -> Result<Self> {
+        let mut child = Command::new(&bin)
+            .arg("--server")
+            .arg(&device)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| anyhow!("failed to start persistent cuda miner {bin} device={device}: {e}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("persistent cuda miner stdin unavailable"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("persistent cuda miner stdout unavailable"))?;
+        Ok(Self {
+            bin,
+            device,
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn restart(&mut self) -> Result<()> {
+        self.stop();
+        let fresh = Self::start(self.bin.clone(), self.device.clone())?;
+        *self = fresh;
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        let _ = self.stdin.write_all(b"QUIT\n");
+        let _ = self.stdin.flush();
+        for _ in 0..20 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn search(
+        &mut self,
+        header_hex: &str,
+        target_hex: &str,
+        count: &str,
+        blocks: &str,
+        threads: &str,
+    ) -> Result<Option<(u32, Hash32)>> {
+        let request = format!(
+            "{} {} 0 {} {} {} 1\n",
+            header_hex, target_hex, count, blocks, threads
+        );
+        if self.stdin.write_all(request.as_bytes()).is_err() || self.stdin.flush().is_err() {
+            self.restart()?;
+            self.stdin.write_all(request.as_bytes())?;
+            self.stdin.flush()?;
+        }
+
+        let mut line = String::new();
+        let n = self.stdout.read_line(&mut line)?;
+        if n == 0 {
+            self.restart()?;
+            return Err(anyhow!(
+                "persistent cuda miner ended unexpectedly device={}",
+                self.device
+            ));
+        }
+        if line.starts_with("ERROR ") {
+            return Err(anyhow!(
+                "persistent cuda miner failed device={} line={}",
+                self.device,
+                line.trim()
+            ));
+        }
+        parse_cuda_found(&line)
+    }
+}
+
+impl Drop for CudaPersistentWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn cuda_devices() -> Vec<String> {
+    std::env::var("CSD_CUDA_DEVICES")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            vec![std::env::var("CSD_CUDA_DEVICE").unwrap_or_else(|_| "0".to_string())]
+        })
+}
+
+fn cuda_param_for_device(env_name: &str, default_value: &str, device: &str, index: usize) -> String {
+    let Ok(raw) = std::env::var(env_name) else {
+        return default_value.to_string();
+    };
+
+    let mut positional = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == device {
+                return v.trim().to_string();
+            }
+        } else {
+            positional.push(part);
+        }
+    }
+
+    positional
+        .get(index)
+        .map(|v| (*v).to_string())
+        .unwrap_or_else(|| default_value.to_string())
+}
+
+fn mine_one_cuda(
+    db: &Stores,
+    height: u64,
+    parent_tip: Hash32,
+    parent_hi_opt: Option<HeaderIndex>,
+    mut hdr: BlockHeader,
+    mut txs: Vec<Transaction>,
+    pow_target: PowTarget,
+) -> Result<(Hash32, Block)> {
+    let bin = std::env::var("CSD_CUDA_BIN").unwrap_or_else(|_| "/usr/local/bin/csd-cuda-search".to_string());
+    let devices = cuda_devices();
+    let blocks = std::env::var("CSD_CUDA_BLOCKS").unwrap_or_else(|_| "4096".to_string());
+    let threads = std::env::var("CSD_CUDA_THREADS").unwrap_or_else(|_| "256".to_string());
+    let count = std::env::var("CSD_CUDA_COUNT").unwrap_or_else(|_| "4294967296".to_string());
+    let target_hex = hex::encode(bits_to_target_bytes(hdr.bits));
+    let (tx_cuda, rx_cuda) = mpsc::channel::<Result<Option<(String, u64, u32, Hash32, Vec<Transaction>, BlockHeader)>>>();
+    let persistent = cuda_persistent_enabled();
+    let persistent_workers = if persistent {
+        let mut workers = Vec::with_capacity(devices.len());
+        for device in &devices {
+            workers.push(Arc::new(Mutex::new(CudaPersistentWorker::start(
+                bin.clone(),
+                device.clone(),
+            )?)));
+        }
+        Some(workers)
+    } else {
+        None
+    };
+    let mut round: u64 = 0;
+    loop {
+        let cur_tip = get_tip(db)?.unwrap_or([0u8; 32]);
+        if cur_tip != parent_tip {
+            mine_log_event(
+                "candidate_stale_before_solution",
+                height,
+                None,
+                &format!(
+                    "cuda=1 old_prev=0x{} new_tip=0x{}",
+                    hex::encode(parent_tip),
+                    hex::encode(cur_tip)
+                ),
+            );
+            return Err(anyhow!("stale template"));
+        }
+
+        let round_started = Instant::now();
+        for (device_idx, device) in devices.iter().enumerate() {
+            let device_blocks =
+                cuda_param_for_device("CSD_CUDA_BLOCKS_BY_DEVICE", &blocks, device, device_idx);
+            let device_threads =
+                cuda_param_for_device("CSD_CUDA_THREADS_BY_DEVICE", &threads, device, device_idx);
+            let mut dhdr = hdr.clone();
+            let mut dtxs = txs.clone();
+            let extra_nonce = round
+                .wrapping_mul(devices.len() as u64)
+                .wrapping_add(device_idx as u64);
+            dtxs[0].inputs[0].script_sig.push(0x00);
+            dtxs[0]
+                .inputs[0]
+                .script_sig
+                .extend_from_slice(format!("gpu:{device}:{extra_nonce}").as_bytes());
+            dhdr.merkle = merkle_root(&dtxs);
+            dhdr.nonce = 0;
+
+            mine_log_event(
+                "cuda_search_started",
+                height,
+                None,
+                &format!(
+                    "device={} count={} blocks={} threads={} extra_nonce={} prev=0x{} bits=0x{:08x}",
+                    device,
+                    count,
+                    device_blocks,
+                    device_threads,
+                    extra_nonce,
+                    hex::encode(dhdr.prev),
+                    dhdr.bits,
+                ),
+            );
+
+            let tx_cuda = tx_cuda.clone();
+            let bin = bin.clone();
+            let target_hex = target_hex.clone();
+            let count = count.clone();
+            let blocks = device_blocks;
+            let threads = device_threads;
+            let device = device.clone();
+            let persistent_worker = persistent_workers
+                .as_ref()
+                .map(|workers| workers[device_idx].clone());
+            thread::spawn(move || {
+                let result = (|| -> Result<Option<(u32, Hash32)>> {
+                    let header_arg = format!("0x{}", header_hex(&dhdr));
+                    let target_arg = format!("0x{}", target_hex);
+                    if let Some(worker) = persistent_worker {
+                        let mut worker = worker
+                            .lock()
+                            .map_err(|_| anyhow!("persistent cuda worker lock poisoned"))?;
+                        return worker.search(&header_arg, &target_arg, &count, &blocks, &threads);
+                    }
+                    let output = Command::new(&bin)
+                        .arg(header_arg)
+                        .arg(target_arg)
+                        .arg("0")
+                        .arg(&count)
+                        .arg(&device)
+                        .arg(&blocks)
+                        .arg(&threads)
+                        .output()
+                        .map_err(|e| anyhow!("failed to run cuda miner {bin}: {e}"))?;
+
+                    if !output.status.success() {
+                        return Err(anyhow!(
+                            "cuda miner failed device={} status={:?} stderr={}",
+                            device,
+                            output.status.code(),
+                            String::from_utf8_lossy(&output.stderr)
+                        ));
+                    }
+
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    parse_cuda_found(&stdout)
+                })();
+
+                match result {
+                    Ok(Some((nonce, h))) => {
+                        let _ = tx_cuda.send(Ok(Some((device, extra_nonce, nonce, h, dtxs, dhdr))));
+                    }
+                    Ok(None) => {
+                        let _ = tx_cuda.send(Ok(None));
+                    }
+                    Err(e) => {
+                        let _ = tx_cuda.send(Err(e));
+                    }
+                }
+            });
+        }
+
+        let mut completed = 0usize;
+        for _ in 0..devices.len() {
+            if let Ok(result) = rx_cuda.recv() {
+                completed += 1;
+                let Some((device, extra_nonce, nonce, h, found_txs, mut found_hdr)) = result? else {
+                    continue;
+                };
+                found_hdr.nonce = nonce;
+                let local_h = header_hash(&found_hdr);
+                if local_h != h {
+                    return Err(anyhow!(
+                        "cuda solution mismatch local=0x{} cuda=0x{}",
+                        hex::encode(local_h),
+                        hex::encode(h)
+                    ));
+                }
+                if !pow_target.check(&h) {
+                    return Err(anyhow!("cuda solution failed local pow check"));
+                }
+                mine_log_event(
+                    "pow_solution_found",
+                    height,
+                    Some(&h),
+                    &format!(
+                        "cuda=1 device={} prev=0x{} bits=0x{:08x} time={} nonce={} extra_nonce={}",
+                        device,
+                        hex::encode(found_hdr.prev),
+                        found_hdr.bits,
+                        found_hdr.time,
+                        found_hdr.nonce,
+                        extra_nonce
+                    ),
+                );
+                return Ok((h, Block { header: found_hdr, txs: found_txs }));
+            }
+        }
+
+        let elapsed = round_started.elapsed();
+        let searched = count
+            .parse::<u64>()
+            .unwrap_or(0)
+            .saturating_mul(completed as u64);
+        let hps = if elapsed.as_secs_f64() > 0.0 {
+            searched as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        mine_log_event(
+            "cuda_round_completed",
+            height,
+            None,
+            &format!(
+                "devices={} completed={} searched={} elapsed_ms={} hps={:.3}",
+                devices.len(),
+                completed,
+                searched,
+                elapsed.as_millis(),
+                hps
+            ),
+        );
+
+        round = round.wrapping_add(1);
+        hdr.time = choose_block_time(db, &parent_tip, parent_hi_opt.as_ref(), height)?;
+    }
+}
+
 /// Mine exactly one block.
 ///
 /// CRITICAL: Do NOT apply blocks here.
@@ -457,10 +903,12 @@ mine_log_event(
         version: 1,
         prev: parent_tip,
         merkle: merkle_root(&txs),
-        time: choose_block_time(db, &parent_tip, parent_hi_opt.as_ref()),
+        time: choose_block_time(db, &parent_tip, parent_hi_opt.as_ref(), height)?,
         bits: expected_bits(db, height, parent_hi_opt.as_ref())?,
         nonce: 0u32,
     };
+
+ensure_tip_unchanged(db, &parent_tip, height)?;
 
 let pow_target = PowTarget::from_bits(hdr.bits)
     .ok_or_else(|| anyhow!("invalid mining bits"))?;
@@ -537,6 +985,31 @@ if cur_tip != parent_tip {
         });
     }
 
+    if cuda_miner_enabled() {
+        let tx_found = tx_found.clone();
+        let parent_hi_for_cuda = parent_hi_opt.clone();
+        let cuda_hdr = hdr.clone();
+        let cuda_txs = txs.clone();
+        scope.spawn(move || {
+            match mine_one_cuda(
+                db,
+                height,
+                parent_tip,
+                parent_hi_for_cuda,
+                cuda_hdr,
+                cuda_txs,
+                pow_target,
+            ) {
+                Ok((h, block)) => {
+                    let _ = tx_found.send(MineMsg::Found(h, block));
+                }
+                Err(e) => {
+                    println!("[mine] cuda miner exited: {:?}", e);
+                    let _ = tx_found.send(MineMsg::Stale);
+                }
+            }
+        });
+    } else {
     for worker_id in 0..workers {
 
         let stop = stop.clone();
@@ -621,7 +1094,15 @@ if tx_found.send(MineMsg::Found(h, block)).is_err() {
 if whdr.nonce < old_nonce {
     extra_nonce = extra_nonce.wrapping_add(1);
 
-    whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+	    whdr.time = match choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref(), height) {
+	        Ok(time) => time,
+	        Err(_) => {
+	            stale.store(true, Ordering::Relaxed);
+	            stop.store(true, Ordering::Relaxed);
+	            let _ = tx_found.send(MineMsg::Stale);
+	            return;
+	        }
+	    };
 
     let marker = extra_nonce.to_le_bytes();
 
@@ -644,9 +1125,10 @@ if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
 }
 
     }
-});
-}
-    drop(tx_found);
+	});
+	}
+    }
+	    drop(tx_found);
 
     match rx_found.recv() {
         Ok(MineMsg::Stale) => Err(anyhow!("stale template")),
@@ -801,4 +1283,154 @@ if accepted_as_tip {
         Err(_) => Err(anyhow!("miner workers exited without result")),
     }
 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::index::{get_hidx, header_hash, index_header};
+    use crate::chain::lock::new_chain_lock;
+    use crate::chain::pow::pow_ok;
+    use crate::net::mempool::Mempool;
+    use crate::params::{INITIAL_REWARD, POW_LIMIT_BITS};
+    use crate::state::app_state::epoch_of;
+    use crate::state::db::{get_tip, k_block, set_tip, Stores};
+    use crate::state::utxo::validate_and_apply_block;
+    use tempfile::TempDir;
+
+    fn mine_test_header_with_cuda(mut hdr: BlockHeader) -> Result<BlockHeader> {
+        let cuda_bin = std::env::var("CSD_CUDA_BIN")
+            .unwrap_or_else(|_| "/usr/local/bin/csd-cuda-search".to_string());
+        let device = std::env::var("CSD_CUDA_TEST_DEVICES")
+            .unwrap_or_else(|_| "0".to_string())
+            .split(',')
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .to_string();
+        let count = std::env::var("CSD_CUDA_TEST_GENESIS_COUNT")
+            .unwrap_or_else(|_| "1000000000".to_string());
+        let target_hex = hex::encode(crate::chain::pow::bits_to_target_bytes(hdr.bits));
+
+        let output = Command::new(&cuda_bin)
+            .arg(format!("0x{}", header_hex(&hdr)))
+            .arg(format!("0x{}", target_hex))
+            .arg("0")
+            .arg(&count)
+            .arg(&device)
+            .arg("1024")
+            .arg("256")
+            .output()
+            .map_err(|e| anyhow!("failed to run cuda miner {cuda_bin}: {e}"))?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "cuda genesis miner failed status={:?} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some((nonce, h)) = parse_cuda_found(&stdout)? else {
+            return Err(anyhow!("cuda genesis miner did not find a nonce: {stdout}"));
+        };
+        hdr.nonce = nonce;
+        let local = header_hash(&hdr);
+        if local != h {
+            return Err(anyhow!(
+                "cuda genesis solution mismatch local=0x{} cuda=0x{}",
+                hex::encode(local),
+                hex::encode(h)
+            ));
+        }
+        if !pow_ok(&h, hdr.bits) {
+            return Err(anyhow!("cuda genesis solution failed pow check"));
+        }
+        Ok(hdr)
+    }
+
+    fn install_easy_genesis(db: &Stores) -> Result<Hash32> {
+        let txs = vec![coinbase(
+            [0x33; 20],
+            INITIAL_REWARD,
+            0,
+            Some(b"cuda-acceptance"),
+        )];
+        let hdr = mine_test_header_with_cuda(BlockHeader {
+            version: 1,
+            prev: [0u8; 32],
+            merkle: merkle_root(&txs),
+            time: crate::chain::time::now_secs().saturating_sub(120),
+            bits: POW_LIMIT_BITS,
+            nonce: 0,
+        })?;
+        let h = header_hash(&hdr);
+        let block = Block { header: hdr, txs };
+        db.blocks.insert(
+            k_block(&h),
+            crate::codec::consensus_bincode().serialize(&block)?,
+        )?;
+        index_header(db, &block.header, None)?;
+        validate_and_apply_block(db, &block, epoch_of(0), 0)?;
+        set_tip(db, &h)?;
+        db.db.flush()?;
+        Ok(h)
+    }
+
+    #[test]
+    fn cuda_miner_solution_is_accepted_as_canonical_tip() -> Result<()> {
+        if std::env::var("CSD_RUN_CUDA_ACCEPTANCE_TEST")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            eprintln!("skipping CUDA acceptance test; set CSD_RUN_CUDA_ACCEPTANCE_TEST=1");
+            return Ok(());
+        }
+
+        let cuda_bin = std::env::var("CSD_CUDA_BIN")
+            .unwrap_or_else(|_| "/usr/local/bin/csd-cuda-search".to_string());
+        if !std::path::Path::new(&cuda_bin).exists() {
+            eprintln!("skipping CUDA acceptance test; missing {cuda_bin}");
+            return Ok(());
+        }
+
+        std::env::set_var("CSD_CUDA_MINER", "1");
+        std::env::set_var("CSD_CUDA_BIN", cuda_bin);
+        std::env::set_var(
+            "CSD_CUDA_DEVICES",
+            std::env::var("CSD_CUDA_TEST_DEVICES").unwrap_or_else(|_| "0".to_string()),
+        );
+        std::env::set_var(
+            "CSD_CUDA_COUNT",
+            std::env::var("CSD_CUDA_TEST_COUNT").unwrap_or_else(|_| "10000000".to_string()),
+        );
+        std::env::set_var("CSD_CUDA_BLOCKS", "1024");
+        std::env::set_var("CSD_CUDA_THREADS", "256");
+
+        let temp = TempDir::new()?;
+        let db = Stores::open(temp.path().to_str().unwrap())?;
+        let genesis = install_easy_genesis(&db)?;
+        let mempool = Mempool::new();
+        let chain_lock = new_chain_lock();
+
+        let mined = mine_one(&db, &mempool, [0x44; 20], 0, &chain_lock)?;
+        let tip = get_tip(&db)?.ok_or_else(|| anyhow!("missing tip after CUDA mine_one"))?;
+        assert_eq!(tip, mined);
+        assert_ne!(tip, genesis);
+
+        let hi = get_hidx(&db, &tip)?.ok_or_else(|| anyhow!("missing mined header index"))?;
+        assert_eq!(hi.height, 1);
+        let block_bytes = db
+            .blocks
+            .get(k_block(&tip))?
+            .ok_or_else(|| anyhow!("missing mined block bytes"))?;
+        let block: Block = crate::codec::consensus_bincode().deserialize(&block_bytes)?;
+        assert_eq!(header_hash(&block.header), tip);
+        assert!(pow_ok(&tip, block.header.bits));
+        assert_eq!(block.header.prev, genesis);
+
+        Ok(())
+    }
 }
