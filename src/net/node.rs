@@ -138,6 +138,10 @@ const BOOTNODE_PROTECT_NEW_SECS: u64 = 60;
 const BOOTNODE_IDLE_EVICT_SECS: u64 = 120;
 const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
 
+const IDLE_PEER_MIN_AGE_SECS: u64 = 5 * 60;
+const IDLE_PEER_EVICT_SECS: u64 = 10 * 60;
+const IDLE_PEER_NEAR_BEST_WORK_DIVISOR: u128 = 1000;
+
 // ----------------- time helpers -----------------
 
 fn unix_now() -> u64 {
@@ -489,6 +493,85 @@ fn maybe_evict_excess_peers(
         println!(
             "[p2p] cap evicting peer {} score={} work={} age={}s",
             p, score, work, age
+        );
+        let _ = swarm.disconnect_peer_id(p);
+    }
+}
+
+fn maybe_evict_idle_peers(
+    swarm: &mut Swarm<Behaviour>,
+    cfg: &NetConfig,
+    connected: &HashSet<PeerId>,
+    connected_since: &HashMap<PeerId, Instant>,
+    last_useful_peer_at: &HashMap<PeerId, Instant>,
+    peer_score: &HashMap<PeerId, i32>,
+    peer_work: &HashMap<PeerId, u128>,
+    best_work: u128,
+) {
+    let target_connected = if cfg.is_bootnode {
+        BOOTNODE_TARGET_CONNECTED
+    } else {
+        TARGET_CONNECTED_PEERS
+    };
+
+    if connected.len() <= target_connected {
+        return;
+    }
+
+    let now = Instant::now();
+    let over = connected.len().saturating_sub(target_connected);
+
+    let near_best_slack = if best_work > 0 {
+        best_work / IDLE_PEER_NEAR_BEST_WORK_DIVISOR
+    } else {
+        0
+    };
+
+    let mut candidates: Vec<(PeerId, u64, i32, u128)> = Vec::new();
+
+    for p in connected.iter().copied() {
+        let age = connected_since
+            .get(&p)
+            .map(|t| now.duration_since(*t).as_secs())
+            .unwrap_or(u64::MAX);
+
+        if age < IDLE_PEER_MIN_AGE_SECS {
+            continue;
+        }
+
+        let idle_secs = last_useful_peer_at
+            .get(&p)
+            .map(|t| now.duration_since(*t).as_secs())
+            .unwrap_or(age);
+
+        if idle_secs < IDLE_PEER_EVICT_SECS {
+            continue;
+        }
+
+        let work = *peer_work.get(&p).unwrap_or(&0);
+        let score = *peer_score.get(&p).unwrap_or(&0);
+
+        let near_best =
+            best_work > 0 && work > 0 && work.saturating_add(near_best_slack) >= best_work;
+
+        if near_best && score >= 0 {
+            continue;
+        }
+
+        candidates.push((p, idle_secs, score, work));
+    }
+
+    candidates.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+    });
+
+    for (p, idle_secs, score, work) in candidates.into_iter().take(over) {
+        println!(
+            "[p2p] idle evicting peer {} idle={}s score={} work={} target={}",
+            p, idle_secs, score, work, target_connected
         );
         let _ = swarm.disconnect_peer_id(p);
     }
@@ -2524,6 +2607,8 @@ for pid in startup_peer_ids {
 let mut connected_since: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_sync_request_from: HashMap<PeerId, Instant> = HashMap::new();
 
+let mut last_useful_peer_at: HashMap<PeerId, Instant> = HashMap::new();
+
     let mut peer_heights: HashMap<PeerId, u64> = HashMap::new();
     let mut peer_work: HashMap<PeerId, u128> = HashMap::new();
 let mut peer_tips: HashMap<PeerId, Hash32> = HashMap::new();
@@ -2732,6 +2817,17 @@ maybe_evict_excess_peers(
     &connected_since,
     &peer_score,
     &peer_work,
+);
+
+maybe_evict_idle_peers(
+    &mut swarm,
+    &cfg,
+    &connected,
+    &connected_since,
+    &last_useful_peer_at,
+    &peer_score,
+    &peer_work,
+    best_w,
 );
 
 // Pick best candidate, but keep current sync_peer unless the candidate is strictly better.
@@ -2962,6 +3058,8 @@ if connected.len() > max_connected.saturating_add(PEER_CAP_BURST) {
 
 connected_since.insert(peer_id, Instant::now());
 
+last_useful_peer_at.insert(peer_id, Instant::now());
+
 {
     let q = peer_quality.entry(peer_id).or_default();
     q.dial_success = q.dial_success.saturating_add(1);
@@ -3078,6 +3176,8 @@ last_stale_penalty_at.remove(&peer_id);
 
 connected_since.remove(&peer_id);
 last_sync_request_from.remove(&peer_id);
+
+last_useful_peer_at.remove(&peer_id);
 
 let (best_h, best_w) = recompute_best_peer_metrics(
     &connected,
@@ -3388,7 +3488,9 @@ match &request {
     | SyncRequest::GetHeadersByLocator { .. }
     | SyncRequest::GetHeaders { .. }
     | SyncRequest::GetBlock { .. } => {
-        last_sync_request_from.insert(peer, Instant::now());
+        let now = Instant::now();
+        last_sync_request_from.insert(peer, now);
+        last_useful_peer_at.insert(peer, now);
     }
     _ => {}
 }
@@ -3553,6 +3655,8 @@ SyncResponse::Tip { hash: hash, height, chainwork } => {
 
     mark_tip_seen(&last_tip_seen_unix);
 
+last_useful_peer_at.insert(peer, Instant::now());
+
 
 // A peer's Tip response is only an advertisement.
 // It must NOT become trusted best-peer state unless we have indexed that header.
@@ -3689,6 +3793,9 @@ if headers_due && outbound_rr.len() < MAX_OUTBOUND_RR {
     if !headers.is_empty() {
         mark_tip_seen(&last_tip_seen_unix);
         bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_HEADERS);
+
+    last_useful_peer_at.insert(peer, Instant::now());
+
     }
 
 if !headers.is_empty() {
@@ -3968,6 +4075,9 @@ bad_providers.entry(expected_h).or_default().insert(peer, Instant::now());
     }
 
     mark_tip_seen(&last_tip_seen_unix);
+
+last_useful_peer_at.insert(peer, Instant::now());
+
     bump_score(&mut peer_score, &mut quarantine, peer, SCORE_GOOD_BLOCK);
 
     if let Ok(bytes) = crate::codec::consensus_bincode().serialize(&block) {
