@@ -623,17 +623,24 @@ fn is_dialable_addr(addr: &Multiaddr) -> bool {
 }
 
 fn is_routable_ipv4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
 
-let o = ip.octets();
-let is_cgnat = o[0] == 100 && (64..=127).contains(&o[1]);
+    let is_cgnat = o[0] == 100 && (64..=127).contains(&o[1]);       // 100.64.0.0/10
+    let is_benchmark = o[0] == 198 && (18..=19).contains(&o[1]);    // 198.18.0.0/15
+    let is_doc =
+        (o[0] == 192 && o[1] == 0 && o[2] == 2)
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113);
 
-!(ip.is_loopback()
-    || ip.is_private()
-    || ip.is_link_local()
-    || ip.is_unspecified()
-    || ip.is_broadcast()
-    || ip.is_multicast()
-    || is_cgnat)
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || is_cgnat
+        || is_benchmark
+        || is_doc)
 }
 
 fn is_routable_ipv6(ip: Ipv6Addr) -> bool {
@@ -713,11 +720,12 @@ fn should_dial_discovered_addr(self_peer: PeerId, peer: PeerId, addr: &Multiaddr
 fn addr_backoff_secs(failures: u32) -> u64 {
     match failures {
         0 => 0,
-        1 => 10,
-        2 => 30,
-        3 => 60,
-        4 => 180,
-        _ => 600,
+        1 => 30,
+        2 => 120,
+        3 => 300,
+        4 => 900,
+        5 => 1800,
+        _ => 3600,
     }
 }
 
@@ -2596,6 +2604,8 @@ let mut last_redial = Instant::now() - Duration::from_secs(60);
 let mut last_dial_by_addr: HashMap<Multiaddr, Instant> = HashMap::new();
 let mut addr_backoff: HashMap<Multiaddr, (u32, Instant)> = HashMap::new();
 let mut pending_dials: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+
+let mut inbound_failure_count: HashMap<PeerId, (u32, Instant)> = HashMap::new();
 
 swarm.listen_on(cfg.listen.clone())?;
 println!("[p2p] listening on {}", cfg.listen);
@@ -4508,9 +4518,30 @@ outbound_rr.remove(&request_id);
 }
 
 Event::InboundFailure { peer, error, .. } => {
-    println!("[sync] inbound failure from {}: {:?}", peer, error);
-    // Do not punish inbound timeouts aggressively.
-    // Slow/overloaded peers are common during bootstrap and weak-node sync.
+    let entry = inbound_failure_count
+        .entry(peer)
+        .or_insert((0, Instant::now()));
+
+    if entry.1.elapsed() > Duration::from_secs(60) {
+        *entry = (0, Instant::now());
+    }
+
+    entry.0 = entry.0.saturating_add(1);
+
+    if entry.0 == 1 || entry.0 % 10 == 0 {
+        println!(
+            "[sync] inbound failure from {}: {:?} count_in_window={}",
+            peer,
+            error,
+            entry.0
+        );
+    }
+
+    if entry.0 >= 20 {
+        println!("[sync] disconnecting noisy inbound-failure peer {}", peer);
+        let _ = swarm.disconnect_peer_id(peer);
+        last_disconnect_at.insert(peer, Instant::now());
+    }
 }
 
         _ => {}
