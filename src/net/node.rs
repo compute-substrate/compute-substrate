@@ -62,6 +62,8 @@ const SCORE_GOOD_TIP: i32 = 1;
 const SCORE_GOOD_HEADERS: i32 = 2;
 const SCORE_GOOD_BLOCK: i32 = 3;
 
+const SCORE_GOOD_CANONICAL_BLOCK: i32 = 12;
+
 const SCORE_BAD_INVALID: i32 = -6;
 const SCORE_BAD_TIMEOUT: i32 = -1;
 const SCORE_BAD_UNKNOWN_BLOCK: i32 = -3;
@@ -106,7 +108,7 @@ const MAX_PENDING_APPLY: usize = 512;
 const MAX_PROVIDERS: usize = 50_000;
 const MAX_SEEN_BLOCKS: usize = 50_000;
 
-const MAX_OUTBOUND_RR: usize = 16;
+const MAX_BACKGROUND_OUTBOUND_RR: usize = 8; // reserve remaining slots for headers/blocks
 const HEADERS_REQ_COOLDOWN_SECS: u64 = 20;
 
 const MAX_PEERS_IN_EXCHANGE: usize = 64;
@@ -1323,6 +1325,7 @@ struct PeerQuality {
     good_tip: u64,
     good_headers: u64,
     good_block: u64,
+	canonical_block: u64,
     timeout: u64,
     invalid: u64,
     last_seen_unix: u64,
@@ -1339,6 +1342,8 @@ fn peer_quality_score(q: &PeerQuality) -> i128 {
     s += (q.good_tip as i128) * 5;
     s += (q.good_headers as i128) * 15;
     s += (q.good_block as i128) * 25;
+
+	s += (q.canonical_block as i128) * 100;
 
     s -= (q.timeout as i128) * 20;
     s -= (q.invalid as i128) * 50;
@@ -1386,9 +1391,9 @@ fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
 
     for line in s.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 11 {
-            continue;
-        }
+if parts.len() != 11 && parts.len() != 12 {
+    continue;
+}
 
         let Ok(pid) = parts[0].parse::<PeerId>() else {
             continue;
@@ -1400,11 +1405,12 @@ fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
             good_tip: parts[3].parse().unwrap_or(0),
             good_headers: parts[4].parse().unwrap_or(0),
             good_block: parts[5].parse().unwrap_or(0),
+			canonical_block: parts.get(11).and_then(|x| x.parse().ok()).unwrap_or(0),
             timeout: parts[6].parse().unwrap_or(0),
             invalid: parts[7].parse().unwrap_or(0),
             last_seen_unix: parts[8].parse().unwrap_or(0),
             last_tip_height: parts[9].parse().unwrap_or(0),
-last_tip_work: parts[10].parse().unwrap_or(0),
+			last_tip_work: parts[10].parse().unwrap_or(0),
         };
 
         out.insert(pid, q);
@@ -1426,13 +1432,14 @@ fn save_peer_quality(datadir: &str, qmap: &HashMap<PeerId, PeerQuality>) {
         let Some(q) = qmap.get(&pid) else { continue };
 
         rows.push(format!(
-            "{} {} {} {} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {} {} {} {}",
             pid,
             q.dial_success,
             q.dial_failure,
             q.good_tip,
             q.good_headers,
             q.good_block,
+			q.canonical_block,
             q.timeout,
             q.invalid,
             q.last_seen_unix,
@@ -1610,7 +1617,7 @@ fn maybe_send_bootstrap_requests(
         return;
     }
 
-if outbound_rr.len() >= MAX_OUTBOUND_RR {
+if outbound_rr.len() >= MAX_BACKGROUND_OUTBOUND_RR {
     return;
 }
 
@@ -1623,8 +1630,8 @@ outbound_rr.insert(rid, Instant::now());
 last_tip_req_at.insert(peer, Instant::now());
 println!("[sync] requested tip ({rid:?})");
 
-if outbound_rr.len() < MAX_OUTBOUND_RR {
-    let rid = swarm
+if outbound_rr.len() < MAX_BACKGROUND_OUTBOUND_RR {
+	let rid = swarm
         .behaviour_mut()
         .rr
         .send_request(&peer, SyncRequest::GetPeers { max: PEER_REQ_ON_CONNECT });
@@ -1973,6 +1980,30 @@ fn bump_score(
     }
 }
 
+fn note_canonical_provider(
+    peer_quality: &mut HashMap<PeerId, PeerQuality>,
+    peer_score: &mut HashMap<PeerId, i32>,
+    quarantine: &mut HashMap<PeerId, Instant>,
+    peer: PeerId,
+    h: Hash32,
+    why: &str,
+) {
+    {
+        let q = peer_quality.entry(peer).or_default();
+        q.canonical_block = q.canonical_block.saturating_add(1);
+        q.last_seen_unix = unix_now();
+    }
+
+    bump_score(peer_score, quarantine, peer, SCORE_GOOD_CANONICAL_BLOCK);
+
+    println!(
+        "[p2p-score] canonical provider {} block={} reason={}",
+        peer,
+        hex32(&h),
+        why
+    );
+}
+
 
 fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
     cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
@@ -2189,6 +2220,10 @@ fn try_apply_pending(
     db: &Stores,
     mempool: &Mempool,
     pending_apply: &mut HashMap<Hash32, Block>,
+    providers: &HashMap<Hash32, PeerId>,
+    peer_quality: &mut HashMap<PeerId, PeerQuality>,
+    peer_score: &mut HashMap<PeerId, i32>,
+    quarantine: &mut HashMap<PeerId, Instant>,
     chain_lock: &crate::chain::lock::ChainLock,
 ) {
     loop {
@@ -2253,9 +2288,23 @@ fn try_apply_pending(
                     new_hi.chainwork
                 );
 
-                if let Err(e) = crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
-                    println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
-                }
+match crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
+    Ok(()) => {
+        if let Some(p) = providers.get(&h).copied() {
+            note_canonical_provider(
+                peer_quality,
+                peer_score,
+                quarantine,
+                p,
+                h,
+                "direct-tip",
+            );
+        }
+    }
+    Err(e) => {
+        println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
+    }
+}
 
                 progressed = true;
                 break;
@@ -2276,9 +2325,23 @@ if better_fork_tip(new_hi.chainwork, &h, cur_work, &cur_tip) {
                     cur_work
                 );
 
-                if let Err(e) = crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
-                    println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
-                }
+match crate::chain::reorg::maybe_reorg_to(db, &h, Some(mempool)) {
+    Ok(()) => {
+        if let Some(p) = providers.get(&h).copied() {
+            note_canonical_provider(
+                peer_quality,
+                peer_score,
+                quarantine,
+                p,
+                h,
+                "stronger-fork",
+            );
+        }
+    }
+    Err(e) => {
+        println!("[sync] maybe_reorg_to {} failed: {}", hex32(&h), e);
+    }
+}
 
                 progressed = true;
                 break;
@@ -2761,7 +2824,7 @@ for p in connected.iter().cloned() {
 
     if regular_due || stale_due {
 
-if outbound_rr.len() < MAX_OUTBOUND_RR {
+if outbound_rr.len() < MAX_BACKGROUND_OUTBOUND_RR {
     let rid = swarm.behaviour_mut().rr.send_request(&p, SyncRequest::GetTip);
     outbound_rr.insert(rid, Instant::now());
 }
@@ -2959,8 +3022,17 @@ let _ = pump_blocks(
     &mut inflight,
 );
 
-                try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
-
+try_apply_pending(
+    &db,
+    mempool.as_ref(),
+    &mut pending_apply,
+    &providers,
+    &mut peer_quality,
+    &mut peer_score,
+    &mut quarantine,
+    &chain_lock,
+);
+	
 let _ = pump_blocks(
     &mut swarm,
     sync_peer,
@@ -4188,8 +4260,17 @@ let best_tip_now = recompute_best_peer_tip(
 *best_peer_tip.write().await = best_tip_now;
 
     pending_apply.insert(bh, block);
-    try_apply_pending(&db, mempool.as_ref(), &mut pending_apply, &chain_lock);
-
+try_apply_pending(
+    &db,
+    mempool.as_ref(),
+    &mut pending_apply,
+    &providers,
+    &mut peer_quality,
+    &mut peer_score,
+    &mut quarantine,
+    &chain_lock,
+);
+	
     compact_and_log_want_queue(
         &db,
         &pending_apply,
