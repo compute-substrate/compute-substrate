@@ -3414,7 +3414,7 @@ let headers_due = last_headers_req_at
     .map(|t| t.elapsed() >= Duration::from_secs(HEADERS_REQ_COOLDOWN_SECS))
     .unwrap_or(true);
 
-if headers_due && outbound_rr.len() < MAX_OUTBOUND_RR {
+if headers_due && outbound_rr.len() < MAX_BACKGROUND_OUTBOUND_RR {
     let rid = swarm.behaviour_mut().rr.send_request(
         &p,
         SyncRequest::GetHeadersByLocator {
@@ -3823,7 +3823,7 @@ let headers_due = last_headers_req_at
     .map(|t| t.elapsed() >= Duration::from_secs(HEADERS_REQ_COOLDOWN_SECS))
     .unwrap_or(true);
 
-if headers_due && outbound_rr.len() < MAX_OUTBOUND_RR {
+if headers_due && outbound_rr.len() < MAX_BACKGROUND_OUTBOUND_RR {
     let rid = swarm.behaviour_mut().rr.send_request(
         &peer,
         SyncRequest::GetHeadersByLocator {
