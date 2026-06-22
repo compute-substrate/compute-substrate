@@ -57,3 +57,8 @@ libp2p = {     version = "0.54", features = [   "tcp",  "dns",  "noise",  "yamux
 default = []
 test-bypass = []
 explorer-index = []
+cuda = []
+
+[[bin]]
+name = "cuda_bench"
+required-features = ["cuda"]

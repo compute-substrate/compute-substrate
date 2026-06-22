@@ -3,6 +3,8 @@ mod chain;
 mod cli;
 mod codec;
 mod crypto;
+#[cfg(feature = "cuda")]
+mod gpu;
 mod net;
 mod params;
 mod state;
