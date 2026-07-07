@@ -38,11 +38,10 @@ fn better_candidate(
     hash_b: &Hash32,
 ) -> bool {
     // true if A is strictly better than B
-    if cw_a != cw_b {
-        return cw_a > cw_b;
-    }
-    // deterministic tie-break: smallest hash wins
-    hash_lt(hash_a, hash_b)
+      // A replaces B ONLY on strictly greater cumulative work.
+      // On equal work we KEEP the incumbent (B) -> de-facto first-seen.
+      let _ = (hash_a, hash_b);
+      cw_a > cw_b
 }
 
 fn load_block(db: &Stores, hash: &Hash32) -> Result<Block> {
