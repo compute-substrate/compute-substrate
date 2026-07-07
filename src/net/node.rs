@@ -1796,7 +1796,7 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
             continue;
         };
 
-        let Some(hi) = get_hidx(db, &target_h)? else {
+        let Some(_target_hi) = get_hidx(db, &target_h)? else {
 
             skip_no_hidx += 1;
 
@@ -1811,11 +1811,12 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
             continue;
         };
 
-// Do not request stale/fork blocks that cannot improve local canonical work.
-// This prevents polluted want_blocks from blocking mining forever.
-if hi.chainwork <= local_work {
-    continue;
-}
+
+let queued_strictly_better = get_hidx(db, &queued_h)?
+      .map(|qh| qh.chainwork > local_work)
+      .unwrap_or(false);
+  if !queued_strictly_better {
+continue; }
 
         let mut target_peer: Option<PeerId> = None;
         let mut peer_reason = String::new();
@@ -2014,7 +2015,8 @@ fn note_canonical_provider(
 
 
 fn better_fork_tip(cw_a: u128, hash_a: &Hash32, cw_b: u128, hash_b: &Hash32) -> bool {
-    cw_a > cw_b || (cw_a == cw_b && hash_a.as_slice() < hash_b.as_slice())
+let _ = (hash_a, hash_b);
+      cw_a > cw_b
 }
 
 fn maybe_switch_sync_peer(
