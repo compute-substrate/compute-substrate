@@ -1796,7 +1796,7 @@ while inflight.len() < MAX_INFLIGHT_BLOCKS {
             continue;
         };
 
-        let Some(_target_hi) = get_hidx(db, &target_h)? else {
+        let Some(hi) = get_hidx(db, &target_h)? else {
 
             skip_no_hidx += 1;
 
