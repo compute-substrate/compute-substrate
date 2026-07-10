@@ -50,7 +50,8 @@ const MAX_RR_MSG_BYTES: u64 = 1024 * 1024;
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 8;
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 120;           
+const RL_MAX_RR_REQS_PER_WINDOW_BOOTNODE: u32 = 1200;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 32;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 3;
 
@@ -1093,10 +1094,12 @@ fn note_invalid(
     }
 }
 
+// NEW
 fn allow_rr_req(
     buckets: &mut HashMap<PeerId, RateBucket>,
     bans: &mut HashMap<PeerId, Instant>,
     p: PeerId,
+    is_bootnode: bool,
 ) -> bool {
     if is_banned(bans, &p) {
         return false;
@@ -1104,12 +1107,19 @@ fn allow_rr_req(
     let b = buckets.entry(p).or_insert_with(RateBucket::new);
     b.reset_if_needed(RL_WINDOW);
     b.rr_reqs = b.rr_reqs.saturating_add(1);
-    if b.rr_reqs > RL_MAX_RR_REQS_PER_WINDOW {
+
+    let limit = if is_bootnode {
+        RL_MAX_RR_REQS_PER_WINDOW_BOOTNODE
+    } else {
+        RL_MAX_RR_REQS_PER_WINDOW
+    };
+    if b.rr_reqs > limit {
         ban_peer(bans, p, "rr request rate limit exceeded");
         return false;
     }
     true
 }
+
 
 fn allow_gossip(
     buckets: &mut HashMap<PeerId, RateBucket>,
@@ -3594,7 +3604,7 @@ if buckets.get(&p).map(|b| b.invalid >= 3).unwrap_or(false) {
 
 Message::Request { request, channel, .. } => {
 
-if !allow_rr_req(&mut buckets, &mut bans, peer) {
+if !allow_rr_req(&mut buckets, &mut bans, peer, cfg.is_bootnode) {
     let _ = swarm.behaviour_mut().rr.send_response(
         channel,
         SyncResponse::Err { msg: "rate limited".into() },
