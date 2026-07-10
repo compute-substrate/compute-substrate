@@ -3620,10 +3620,10 @@ match mempool.insert_checked(&db, gt.tx) {
 
                                     Ok(_added) => {}
                                     Err(_) => {
-                                        if let Some(p) = src {
 
 
-                                        }
+
+                                        
                                     }
                                 }
                             }
