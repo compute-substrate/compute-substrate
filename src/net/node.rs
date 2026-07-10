@@ -52,7 +52,7 @@ const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 const RL_WINDOW: Duration = Duration::from_secs(10);
 const RL_MAX_RR_REQS_PER_WINDOW: u32 = 120;           
 const RL_MAX_RR_REQS_PER_WINDOW_BOOTNODE: u32 = 1200;
-const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 32;
+const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 1024;
 const RL_MAX_INVALID_PER_WINDOW: u32 = 3;
 
 const BAN_SECS: u64 = 10 * 60;
@@ -1133,7 +1133,6 @@ fn allow_gossip(
     b.reset_if_needed(RL_WINDOW);
     b.gossip_msgs = b.gossip_msgs.saturating_add(1);
     if b.gossip_msgs > RL_MAX_GOSSIP_MSGS_PER_WINDOW {
-        ban_peer(bans, p, "gossip rate limit exceeded");
 
         return false;
     }
