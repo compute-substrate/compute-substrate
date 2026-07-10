@@ -53,7 +53,10 @@ const RL_WINDOW: Duration = Duration::from_secs(10);
 const RL_MAX_RR_REQS_PER_WINDOW: u32 = 120;           
 const RL_MAX_RR_REQS_PER_WINDOW_BOOTNODE: u32 = 1200;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 1024;
-const RL_MAX_INVALID_PER_WINDOW: u32 = 3;
+// csd-patches: a catching-up node must not ban its OWN sync peers for normal
+// catch-up noise (unvalidatable mempool txs, oversized header requests). Stock 3
+// collapses peers to 0. Steady state stays far under this.
+const RL_MAX_INVALID_PER_WINDOW: u32 = 4096;
 
 const BAN_SECS: u64 = 10 * 60;
 
@@ -100,8 +103,21 @@ const MAX_LOCATOR_LEN: usize = 128;
 const MAX_INFLIGHT_BLOCKS: usize = 8;
 const MAX_WANT_QUEUE: usize = 5_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
+// csd-patches: after a peer replies "historical block serving disabled" it serves
+// headers only, not old blocks — skip it for block requests for this long so the
+// scheduler converges onto the few archive peers instead of wasting inflight slots.
+const HEADER_ONLY_COOLDOWN_SECS: u64 = 300;
 
 const MAX_DIALS_PER_POLL: usize = 8;
+// csd-patches: hard cap on concurrent pending (SYN-SENT) outbound dials. Peers
+// advertise many unreachable/NAT'd addrs; each stuck dial lingers ~127s (kernel
+// TCP timeout), so without a total cap they pile into the hundreds (measured 365)
+// and saturate the single-threaded swarm loop, starving block-sync response
+// processing. But too LOW a cap starves peer discovery — we then hold too few
+// peers and stall whenever our lone archive peer drops. 128 acquires ~24 peers in
+// a few minutes (enough to hold 2-4 archive peers for resilience), then dialing
+// subsides as connected reaches MAX_CONNECTED_PEERS and CPU frees for block work.
+const MAX_PENDING_OUTGOING_DIALS: usize = 128;
 const MAX_DIALS_FROM_PEERS_RESPONSE: usize = 8;
 const MAX_STARTUP_DIALS: usize = 16;
 
@@ -1869,7 +1885,7 @@ continue; }
             let quarantined = is_quarantined(quarantine, p);
             let bad = is_bad(bad_providers, &target_h, p);
 
-if connected_ok && !banned && !quarantined && !bad && !pace_saturated(p) {
+if connected_ok && !banned && !quarantined && !bad && !pace_saturated(p) && !is_header_only(p) {
                 target_peer = Some(*p);
             } else {
                 peer_reason = format!(
@@ -1893,7 +1909,7 @@ if connected_ok && !banned && !quarantined && !bad && !pace_saturated(p) {
                 let quarantined = is_quarantined(quarantine, &sp);
                 let bad = is_bad(bad_providers, &target_h, &sp);
 
-if connected_ok && !banned && !quarantined && !bad && !pace_saturated(&sp) {
+if connected_ok && !banned && !quarantined && !bad && !pace_saturated(&sp) && !is_header_only(&sp) {
                     target_peer = Some(sp);
                 } else if peer_reason.is_empty() {
                     peer_reason = format!(
@@ -1910,7 +1926,8 @@ if connected_ok && !banned && !quarantined && !bad && !pace_saturated(&sp) {
             }
         }
 
-// 3) Fallback to any eligible connected peer
+// 3) Fallback to any eligible connected peer — prefer peers that actually serve
+//    blocks (skip header-only), but fall back to allowing them so we never deadlock.
 if target_peer.is_none() {
     target_peer = connected
         .iter()
@@ -1919,6 +1936,15 @@ if target_peer.is_none() {
                 && !is_quarantined(quarantine, p)
                 && !is_bad(bad_providers, &target_h, p)
                 && !pace_saturated(p)
+                && !is_header_only(p)
+        })
+        .or_else(|| {
+            connected.iter().find(|p| {
+                !is_banned(bans, p)
+                    && !is_quarantined(quarantine, p)
+                    && !is_bad(bad_providers, &target_h, p)
+                    && !pace_saturated(p)
+            })
         })
         .cloned();
 
@@ -2009,6 +2035,29 @@ fn is_bad(
         .and_then(|m| m.get(p))
         .map(|t| t.elapsed().as_secs() < BAD_PROVIDER_RETRY_SECS)
         .unwrap_or(false)
+}
+
+// csd-patches: peers that answer "historical block serving disabled" serve headers
+// only. Track them (single-threaded swarm loop → thread_local, same pattern as the
+// upstream OUTBOUND_PACE) so the block scheduler deprioritizes them.
+thread_local! {
+    static HEADER_ONLY_PEERS: std::cell::RefCell<HashMap<PeerId, Instant>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn note_header_only(p: &PeerId) {
+    HEADER_ONLY_PEERS.with(|m| {
+        m.borrow_mut().insert(*p, Instant::now());
+    });
+}
+
+fn is_header_only(p: &PeerId) -> bool {
+    HEADER_ONLY_PEERS.with(|m| {
+        m.borrow()
+            .get(p)
+            .map(|t| t.elapsed().as_secs() < HEADER_ONLY_COOLDOWN_SECS)
+            .unwrap_or(false)
+    })
 }
 
 fn is_quarantined(
@@ -3047,7 +3096,10 @@ if addr_is_backed_off(&addr_backoff, &addr) {
             }
         }
 
-if dials_this_poll >= MAX_DIALS_PER_POLL {
+if dials_this_poll >= MAX_DIALS_PER_POLL
+    || swarm.network_info().connection_counters().num_pending_outgoing() as usize
+        >= MAX_PENDING_OUTGOING_DIALS
+{
     break;
 }
 
@@ -3572,7 +3624,7 @@ match mempool.insert_checked(&db, gt.tx) {
                                             note_invalid(&mut buckets, &mut bans, p, "gossip tx failed mempool validation");
                                             bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
 
-if buckets.get(&p).map(|b| b.invalid >= 3).unwrap_or(false) {
+if buckets.get(&p).map(|b| b.invalid >= RL_MAX_INVALID_PER_WINDOW).unwrap_or(false) {
     let _ = swarm.disconnect_peer_id(p);
 }
 
@@ -4413,7 +4465,10 @@ for addr in addrs {
     }
 
 
-if dials_from_peers_response >= MAX_DIALS_FROM_PEERS_RESPONSE {
+if dials_from_peers_response >= MAX_DIALS_FROM_PEERS_RESPONSE
+    || swarm.network_info().connection_counters().num_pending_outgoing() as usize
+        >= MAX_PENDING_OUTGOING_DIALS
+{
     break;
 }
 
@@ -4490,6 +4545,23 @@ let _ = compact_and_log_want_queue(
         }
     } else {
         println!("[sync] error response from {peer}: {msg}");
+
+        // csd-patches: a peer refusing to serve history is header-only — mark it so
+        // the scheduler stops picking it for blocks. And free the inflight slot NOW
+        // (don't wait out the 60s block timeout) + requeue to another peer.
+        if msg.contains("historical") {
+            note_header_only(&peer);
+        }
+        if let Some(h) = rid_to_hash.remove(&rid) {
+            inflight.remove(&h);
+            bad_providers.entry(h).or_default().insert(peer, Instant::now());
+            if providers.get(&h) == Some(&peer) {
+                providers.remove(&h);
+            }
+            if want_blocks.len() < MAX_WANT_QUEUE {
+                want_blocks.push_back(h);
+            }
+        }
     }
 
 }
