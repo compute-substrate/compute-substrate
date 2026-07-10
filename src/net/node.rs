@@ -56,7 +56,7 @@ const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 1024;
 // csd-patches: a catching-up node must not ban its OWN sync peers for normal
 // catch-up noise (unvalidatable mempool txs, oversized header requests). Stock 3
 // collapses peers to 0. Steady state stays far under this.
-const RL_MAX_INVALID_PER_WINDOW: u32 = 4096;
+const RL_MAX_INVALID_PER_WINDOW: u32 = 32;
 
 const BAN_SECS: u64 = 10 * 60;
 
@@ -3621,12 +3621,7 @@ match mempool.insert_checked(&db, gt.tx) {
                                     Ok(_added) => {}
                                     Err(_) => {
                                         if let Some(p) = src {
-                                            note_invalid(&mut buckets, &mut bans, p, "gossip tx failed mempool validation");
-                                            bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
 
-if buckets.get(&p).map(|b| b.invalid >= RL_MAX_INVALID_PER_WINDOW).unwrap_or(false) {
-    let _ = swarm.disconnect_peer_id(p);
-}
 
                                         }
                                     }
