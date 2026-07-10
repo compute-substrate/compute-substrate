@@ -64,6 +64,8 @@ const SCORE_GOOD_BLOCK: i32 = 3;
 
 const SCORE_GOOD_CANONICAL_BLOCK: i32 = 12;
 
+const OUTBOUND_MAX_RR_PER_PEER_PER_WINDOW: u32 = 6;
+
 const SCORE_BAD_INVALID: i32 = -6;
 const SCORE_BAD_TIMEOUT: i32 = -1;
 const SCORE_BAD_UNKNOWN_BLOCK: i32 = -3;
@@ -1030,6 +1032,36 @@ impl Default for RateBucket {
     }
 }
 
+// Outbound request pacing, per peer, in RL_WINDOW. Single-threaded swarm loop,
+// so a thread_local map keeps this self-contained (no signature/call-site churn).
+thread_local! {
+    static OUTBOUND_PACE: std::cell::RefCell<HashMap<PeerId, (Instant, u32)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn pace_saturated(p: &PeerId) -> bool {
+    OUTBOUND_PACE.with(|m| {
+        let mut m = m.borrow_mut();
+        let e = m.entry(*p).or_insert_with(|| (Instant::now(), 0));
+        if e.0.elapsed() >= RL_WINDOW {
+            *e = (Instant::now(), 0);
+        }
+        e.1 >= OUTBOUND_MAX_RR_PER_PEER_PER_WINDOW
+    })
+}
+
+fn pace_note_sent(p: &PeerId) {
+    OUTBOUND_PACE.with(|m| {
+        let mut m = m.borrow_mut();
+        let e = m.entry(*p).or_insert_with(|| (Instant::now(), 0));
+        if e.0.elapsed() >= RL_WINDOW {
+            *e = (Instant::now(), 0);
+        }
+        e.1 = e.1.saturating_add(1);
+    })
+}
+
+
 fn is_banned(bans: &HashMap<PeerId, Instant>, p: &PeerId) -> bool {
     bans.get(p)
         .map(|t| t.elapsed().as_secs() < BAN_SECS)
@@ -1828,7 +1860,7 @@ continue; }
             let quarantined = is_quarantined(quarantine, p);
             let bad = is_bad(bad_providers, &target_h, p);
 
-            if connected_ok && !banned && !quarantined && !bad {
+if connected_ok && !banned && !quarantined && !bad && !pace_saturated(p) {
                 target_peer = Some(*p);
             } else {
                 peer_reason = format!(
@@ -1852,7 +1884,7 @@ continue; }
                 let quarantined = is_quarantined(quarantine, &sp);
                 let bad = is_bad(bad_providers, &target_h, &sp);
 
-                if connected_ok && !banned && !quarantined && !bad {
+if connected_ok && !banned && !quarantined && !bad && !pace_saturated(&sp) {
                     target_peer = Some(sp);
                 } else if peer_reason.is_empty() {
                     peer_reason = format!(
@@ -1874,9 +1906,10 @@ if target_peer.is_none() {
     target_peer = connected
         .iter()
         .find(|p| {
-            !is_banned(bans, p)
+!is_banned(bans, p)
                 && !is_quarantined(quarantine, p)
                 && !is_bad(bad_providers, &target_h, p)
+                && !pace_saturated(p)
         })
         .cloned();
 
@@ -1941,6 +1974,8 @@ if target_peer.is_none() {
         .behaviour_mut()
         .rr
         .send_request(&peer, SyncRequest::GetBlock { hash: h });
+
+pace_note_sent(&peer);
 
     println!(
         "[sync] request block {} from {} (height={})",
