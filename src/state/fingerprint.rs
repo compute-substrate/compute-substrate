@@ -12,10 +12,17 @@ pub struct StateFingerprint {
 fn hash_tree_kv(tree: &sled::Tree) -> Result<[u8; 32]> {
     use sha2::{Digest, Sha256};
 
+    // Length-framed. Concatenating raw key||value is only unambiguous while every key and value
+    // is fixed width, which is true of utxo/utxo_meta but NOT of the app tree: its keys embed a
+    // variable-length domain (state/app_state.rs), so two different app states could in
+    // principle hash the same. This is the comparison the pre-rotation phantom check relies on,
+    // so it should not depend on that being true by accident.
     let mut hasher = Sha256::new();
     for kv in tree.iter() {
         let (k, v) = kv?;
+        hasher.update((k.len() as u64).to_be_bytes());
         hasher.update(&k);
+        hasher.update((v.len() as u64).to_be_bytes());
         hasher.update(&v);
     }
     let out = hasher.finalize();
