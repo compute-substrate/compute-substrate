@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 
 parking_lot = "0.12"
+libc = "0.2"  # set PoW worker threads to SCHED_IDLE (Linux) so sync never starves
 
 # --- Error handling ---
 anyhow = "1.0"
@@ -51,12 +52,18 @@ tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "signal", "
 axum = "0.7"
 
 # --- Networking ---
-libp2p = {     version = "0.54", features = [   "tcp",  "dns",  "noise",  "yamux",  "gossipsub", "request-response", "tokio",  "macros", "identify"  ]}
+libp2p = {     version = "0.55", features = [   "tcp",  "dns",  "noise",  "yamux",  "gossipsub", "request-response", "tokio",  "macros", "identify"  ]}
+
+# --- Allocator ---
+# jemalloc returns freed memory to the OS (dirty/muzzy decay) and avoids glibc's per-thread-arena
+# fragmentation that made the read-serving node's RSS climb under RPC churn until it wedged.
+# sled is pure-Rust so it allocates through this global allocator too.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 [features]
 default = []
 test-bypass = []
-explorer-index = []
 cuda = []
 
 [[bin]]

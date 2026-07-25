@@ -34,6 +34,22 @@ pub struct Mempool {
     max_spent: usize,
 }
 
+// Unmined-tx time-to-live (in-memory policy only; never touches consensus bytes). The mempool has
+// no RBF ("input already spent in mempool" rejects replacements) and, before this, no expiry, so a
+// valid tx that missed its single gossip window sat here FOREVER holding its inputs hostage in
+// this node's available-utxo view (a user-visible fund freeze until a process restart). 36h is
+// orders of magnitude above any honest inclusion delay on a 120s-block chain, so expiry can only
+// ever free a genuinely stuck tx; the wallet then simply resubmits. Swept in prune() (runs on
+// every block connect + reorg).
+const MEMPOOL_TX_TTL_SECS: u64 = 36 * 3600;
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 struct Inner {
     // txid -> tx
@@ -50,6 +66,10 @@ struct Inner {
     // eviction order: lowest feerate first, tie-break by txid (deterministic)
     // item: (feerate_ppm, txid)
     eviction: BTreeSet<(u64, Hash32)>,
+
+    // txid -> unix seconds first accepted (for the TTL sweep; a reorg re-add restarts the clock,
+    // which only ever EXTENDS a stuck tx's life, which is acceptable, and it keeps reorg.rs untouched)
+    seen_at: HashMap<Hash32, u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +173,21 @@ impl Mempool {
             .iter()
             .next_back()
             .map(|x| x.0)
+    }
+
+    /// (txid, age_secs) for up to `cap` mempool txs, oldest first. This is the strand-sentinel source.
+    /// Age derives from the TTL `seen_at` stamp; `now` is unix seconds (0 age if a stamp is
+    /// somehow missing). Read-only, one lock; the API route that exposes it is loopback-gated.
+    pub fn txids_with_age(&self, now: u64, cap: usize) -> Vec<(Hash32, u64)> {
+        let r = self.inner.read().unwrap();
+        let mut out: Vec<(Hash32, u64)> = r
+            .txs
+            .keys()
+            .map(|id| (*id, now.saturating_sub(r.seen_at.get(id).copied().unwrap_or(now))))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1)); // oldest (largest age) first
+        out.truncate(cap);
+        out
     }
 
     pub fn stats(&self) -> MempoolStats {
@@ -307,6 +342,7 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
         };
         w.feeinfo.insert(id, fi);
         w.eviction.insert((fi.feerate_ppm, id));
+        w.seen_at.insert(id, unix_now_secs());
 
         Ok(true)
     }
@@ -373,15 +409,19 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
 
     pub fn prune(&self, db: &crate::state::db::Stores) -> usize {
         let c = crate::codec::consensus_bincode();
+        let now = unix_now_secs();
 
-        let snapshot: Vec<(Hash32, Transaction)> = {
+        let snapshot: Vec<(Hash32, Transaction, Option<u64>)> = {
             let r = self.inner.read().unwrap();
-            r.txs.iter().map(|(id, tx)| (*id, tx.clone())).collect()
+            r.txs
+                .iter()
+                .map(|(id, tx)| (*id, tx.clone(), r.seen_at.get(id).copied()))
+                .collect()
         };
 
         let mut removed = 0usize;
 
-        for (id, tx) in snapshot {
+        for (id, tx, seen) in snapshot {
             let oversized = tx.inputs.is_empty()
                 || tx.inputs.len() > MAX_TX_INPUTS
                 || tx.outputs.len() > MAX_TX_OUTPUTS
@@ -396,9 +436,26 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
                 _ => true,
             };
 
-            if oversized || too_low_feerate || validate_tx_for_mempool(db, &tx).is_err() {
+            // TTL: an unmined tx past MEMPOOL_TX_TTL_SECS is expired: with no RBF it would hold
+            // its inputs hostage in this node's view forever otherwise (see the const's comment).
+            // The mempool is RAM-only, so every entry in THIS process was stamped by insert_checked;
+            // a None stamp cannot occur, and if it somehow did we must not expire blind.
+            let expired = match seen {
+                Some(t) => now.saturating_sub(t) > MEMPOOL_TX_TTL_SECS,
+                None => false,
+            };
+
+            if oversized || too_low_feerate || expired || validate_tx_for_mempool(db, &tx).is_err() {
                 if self.remove(&id) {
                     removed += 1;
+                    // log only after the removal actually happened (a racing remove could win)
+                    if expired {
+                        println!(
+                            "[mempool] TTL-expired unmined tx 0x{} after {}h, inputs released",
+                            hex::encode(id),
+                            now.saturating_sub(seen.unwrap_or(now)) / 3600
+                        );
+                    }
                 }
             }
         }
@@ -523,6 +580,7 @@ fn remove_locked(w: &mut Inner, id: &Hash32) -> bool {
     let Some(tx) = w.txs.remove(id) else {
         return false;
     };
+    w.seen_at.remove(id); // single removal chokepoint: every exit path clears the TTL stamp
 
     if let Some(fi) = w.feeinfo.remove(id) {
         let _ = fi.fee; // retained because useful for future RPC/stats

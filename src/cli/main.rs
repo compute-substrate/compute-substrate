@@ -8,8 +8,8 @@ use crate::state::db::Stores;
 #[derive(Parser)]
 #[command(
     name = "csd",
-    version = "1.0",
-    about = "Compute Substrate node and wallet CLI",
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Compute Substrate node, miner, and wallet CLI",
     long_about = "Compute Substrate node and wallet CLI.\n\nUse `csd node` to run a node or miner.\nUse `csd wallet` to create keys, inspect balances, build transactions, and submit proposals or attestations.",
     arg_required_else_help = true
 )]
@@ -223,6 +223,27 @@ pub enum Commands {
     Wallet {
         #[command(subcommand)]
         w: WalletCmd,
+    },
+
+    /// Print the UTXO/app state fingerprint of a datadir. Does not modify chain state.
+    ///
+    /// Intended as a pre-rotation check: sync a spare node from genesis, run
+    /// this against both datadirs, and compare. Identical fingerprints mean the running node's
+    /// state matches a from-genesis replay. A divergence means the live set carries something a
+    /// fresh node does not (the phantom-UTXO class), which a fixed build will later refuse to
+    /// spend.
+    ///
+    /// The node must be STOPPED: sled takes an exclusive lock on the datadir. Note that opening
+    /// a datadir is not a pure read (sled may run log recovery and will CREATE a database if the
+    /// path is not one), which is why a path with no chain tip is refused rather than reported.
+    Fingerprint {
+        /// Database directory to read
+        #[arg(long, default_value = "cs.db")]
+        datadir: String,
+
+        /// Print one field per line instead of a single line
+        #[arg(long)]
+        long: bool,
     },
 }
 
@@ -802,6 +823,60 @@ fn pick_inputs_from_rpc(
 }
 
 
+/// Take the chain lock, flush, report, and exit the process WITHOUT releasing the lock.
+///
+/// Exiting while still holding the lock is the point. Block apply spans five sled trees with no
+/// batch (utxo, utxo_meta, app, undo, then meta via set_tip), so the only way to guarantee no
+/// half-written block at process death is to make sure nothing can start one between the flush
+/// and the exit. Releasing the guard first leaves exactly that window.
+///
+/// It also removes a hang. `mine_one` runs on the blocking pool and only ends when it solves or
+/// when its watcher sees the tip move; once the p2p task stops, the tip cannot move, and tokio's
+/// runtime drop WAITS for in-flight blocking tasks. Returning normally from a mining process
+/// would therefore park until it solved a block solo, blow through the 90 s, and be SIGKILLed
+/// right after printing that the shutdown was clean. `process::exit` does not wait, and the held
+/// lock means the miner cannot be mid-write when it happens.
+///
+/// The lock wait uses `try_lock_for`, not `tokio::time::timeout`. A timeout around a
+/// `spawn_blocking` handle cancels the WAIT, never the task: the blocking task would stay parked
+/// on the lock and runtime drop would then wait for it forever, which is the opposite of a bound.
+async fn seal_and_exit(db: Arc<Stores>, chain_lock: crate::chain::lock::ChainLock) -> ! {
+    const SHUTDOWN_LOCK_WAIT_SECS: u64 = 30;
+
+    let _ = tokio::task::spawn_blocking(move || {
+        let guard = chain_lock.try_lock_for(std::time::Duration::from_secs(SHUTDOWN_LOCK_WAIT_SECS));
+        if guard.is_none() {
+            eprintln!(
+                "[node] chain lock still held after {SHUTDOWN_LOCK_WAIT_SECS}s: this shutdown is NOT clean, expect recovery on next start"
+            );
+        }
+        match db.db.flush() {
+            Ok(bytes) => {
+                let height = crate::state::db::get_tip(db.as_ref())
+                    .ok()
+                    .flatten()
+                    .and_then(|t| crate::chain::index::get_hidx(db.as_ref(), &t).ok().flatten())
+                    .map(|hi| hi.height);
+                match (guard.is_some(), height) {
+                    (true, Some(h)) => {
+                        println!("[node] clean shutdown at height {h} ({bytes} bytes flushed)")
+                    }
+                    (true, None) => println!("[node] clean shutdown ({bytes} bytes flushed)"),
+                    (false, _) => eprintln!("[node] best-effort flush: {bytes} bytes"),
+                }
+            }
+            Err(e) => eprintln!("[node] FLUSH FAILED on shutdown: {e:#}"),
+        }
+        // Still holding `guard` (when we got it). Nothing can start an apply between here and
+        // process death.
+        std::process::exit(0);
+    })
+    .await;
+
+    // spawn_blocking only fails if the runtime is already shutting down; exit anyway.
+    std::process::exit(0);
+}
+
 pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
 
@@ -998,6 +1073,71 @@ wallet_spend_submit(&rpc_url, &privkey, input, output, fee, change)?;
             )?;
             Ok(())
         }
+
+Commands::Fingerprint { datadir, long } => {
+    // Opens the datadir, hashes the consensus-state trees, prints, exits. No network, no
+    // recovery, no genesis check, no chain-state write.
+    //
+    // REFUSING A PATH THAT IS NOT A DATADIR IS LOAD-BEARING. `sled::open` CREATES a database
+    // when the path is not one, so without this guard a mistyped path, a wrong working
+    // directory, or the parent of the real datadir all produce the same fixed output: the zero
+    // tip and the SHA-256 of the empty string for every root, with exit status 0. Two such
+    // mistakes compare EQUAL, and the operator reads "identical fingerprints, safe to rotate"
+    // from a comparison that never looked at any chain state. A
+    // safety check that can manufacture its own pass is worse than no check.
+    let dir = std::path::Path::new(&datadir);
+    if !dir.exists() {
+        anyhow::bail!("datadir does not exist: {datadir}");
+    }
+    // Probe for sled's own files BEFORE opening. `sled::open` creates a database, so opening
+    // first and validating afterwards would already have written to the operator's mistyped path
+    // by the time we refuse. Checking first keeps the "does not modify chain state" claim true.
+    if !dir.join("conf").is_file() || !dir.join("db").is_file() {
+        anyhow::bail!(
+            "{datadir} does not contain a database (no sled conf/db files). Nothing was read or \
+             written. Check the path: a wrong one would otherwise be reported as an empty state, \
+             and two wrong paths would compare equal."
+        );
+    }
+    let db = Stores::open(&datadir)
+        .with_context(|| format!("open {datadir} (is a node still running against it?)"))?;
+
+    let Some(tip) = crate::state::db::get_tip(&db).context("read chain tip")? else {
+        anyhow::bail!(
+            "no chain tip in {datadir}: this is not a synced node datadir. \
+             Nothing was compared. (Opening the path may have created an empty database there.)"
+        );
+    };
+
+    let fp = crate::state::fingerprint::fingerprint(&db)
+        .context("compute state fingerprint")?;
+    debug_assert_eq!(fp.tip, tip);
+
+    let height = crate::chain::index::get_hidx(&db, &fp.tip)
+        .ok()
+        .flatten()
+        .map(|hi| hi.height);
+
+    if long {
+        println!("datadir       {datadir}");
+        println!("tip           {}", crate::state::fingerprint::fmt32(&fp.tip));
+        match height {
+            Some(h) => println!("height        {h}"),
+            None => println!("height        unknown (no header index for tip)"),
+        }
+        println!("utxo          {}", crate::state::fingerprint::fmt32(&fp.utxo_root));
+        println!("utxo_meta     {}", crate::state::fingerprint::fmt32(&fp.utxo_meta_root));
+        println!("app           {}", crate::state::fingerprint::fmt32(&fp.app_root));
+        println!("utxo_entries  {}", db.utxo.len());
+    } else {
+        println!(
+            "height={} {}",
+            height.map(|h| h.to_string()).unwrap_or_else(|| "?".to_string()),
+            crate::state::fingerprint::fmt_fp(&fp)
+        );
+    }
+    Ok(())
+}
 
 Commands::Wallet { w } => {
     use crate::cli::wallet::*;
@@ -1257,6 +1397,63 @@ Commands::Node {
             std::fs::create_dir_all(&datadir)?;
             let db = Arc::new(Stores::open(&datadir)?);
 
+            // Arm shutdown BEFORE genesis and recovery.
+            //
+            // systemd stops this unit with SIGTERM and waits TimeoutStopUSec (90 s) before
+            // SIGKILL. An earlier version installed the handler only when axum first polled its
+            // graceful-shutdown future, which left the whole of startup on the default
+            // disposition. That is the worst window to be killed in: `recover_if_needed` ->
+            // `rebuild_state_to_tip` CLEARS the utxo/utxo_meta/undo/app trees before it replays,
+            // so a signal there kills the process partway through a destructive rebuild. A canary
+            // rotation is three restarts, and an upgrade forces an index rebuild on first boot,
+            // so this is a likely moment to be signalled, not an exotic one.
+            //
+            // A `watch` channel rather than a Notify: it latches, so a signal that arrives before
+            // anyone is waiting is still observed. During recovery the signal is DEFERRED, not
+            // honoured, because a rebuild cannot be safely interrupted halfway; it is acted on as
+            // soon as recovery returns, still far inside the 90 s.
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            tokio::spawn(async move {
+                let mut sigterm =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            eprintln!("[node] could not install SIGTERM handler: {e}");
+                            None
+                        }
+                    };
+                // Stay alive after the first signal. An earlier version selected once and
+                // returned, which dropped the Signal handle; tokio does not deregister the
+                // process-wide handler, so every later SIGTERM was silently swallowed and an
+                // operator's second Ctrl-C or `systemctl stop` did nothing while the first
+                // shutdown was stuck draining.
+                let mut count: u32 = 0;
+                loop {
+                    match sigterm.as_mut() {
+                        Some(sig) => {
+                            tokio::select! {
+                                _ = sig.recv() => {}
+                                _ = tokio::signal::ctrl_c() => {}
+                            }
+                        }
+                        None => {
+                            let _ = tokio::signal::ctrl_c().await;
+                        }
+                    }
+                    count += 1;
+                    if count == 1 {
+                        println!("[node] shutdown signal received");
+                        let _ = shutdown_tx.send(true);
+                    } else {
+                        eprintln!(
+                            "[node] shutdown signal #{count} while already shutting down; exiting immediately without a final flush"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            });
+
             let gbytes = std::fs::read(&genesis)?;
             let c = crate::codec::consensus_bincode();
             let gblock: crate::types::Block = c.deserialize(&gbytes)?;
@@ -1274,11 +1471,19 @@ Commands::Node {
                 db.flush_meta().expect("db.flush_meta failed");
             }
 
-            #[cfg(feature = "explorer-index")]
-            {
-       crate::state::tx_index::rebuild_canonical_index_from_tip(db.as_ref())
-                    .expect("tx index rebuild failed");
+            // A signal that arrived while the rebuild was running is honoured here, at the first
+            // point where stopping is safe.
+            if *shutdown_rx.borrow() {
+                println!("[node] shutdown was requested during startup recovery; stopping now");
+                seal_and_exit(db.clone(), chain_lock.clone()).await;
             }
+
+            // The txid index is kept converged by a bounded BACKGROUND reconciler
+            // (spawned below, after the RPC comes up), never by a blocking startup rebuild.
+            // No .expect here: a panic in this window sits inside the crash-loop containment
+            // (StartLimitIntervalSec=600/StartLimitBurst=5) and the read path degrades to the
+            // scan fallback whenever the index marker is stale, so index trouble costs
+            // performance, never correctness.
 
             let (tx_gossip_tx, tx_gossip_rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::net::GossipTxEvent>();
@@ -1327,10 +1532,25 @@ println!("[p2p] bootnode mode: {}", is_bootnode);
                 net.connected_peers.clone(),
                       net.known_peers.clone(),
                 net.peer_id,
+                net.best_peer_height_gauge(),
+                net.tip_activity_gauge(),
             );
 
             let listener = tokio::net::TcpListener::bind(&rpc).await?;
             println!("RPC on http://{}", rpc);
+            println!("[node] csd {}", env!("CARGO_PKG_VERSION"));
+
+            // Bounded background txid-index reconciler (unindex-then-
+            // index on reorgs, completeness marker idx:tip_hash). Loops forever, logs and
+            // retries on error; it must never panic the node.
+            {
+                let db_idx = db.clone();
+                crate::state::subsystem::spawn_supervised(
+                    "tx-index reconciler",
+                    &crate::state::subsystem::SUBSYSTEMS.txidx,
+                    crate::state::tx_scan::run_reconciler(db_idx),
+                );
+            }
 
             if mine {
                 if miner_addr20.trim().is_empty() {
@@ -1356,7 +1576,10 @@ println!("[p2p] bootnode mode: {}", is_bootnode);
 
                 let net2 = net.clone();
 
-                tokio::spawn(async move {
+                crate::state::subsystem::spawn_supervised(
+                    "miner",
+                    &crate::state::subsystem::SUBSYSTEMS.miner,
+                    async move {
                     let max_mempool_txs: usize = 500;
 
                     let mut last_gate_log =
@@ -1535,8 +1758,34 @@ eprintln!(
                 });
             }
 
-            axum::serve(listener, app).await?;
-            Ok(())
+            // Drain on signal, then seal. `shutdown_rx` was armed at the TOP of this command,
+            // before genesis and recovery ran, so a signal arriving during the destructive
+            // startup rebuild is caught rather than killing the process mid-clear.
+            {
+                // Bound the drain. `with_graceful_shutdown` waits for every open connection with
+                // no timeout of its own, and there is no request-timeout layer, so a client that
+                // simply stops reading a large response holds the process open until systemd's
+                // 90 s SIGKILL. Sealing at 15 s and dropping the stragglers is strictly better
+                // than being killed mid-write.
+                const DRAIN_DEADLINE_SECS: u64 = 15;
+                let mut rx = shutdown_rx.clone();
+                let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                    let _ = rx.wait_for(|stop| *stop).await;
+                    println!("[node] shutdown signal received, draining in-flight requests");
+                });
+                let mut stop_rx = shutdown_rx.clone();
+                tokio::select! {
+                    r = serve => { r?; }
+                    _ = async {
+                        let _ = stop_rx.wait_for(|stop| *stop).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(DRAIN_DEADLINE_SECS)).await;
+                    } => {
+                        eprintln!("[node] drain did not finish in {DRAIN_DEADLINE_SECS}s; sealing anyway");
+                    }
+                }
+            }
+
+            seal_and_exit(db.clone(), chain_lock.clone()).await
         }
     }
 }

@@ -569,6 +569,13 @@ let base_script_sig = wtxs[0].inputs[0].script_sig.clone();
 let pow_target = pow_target;
 
 scope.spawn(move || {
+    // Deprioritize PoW grind threads (SCHED_IDLE) so networking/apply threads (normal priority) always
+    // preempt them -- mine on every core without starving block-apply. Best-effort; ignored on failure.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let p = libc::sched_param { sched_priority: 0 };
+        let _ = libc::sched_setscheduler(0, libc::SCHED_IDLE, &p);
+    }
     #[allow(unused_assignments)]
     let mut checks: u64 = 0;
     let mut extra_nonce: u64 = 0;
