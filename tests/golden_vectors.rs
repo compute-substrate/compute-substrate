@@ -26,8 +26,10 @@ fn hex_bytes(b: &[u8]) -> String {
 }
 
 // --- PASTE THESE INTO tests/golden_vectors.rs ---
+// Re-frozen for POW_LIMIT_BITS = 0x1e00ffff (exponent 30 -> 3 leading zero bytes). The old value
+// 0x0000ffff... was for 0x1f00ffff and was never updated when mainnet tightened the pow limit.
 const EXPECT_POW_LIMIT_TARGET: &str =
-    "0x0000ffff00000000000000000000000000000000000000000000000000000000";
+    "0x000000ffff000000000000000000000000000000000000000000000000000000";
 const EXPECT_TXID: &str =
     "0x876f5cbd6770ce8679730b8ad565ba136fa30bd750ef4f3345b8f7289393dd6b";
 const EXPECT_SIGHASH: &str =
