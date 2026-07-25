@@ -367,7 +367,18 @@ if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
     // rejected block leaves zero residue, then return the ORIGINAL validation error. The
     // cleanup is best-effort (its own error must not mask the real reject reason).
     if let Err(e) = apply_result {
-        let _ = apply_undo(db, &undo);
+        if let Err(rollback_err) = apply_undo(db, &undo) {
+            // The block is still rejected and the original reason is still what we return, but a
+            // failed rollback means the trees may now hold part of a rejected block. Nothing
+            // downstream can detect that, so it has to be loud: the datadir needs comparing
+            // against a from-genesis rebuild before it is trusted.
+            eprintln!(
+                "[state] CRITICAL: rollback of a rejected block failed: {rollback_err:#}. \
+                 UTXO/app state may contain partial writes from that block. Compare this datadir \
+                 against a from-genesis rebuild (`csd fingerprint --datadir <dir>`) before \
+                 trusting it. Original rejection: {e:#}"
+            );
+        }
         return Err(e);
     }
 
@@ -395,36 +406,39 @@ fn apply_undo(db: &Stores, undo: &UndoLog) -> Result<()> {
         del_utxo_meta(db, op)?;
     }
 
-    // Net out same-block create-then-spend pairs on undo. An outpoint CREATED
-    // and SPENT within this same block appears in BOTH `undo.created` and `undo.spent`. At the ancestor state
-    // the block is not applied, so that outpoint must be ABSENT after undo, not restored. The historical undo
-    // restored it, resurrecting a phantom UTXO absent in a from-genesis replay: a long-running incrementally-
-    // reorging node then diverged from a freshly-synced one (a later spend of the phantom is accepted by one and
-    // rejected by the other = consensus fork; the h47114 ghost class). Skip restoring any spent op this block
-    // also created. For the HONEST same-block create-then-spend (the h47114 incident class) this set is exactly
-    // the create+spend pairs and never drops a legitimate pre-block restore: within-block txids are consensus-
-    // unique (validate_and_apply_block:~192), and a NON-coinbase cross-block duplicate txid is not constructible
-    // (its inputs would already be spent). BIP-30 CAVEAT (adversarial, tracked): a COINBASE txid CAN collide with
-    // an earlier still-unspent coinbase, because the coinbase script_sig is committed in the txid (crypto/mod.rs)
-    // and, while the honest miner commits the height (mine.rs: script_sig = height, locktime = height, making
-    // coinbase txids unique), CONSENSUS does not yet ENFORCE it (the height-prefix rule
-    // `validate_coinbase_scriptsig_height` is gated OFF at COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT = u64::MAX).
-    // An adversarial miner could reuse an earlier coinbase's txid, spend the old copy in the new block (so
-    // (cbh,0) lands in BOTH `undo.created` and `undo.spent`), and on reorg this skip would drop the restore of
-    // the PRE-block coinbase, which is the very fork class this fixes, reversed. Durable closure: activate the height-prefix
-    // rule at a coordinated gate (a one-line change to that constant; a NO-OP on honest blocks, which already
-    // commit the height, so golden_vectors stay green) to make coinbase txids consensus-unique. INTERIM NET: there
-    // is NO wired automatic check for this divergence in this code path. state/fingerprint.rs::fingerprint() is a
-    // TEST-ONLY equality helper (it hashes only the LIVE DB and is referenced by no bin/CLI/boot caller); it does
-    // not, by itself, compare a live node against a from-genesis replay. The interim BIP-30 safeguard is therefore
-    // OPERATOR-MANUAL: at canary time the operator from-genesis re-syncs a spare node and diffs its fingerprint()
-    // against the live node before any node swap (an operator canary runbook step, RELEASING.md), NOT an automatic
-    // check here. Until the gate activates, this skip is BIP-30-safe on the honest chain only.
+    // Net out same-block create-then-spend pairs on undo. An outpoint CREATED and SPENT within
+    // this same block appears in BOTH `undo.created` and `undo.spent`. At the ancestor state the
+    // block is not applied, so that outpoint must be ABSENT after undo, not restored. Restoring it
+    // resurrects a phantom UTXO that a from-genesis replay does not have, and a later spend of the
+    // phantom is then accepted by the incrementally-reorging node and rejected by a fresh one,
+    // which is a consensus fork.
+    //
+    // The skip must not fire when the outpoint existed BEFORE the block, and there is exactly one
+    // way that can happen. Coinbase txids are not yet consensus-unique: the coinbase script_sig is
+    // committed in the txid, and the height-prefix rule `validate_coinbase_scriptsig_height` is
+    // gated off at COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT = u64::MAX, so within one halving epoch
+    // a block with the same fee total and miner address produces byte-identical coinbase bytes and
+    // therefore a duplicate txid. Non-coinbase transactions are applied BEFORE the coinbase, so
+    // such a block can spend the pre-block coin at (T,0) in the transaction loop and then have its
+    // own coinbase recreate (T,0). That puts one outpoint in both lists for a reason that is not a
+    // same-block create-then-spend, and the pre-block coin must be restored.
+    //
+    // `meta.coinbase` separates the two cases, and does so for a structural reason rather than a
+    // heuristic one. The coinbase output is written last, so no transaction in the same block can
+    // spend it, which means a genuine same-block create-then-spend is always a non-coinbase output
+    // and always carries `coinbase: false`. Conversely, the pre-block coin at a colliding txid must
+    // itself be a coinbase output: a non-coinbase transaction cannot share a txid with a coinbase
+    // one, because a coinbase input has a shape (`prev_txid` all zero, `vout` 0xffffffff) that
+    // `validate_tx_structure_noncoinbase` forbids, and the txid commits to the inputs.
+    //
+    // The durable closure for the underlying duplicate-txid hazard is to activate the height-prefix
+    // rule at a coordinated height. That is a one-line change to the constant and a no-op for every
+    // honest block, since miners already commit the height.
     let created_set: HashSet<OutPoint> = undo.created.iter().copied().collect();
 
     // restore spent utxos (+meta)
     for (op, out, meta) in &undo.spent {
-        if created_set.contains(op) {
+        if created_set.contains(op) && !meta.coinbase {
             continue;
         }
         put_utxo(db, op, out)?;

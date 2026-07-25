@@ -580,3 +580,91 @@ fn reorg_undo_same_block_create_then_spend_leaves_no_phantom() -> Result<()> {
     assert!(db.undo.get(k_undo(&bh))?.is_none(), "undo log must be removed");
     Ok(())
 }
+
+// -----------------------------------------------------------------------------
+// The created-set skip must NOT drop a restore when the outpoint existed BEFORE the block.
+//
+// Nothing enforces a height commitment in the coinbase script_sig yet
+// (COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT = u64::MAX), so a coinbase txid can collide with an
+// earlier, still-unspent coinbase: within one halving epoch, a block with the same fee total and
+// the same miner address produces byte-identical coinbase bytes.
+//
+// Non-coinbase transactions are applied BEFORE the coinbase, so such a block can spend the
+// pre-block coin at (T,0) in its transaction loop and then have its own coinbase recreate (T,0).
+// That puts one outpoint in BOTH undo.created and undo.spent for a reason that is not a
+// same-block create-then-spend, and undo must restore the pre-block coin rather than delete it.
+//
+// The coinbase output is written last, so no transaction in the same block can ever spend it.
+// An outpoint that is both created by the coinbase and spent in this block is therefore always
+// this case, never the honest one.
+// -----------------------------------------------------------------------------
+#[test]
+fn undo_restores_a_pre_block_coin_whose_txid_the_coinbase_duplicates() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 9u64;
+    let fee = 1_000u64;
+    const OLD_VALUE: u64 = 777_000_000;
+
+    // This block's coinbase.
+    let cb = csd::chain::mine::coinbase(signer_addr(), block_reward(height) + fee, height, None);
+    let cb_op = out0(&cb);
+
+    // An earlier block produced a byte-identical coinbase, so (T,0) already exists, is unspent,
+    // and holds a different value. Seeded directly: what is under test is undo, not how the
+    // collision arises.
+    put_utxo(
+        &db,
+        &cb_op,
+        &TxOut {
+            value: OLD_VALUE,
+            script_pubkey: signer_addr(),
+        },
+    )?;
+    put_utxo_meta(
+        &db,
+        &cb_op,
+        &UtxoMeta {
+            height: 1,
+            coinbase: true,
+        },
+    )?;
+    let pristine = state_snapshot(&db);
+
+    // A regular transaction in this block spends that pre-block coin.
+    let tx1 = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn {
+            prevout: cb_op,
+            script_sig: vec![0u8; 99],
+        }],
+        outputs: vec![TxOut {
+            value: OLD_VALUE - fee,
+            script_pubkey: [0x71; 20],
+        }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+
+    let blk = mk_block([0u8; 32], vec![cb, tx1]);
+    let bh = block_hash(&blk);
+    validate_and_apply_block(&db, &blk, epoch_of(height), height)
+        .expect("a block whose coinbase txid duplicates an earlier one is currently consensus-legal");
+
+    // While applied, (T,0) exists again and holds THIS block's coinbase value.
+    let applied = get_utxo(&db, &cb_op)?.expect("coinbase output present while applied");
+    assert_eq!(applied.value, block_reward(height) + fee);
+
+    undo_block(&db, &bh).expect("undo_block must succeed");
+
+    let restored = get_utxo(&db, &cb_op)?.expect(
+        "the PRE-BLOCK coin at (T,0) must be restored on undo, not dropped by the created-set skip",
+    );
+    assert_eq!(restored.value, OLD_VALUE, "restored the wrong value at (T,0)");
+    assert_eq!(
+        state_snapshot(&db),
+        pristine,
+        "undo did not converge to the pre-block state"
+    );
+    Ok(())
+}
