@@ -229,6 +229,17 @@ if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
         app_undo: vec![],
     };
 
+    // FINDING 9 (NODE-REORG-PARTIAL-APPLY-GHOST): make per-block apply ALL-OR-NOTHING.
+    // The body below mutates the sled UTXO/app trees directly while accumulating the
+    // in-memory `undo`, and that undo log is only persisted on success (at the end). Any
+    // early `?`/bail! inside (missing utxo, app-phase existence/expiry, bad coinbase value)
+    // previously DROPPED the in-memory `undo` and left the partial tree writes committed:
+    // ghost create-outputs persist, ghost-deleted inputs never restored (the h47114 root
+    // cause). We run the fallible body in a closure; on Err we replay the accumulated
+    // `undo` so a REJECTED block leaves ZERO residue, then re-return the ORIGINAL error.
+    // The SUCCESS path is byte-for-byte unchanged (same accept/reject decisions, same
+    // persisted undo bytes). See RELEASING.md "Frozen-set waiver (finding 9)".
+    let apply_result: Result<()> = (|| {
 
     // Apply non-coinbase txs first (fees), then coinbase.
     // UTXO spends/creates must still follow original tx order exactly.
@@ -349,10 +360,78 @@ if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
         undo.created.push(op);
     }
 
+    Ok(())
+    })();
+
+    // finding 9: on ANY validation failure, reverse the partial in-memory writes so the
+    // rejected block leaves zero residue, then return the ORIGINAL validation error. The
+    // cleanup is best-effort (its own error must not mask the real reject reason).
+    if let Err(e) = apply_result {
+        let _ = apply_undo(db, &undo);
+        return Err(e);
+    }
+
     // Save undo log keyed by block hash (CONSENSUS DB encoding)
     let bh = crate::chain::index::header_hash(&block.header);
     db.undo.insert(k_undo(&bh), c.serialize(&undo)?)?;
     Ok(undo)
+}
+
+/// Replay an `UndoLog` to reverse a block's writes (CONSENSUS-CRITICAL ORDER):
+///   1) roll back app-state puts (reverse order), 2) delete created UTXOs,
+///   3) restore spent UTXOs.
+/// This is the EXACT reverse that was previously inlined in `undo_block`; it is now shared
+/// so the error/cleanup path of `validate_and_apply_block` can replay the IN-MEMORY undo of
+/// a partially-applied, then-rejected block (finding 9). The step ORDER is unchanged from the
+/// historical `undo_block`; the one behavioural correction is below: a same-block
+/// create-then-spend outpoint is no longer restored as a phantom (this converges incremental
+/// undo to the from-genesis UTXO set; it is not an app-layer/consensus-rule change).
+fn apply_undo(db: &Stores, undo: &UndoLog) -> Result<()> {
+    rollback_app_undo(db, &undo.app_undo)?;
+
+    // delete created utxos (+meta)
+    for op in &undo.created {
+        del_utxo(db, op)?;
+        del_utxo_meta(db, op)?;
+    }
+
+    // Net out same-block create-then-spend pairs on undo. An outpoint CREATED
+    // and SPENT within this same block appears in BOTH `undo.created` and `undo.spent`. At the ancestor state
+    // the block is not applied, so that outpoint must be ABSENT after undo, not restored. The historical undo
+    // restored it, resurrecting a phantom UTXO absent in a from-genesis replay: a long-running incrementally-
+    // reorging node then diverged from a freshly-synced one (a later spend of the phantom is accepted by one and
+    // rejected by the other = consensus fork; the h47114 ghost class). Skip restoring any spent op this block
+    // also created. For the HONEST same-block create-then-spend (the h47114 incident class) this set is exactly
+    // the create+spend pairs and never drops a legitimate pre-block restore: within-block txids are consensus-
+    // unique (validate_and_apply_block:~192), and a NON-coinbase cross-block duplicate txid is not constructible
+    // (its inputs would already be spent). BIP-30 CAVEAT (adversarial, tracked): a COINBASE txid CAN collide with
+    // an earlier still-unspent coinbase, because the coinbase script_sig is committed in the txid (crypto/mod.rs)
+    // and, while the honest miner commits the height (mine.rs: script_sig = height, locktime = height, making
+    // coinbase txids unique), CONSENSUS does not yet ENFORCE it (the height-prefix rule
+    // `validate_coinbase_scriptsig_height` is gated OFF at COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT = u64::MAX).
+    // An adversarial miner could reuse an earlier coinbase's txid, spend the old copy in the new block (so
+    // (cbh,0) lands in BOTH `undo.created` and `undo.spent`), and on reorg this skip would drop the restore of
+    // the PRE-block coinbase, which is the very fork class this fixes, reversed. Durable closure: activate the height-prefix
+    // rule at a coordinated gate (a one-line change to that constant; a NO-OP on honest blocks, which already
+    // commit the height, so golden_vectors stay green) to make coinbase txids consensus-unique. INTERIM NET: there
+    // is NO wired automatic check for this divergence in this code path. state/fingerprint.rs::fingerprint() is a
+    // TEST-ONLY equality helper (it hashes only the LIVE DB and is referenced by no bin/CLI/boot caller); it does
+    // not, by itself, compare a live node against a from-genesis replay. The interim BIP-30 safeguard is therefore
+    // OPERATOR-MANUAL: at canary time the operator from-genesis re-syncs a spare node and diffs its fingerprint()
+    // against the live node before any node swap (an operator canary runbook step, RELEASING.md), NOT an automatic
+    // check here. Until the gate activates, this skip is BIP-30-safe on the honest chain only.
+    let created_set: HashSet<OutPoint> = undo.created.iter().copied().collect();
+
+    // restore spent utxos (+meta)
+    for (op, out, meta) in &undo.spent {
+        if created_set.contains(op) {
+            continue;
+        }
+        put_utxo(db, op, out)?;
+        put_utxo_meta(db, op, meta)?;
+    }
+
+    Ok(())
 }
 
 pub fn undo_block(db: &Stores, block_hash: &[u8; 32]) -> Result<()> {
@@ -363,19 +442,7 @@ pub fn undo_block(db: &Stores, block_hash: &[u8; 32]) -> Result<()> {
     let c = crate::codec::consensus_bincode();
     let undo: UndoLog = c.deserialize(&v)?;
 
-    rollback_app_undo(db, &undo.app_undo)?;
-
-    // delete created utxos (+meta)
-    for op in &undo.created {
-        del_utxo(db, op)?;
-        del_utxo_meta(db, op)?;
-    }
-
-    // restore spent utxos (+meta)
-    for (op, out, meta) in &undo.spent {
-        put_utxo(db, op, out)?;
-        put_utxo_meta(db, op, meta)?;
-    }
+    apply_undo(db, &undo)?;
 
     db.undo.remove(k_undo(block_hash))?;
     Ok(())
