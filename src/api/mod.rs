@@ -2,6 +2,8 @@
 
 use axum::{
     extract::{Path, Query, State},
+    http::{header::RETRY_AFTER, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -9,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use libp2p::PeerId;
 use crate::chain::index::{get_hidx, HeaderIndex};
@@ -19,7 +21,7 @@ use crate::net::GossipTxEvent;
 use crate::state::app_state::{get_proposal, get_topk, k_proposal, Attestation, Proposal};
 use crate::state::db::{get_tip, get_utxo_meta, k_block, Stores};
 use crate::types::{AppPayload, Block, Hash32, OutPoint, Transaction, TxOut};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::params::GENESIS_HASH;
 
 fn c() -> crate::codec::ConsensusBincode {
@@ -35,6 +37,10 @@ pub struct ApiState {
 pub connected_peers: Arc<AtomicUsize>,
 pub known_peers: Arc<AtomicUsize>,
 pub peer_id: PeerId,
+// the two p2p gauges /health needs to answer "is this node actually
+// keeping up", instead of every consumer inferring it from wall-clock tip staleness.
+pub best_peer_height: Arc<AtomicU64>,
+pub last_tip_activity_unix: Arc<AtomicU64>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +63,48 @@ pub known_peers: usize,
     pub mempool_bytes: usize,
     pub mempool_min_feerate_ppm: Option<u64>,
     pub mempool_max_feerate_ppm: Option<u64>,
+    // ADDITIVE ONLY. Nothing above changed name, type or position, so
+    // every existing consumer keeps parsing this response unchanged. Deliberately NO version or
+    // build string here: /health is reverse-proxied to the public internet by the front door,
+    // and the build identity belongs on the ops-only /node/info route below.
+    /// Highest height any connected peer has advertised, or null when no peer has answered yet.
+    ///
+    /// These three are OPTION ON PURPOSE. Reporting 0 for "unknown" is what makes a peerless
+    /// node that has just restarted look identical, on exactly the fields meant to detect it, to
+    /// a perfectly synced one: no peers means best_peer_height 0, so blocks_behind 0, and no
+    /// observed tip activity means an age of 0. A monitor written against these fields would
+    /// read "0 behind, 0 seconds since activity" and see health. null cannot be mistaken for
+    /// healthy, and it is JSON-additive, so no existing consumer breaks.
+    pub best_peer_height: Option<u64>,
+    /// best_peer_height - height, i.e. how far this node is behind the network it can see.
+    /// null when no peer has advertised a height yet.
+    pub blocks_behind: Option<u64>,
+    /// Seconds since the p2p loop last observed tip activity, or null if it never has. Same
+    /// signal the miner gate uses; a node whose RPC answers while this climbs is the wedge shape.
+    pub secs_since_tip_activity: Option<u64>,
+}
+
+/// Build identity plus the same liveness gauges, for the canary and
+/// incident triage: one curl tells you which binary is answering, whether it is keeping up, and
+/// whether its txid index is converged. Kept OFF /health on purpose, because /health is
+/// reverse-proxied publicly and the exact build string is not something to advertise there.
+/// The RPC listener binds loopback, and no front-door proxy forwards this path.
+#[derive(Serialize)]
+struct NodeInfoResp {
+    pub ok: bool,
+    pub version: String,
+    pub peer_id: String,
+    pub height: u64,
+    pub best_peer_height: Option<u64>,
+    pub blocks_behind: Option<u64>,
+    pub secs_since_tip_activity: Option<u64>,
+    pub tx_index_converged: bool,
+    pub peer_count: usize,
+    pub known_peers: usize,
+    /// Liveness of the long-lived background tasks. A panicked p2p loop or reconciler leaves the
+    /// process up and the RPC answering, so without this the only symptom is a tip that quietly
+    /// stops moving.
+    pub subsystems: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -213,6 +261,12 @@ pub struct TxResp {
     pub time: Option<u64>,
     pub tx: Option<serde_json::Value>,
     pub err: Option<String>,
+    // Set ONLY on a proved absence (walked to genesis, or a fresh txid index
+    // answered). Skipped otherwise so a Found response stays byte-identical to pre-0.1.6.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -343,6 +397,7 @@ pub struct RecentAttestedResp {
     pub items: Vec<RecentAttestedItem>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn router(
     db: Arc<Stores>,
     mempool: Arc<Mempool>,
@@ -350,6 +405,8 @@ pub fn router(
 connected_peers: Arc<AtomicUsize>,
 known_peers: Arc<AtomicUsize>,
 peer_id: PeerId,
+best_peer_height: Arc<AtomicU64>,
+last_tip_activity_unix: Arc<AtomicU64>,
 ) -> Router {
     let st = ApiState {
         db,
@@ -358,16 +415,20 @@ peer_id: PeerId,
 connected_peers,
 known_peers,
 peer_id,
+best_peer_height,
+last_tip_activity_unix,
     };
 
     Router::new()
         .route("/health", get(health))
+        .route("/node/info", get(node_info))
         .route("/peers", get(peers))
 .route("/p2p/info", get(p2p_info))
         .route("/metrics", get(metrics))
         .route("/oracle", get(oracle))
         .route("/tip", get(tip))
         .route("/mempool", get(mempool_info))
+        .route("/mempool/txids", get(mempool_txids))
         // Explorer-grade read endpoints:
 .route("/block/height/:height", get(block_by_height_get))
         .route("/block/:hash", get(block_get))
@@ -417,12 +478,23 @@ peer_id,
 }
 
 async fn health(State(st): State<ApiState>) -> Json<HealthResp> {
-    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
+    // No unwrap on the db reads: a malformed meta:tip or an undecodable header would panic the
+    // handler and drop the connection on the one endpoint every monitor polls. Degrade to the
+    // zero tip, exactly as the pre-existing zero_hidx fallback already does one line down.
+    let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);
     let hi = get_hidx(&st.db, &tip)
-        .unwrap()
+        .ok()
+        .flatten()
         .unwrap_or_else(|| zero_hidx(tip));
 
     let s: MempoolStats = st.mempool.stats();
+
+    let best_peer_height = st.best_peer_height.load(Ordering::Relaxed);
+    let last_activity = st.last_tip_activity_unix.load(Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     Json(HealthResp {
         ok: true,
@@ -436,6 +508,43 @@ known_peers: st.known_peers.load(Ordering::Relaxed),
         mempool_bytes: s.total_bytes,
         mempool_min_feerate_ppm: s.min_feerate_ppm,
         mempool_max_feerate_ppm: s.max_feerate_ppm,
+        best_peer_height: (best_peer_height > 0).then_some(best_peer_height),
+        blocks_behind: (best_peer_height > 0).then(|| best_peer_height.saturating_sub(hi.height)),
+        secs_since_tip_activity: (last_activity > 0).then(|| now.saturating_sub(last_activity)),
+    })
+}
+
+async fn node_info(State(st): State<ApiState>) -> Json<NodeInfoResp> {
+    let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);
+    let height = get_hidx(&st.db, &tip)
+        .ok()
+        .flatten()
+        .map(|hi| hi.height)
+        .unwrap_or(0);
+
+    let best_peer_height = st.best_peer_height.load(Ordering::Relaxed);
+    let last_activity = st.last_tip_activity_unix.load(Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Json(NodeInfoResp {
+        ok: true,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        peer_id: st.peer_id.to_string(),
+        height,
+        best_peer_height: (best_peer_height > 0).then_some(best_peer_height),
+        blocks_behind: (best_peer_height > 0).then(|| best_peer_height.saturating_sub(height)),
+        secs_since_tip_activity: (last_activity > 0).then(|| now.saturating_sub(last_activity)),
+        // Index state stays HERE and not on /health: the front door reverse-proxies /health to
+        // the public internet, and this field announces in real time when this node's absence
+        // answers are degraded to 503 SCAN_HORIZON rather than proved, which is a free
+        // restart-timing and degraded-mode oracle for anyone who can reach it.
+        tx_index_converged: crate::state::tx_scan::idx_fresh(&st.db),
+        peer_count: st.connected_peers.load(Ordering::Relaxed),
+        known_peers: st.known_peers.load(Ordering::Relaxed),
+        subsystems: crate::state::subsystem::SUBSYSTEMS.report(),
     })
 }
 
@@ -1124,7 +1233,7 @@ let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u3
 async fn block_by_height_get(
     Path(height): Path<u64>,
     State(st): State<ApiState>,
-) -> Json<BlockResp> {
+) -> Response {
     let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
     let hi = get_hidx(&st.db, &tip)
         .unwrap()
@@ -1138,28 +1247,95 @@ async fn block_by_height_get(
             chainwork: None,
             header: serde_json::json!({ "err": "height beyond tip" }),
             txs: vec![],
-        });
+        })
+        .into_response();
     }
+
+    // O(1) height->hash via the txid index's k_hh entries when the completeness marker
+    // is fresh. The walk below stays as the fallback and stays UNCAPPED on purpose: the
+    // a client's emergency fallback path depends on /block/height/:h answering to genesis
+    // regardless of index state.
+    if let Some(h) = crate::state::tx_scan::canonical_hash_at_height(&st.db, height) {
+        return block_get(Path(format!("0x{}", hex::encode(h))), State(st))
+            .await
+            .into_response();
+    }
+
+    // The fallback below is an UNCAPPED tip-to-genesis walk, kept uncapped
+    // on purpose (the wallet's documented emergency fallback depends on it answering at any
+    // depth). Uncapped and on a runtime worker are two different things though: it was the last
+    // O(chain) read still able to starve the p2p loop, and it runs precisely when the index is
+    // stale, which is when the indexer is polling hardest. Offload it and gate it like the rest.
+    let st_fb = st.clone();
+    let resolved = offload_resolve_height(move || block_by_height_fallback(height, st_fb)).await;
+    return match resolved {
+        Ok(h) => block_get(Path(format!("0x{}", hex::encode(h))), State(st))
+            .await
+            .into_response(),
+        Err(resp) => resp,
+    };
+}
+
+/// Same admission gate and blocking-pool handoff as the other O(chain) reads, but this one
+/// resolves a hash rather than producing the body, so the async caller can reuse `block_get`.
+async fn offload_resolve_height<F>(f: F) -> Result<Hash32, Response>
+where
+    F: FnOnce() -> Result<Hash32, Response> + Send + 'static,
+{
+    let Some(_permit) = acquire_or_shed(heavy_scan_gate()).await else {
+        return Err(scan_unavailable_busy(
+            "SCAN_BUSY",
+            "too many chain scans in flight; this is a load shed, not a statement about the height",
+        ));
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _p = _permit;
+        f()
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[api] height walk task failed: {e}");
+            Err(scan_unavailable_busy(
+                "SCAN_TASK_FAILED",
+                "height walk did not complete",
+            ))
+        }
+    }
+}
+
+fn block_by_height_fallback(height: u64, st: ApiState) -> Result<Hash32, Response> {
+    let Ok(Some(tip)) = get_tip(&st.db) else {
+        return Err(
+            Json(serde_json::json!({ "ok": false, "error": "no chain tip" })).into_response()
+        );
+    };
+    let hi = get_hidx(&st.db, &tip)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| zero_hidx(tip));
 
     let mut cur_hash = tip;
     let mut cur_height = hi.height;
 
     while cur_height > height {
-        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
-            return Json(BlockResp {
+        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).ok().flatten() else {
+            return Err(Json(BlockResp {
                 ok: false,
                 hash: format!("0x{}", hex::encode(cur_hash)),
                 height: Some(cur_height),
                 chainwork: None,
                 header: serde_json::json!({ "err": "missing block while walking back" }),
                 txs: vec![],
-            });
+            })
+            .into_response());
         };
 
         let blk: Block = match c().deserialize(&v) {
             Ok(b) => b,
             Err(e) => {
-                return Json(BlockResp {
+                return Err(Json(BlockResp {
                     ok: false,
                     hash: format!("0x{}", hex::encode(cur_hash)),
                     height: Some(cur_height),
@@ -1167,6 +1343,7 @@ async fn block_by_height_get(
                     header: serde_json::json!({ "err": format!("decode block: {e}") }),
                     txs: vec![],
                 })
+                .into_response())
             }
         };
 
@@ -1174,14 +1351,156 @@ async fn block_by_height_get(
         cur_height = cur_height.saturating_sub(1);
     }
 
-    block_get(Path(format!("0x{}", hex::encode(cur_hash))), State(st)).await
+    Ok(cur_hash)
 }
 
 
-async fn tx_get(
-    Path(id): Path<String>,
-    State(st): State<ApiState>,
-) -> Json<TxResp> {
+/// One admission gate shared by every handler whose cost is O(chain).
+///
+/// Moving those handlers to the blocking pool severs them from the p2p runtime, which is what the
+/// measured 44x-to-176x head-of-line win against upstream comes from, but it bounds nothing on its
+/// own: tokio's blocking pool defaults to 512 threads, this unit is pinned to 6 cores, and
+/// dropping the handler future when a client hangs up does NOT cancel the blocking task. So
+/// issuing requests and disconnecting costs an attacker nothing and buys hundreds of concurrent
+/// full-chain scans. A small permit count plus a fast 503 is the difference between "slow under
+/// load" and "the swarm loop gets no CPU".
+///
+/// Sized well above real traffic: the front door serves a few hundred of these per DAY.
+/// SEPARATE gates, on purpose. A single shared pool lets six concurrent `/utxos` at ~140 ms each
+/// block every `/tx/:id` for that whole window, and `/tx/:id` is the endpoint the wallet polls
+/// hardest: it verifies one per transaction INPUT, so a legitimate multi-input send fans out
+/// several at once.
+const TX_LOOKUP_PERMITS: usize = 32;
+const HEAVY_SCAN_PERMITS: usize = 6;
+
+/// Wait briefly rather than refusing instantly. `try_acquire` turns a legitimate burst into a
+/// 503 even though each request finishes in well under a millisecond on a fresh index. A short
+/// bounded wait costs a queued caller nothing when the index is fresh (the queue drains in
+/// microseconds) and still sheds hard against a caller that is actually saturating the node.
+const GATE_WAIT_MS: u64 = 250;
+
+static TX_LOOKUP_GATE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+static HEAVY_SCAN_GATE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+fn tx_lookup_gate() -> &'static Arc<tokio::sync::Semaphore> {
+    TX_LOOKUP_GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(TX_LOOKUP_PERMITS)))
+}
+
+fn heavy_scan_gate() -> &'static Arc<tokio::sync::Semaphore> {
+    HEAVY_SCAN_GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(HEAVY_SCAN_PERMITS)))
+}
+
+async fn acquire_or_shed(
+    gate: &'static Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(GATE_WAIT_MS),
+        gate.clone().acquire_owned(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+}
+
+/// 503 body for a request refused or failed by the offload path. Deliberately NOT a 200 with an
+/// empty result: on these endpoints an empty answer is a claim, and the caller must be able to
+/// tell "no" from "I could not look".
+fn scan_unavailable_busy(code: &'static str, err: &'static str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(RETRY_AFTER, "2")],
+        Json(serde_json::json!({ "ok": false, "code": code, "err": err, "retry_after_secs": 2 })),
+    )
+        .into_response()
+}
+
+/// Run an O(chain) read on the blocking pool, behind the admission gate.
+async fn offload_o_chain<F>(f: F) -> Response
+where
+    F: FnOnce() -> Response + Send + 'static,
+{
+    let Some(_permit) = acquire_or_shed(tx_lookup_gate()).await else {
+        return scan_unavailable_busy(
+            "SCAN_BUSY",
+            "too many chain scans in flight; this is a load shed, not a statement about the query",
+        );
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _p = _permit;
+        f()
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[api] chain scan task failed: {e}");
+            scan_unavailable_busy("SCAN_TASK_FAILED", "chain scan did not complete")
+        }
+    }
+}
+
+/// Scan budget for the /tx and /proof/tx fallback walk (a parameter of the pure
+/// `find_tx_in_chain`, no longer a buried const; this is the API's default budget).
+pub const TX_SCAN_MAX_BACK: u64 = 100_000;
+
+/// Retry-After seconds advertised on SCAN_HORIZON / SCAN_INCOMPLETE / SCAN_DECODE 503s.
+/// The background index reconciler converges within minutes even from cold.
+const SCAN_RETRY_AFTER_SECS: u64 = 30;
+
+/// Wire mapping for the non-decisive scan outcomes (normative spec: node README
+/// "Scan-outcome wire contract"). Horizon and Incomplete MUST be non-2xx-non-404 so fielded
+/// wallets classify them `transient` (fail closed) instead of `notfound` (silent ghost).
+fn scan_unavailable(want: &Hash32, outcome: &crate::state::tx_scan::ScanOutcome) -> Response {
+    use crate::state::tx_scan::{ScanOutcome, WHY_DECODE};
+    let body = match outcome {
+        ScanOutcome::Horizon {
+            scanned,
+            stopped_at_height,
+        } => serde_json::json!({
+            "ok": false,
+            "txid": format!("0x{}", hex::encode(want)),
+            "code": "SCAN_HORIZON",
+            "err": "scan horizon reached before absence could be proved",
+            "scanned": scanned,
+            "stopped_at_height": stopped_at_height,
+            "retry_after_secs": SCAN_RETRY_AFTER_SECS,
+        }),
+        ScanOutcome::Incomplete { at, why } => serde_json::json!({
+            "ok": false,
+            "txid": format!("0x{}", hex::encode(want)),
+            "code": if *why == WHY_DECODE { "SCAN_DECODE" } else { "SCAN_INCOMPLETE" },
+            "err": "chain walk could not complete; absence not proved",
+            "at": format!("0x{}", hex::encode(at)),
+            "why": why,
+            "retry_after_secs": SCAN_RETRY_AFTER_SECS,
+        }),
+        // Found/Absent are decisive and never routed here.
+        _ => serde_json::json!({ "ok": false, "code": "SCAN_INCOMPLETE" }),
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(RETRY_AFTER, SCAN_RETRY_AFTER_SECS.to_string())],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// The index answers this in O(1) only while its completeness marker is fresh. It is NOT fresh
+/// for a window after every new block, and not at all while the reconciler is rebuilding, and in
+/// those windows this falls through to `find_tx_in_chain`, which reads and decodes up to
+/// TX_SCAN_MAX_BACK block bodies. That is the same O(chain) work as /utxos, on the endpoint the
+/// wallet polls hardest, so it belongs behind the same gate. Measured against upstream, which has
+/// no index at all: an absent-txid lookup is 0.46 ms here versus 146 ms there.
+async fn tx_get(Path(id): Path<String>, State(st): State<ApiState>) -> Response {
+    offload_o_chain(move || tx_get_blocking(id, st)).await
+}
+
+fn tx_get_blocking(
+    id: String,
+    st: ApiState,
+) -> Response {
     let want = match parse_hash32(&id) {
         Ok(x) => x,
         Err(e) => {
@@ -1193,102 +1512,118 @@ async fn tx_get(
                 time: None,
                 tx: None,
                 err: Some(e),
+                complete: None,
+                scanned: None,
             })
+            .into_response()
         }
     };
 
-    let tip = get_tip(&st.db).unwrap().unwrap_or([0u8; 32]);
-    let hi = get_hidx(&st.db, &tip)
-        .unwrap()
-        .unwrap_or_else(|| zero_hidx(tip));
+    use crate::state::tx_scan::{locate_tx, ScanOutcome, WHY_MISSING_BODY};
 
-    const MAX_BACK: u64 = 100_000;
+    match locate_tx(&st.db, &want, TX_SCAN_MAX_BACK) {
+        ScanOutcome::Found {
+            block_hash,
+            height,
+            index_in_block,
+        } => {
+            // Re-load the located block and build the response EXACTLY as pre-0.1.6 did:
+            // an in-horizon hit (and now an index hit) stays byte-identical on the wire.
+            let Ok(Some(v)) = st.db.blocks.get(k_block(&block_hash)) else {
+                return scan_unavailable(
+                    &want,
+                    &ScanOutcome::Incomplete {
+                        at: block_hash,
+                        why: WHY_MISSING_BODY,
+                    },
+                );
+            };
+            let blk: Block = match c().deserialize(&v) {
+                Ok(b) => b,
+                Err(_) => {
+                    return scan_unavailable(
+                        &want,
+                        &ScanOutcome::Incomplete {
+                            at: block_hash,
+                            why: crate::state::tx_scan::WHY_DECODE,
+                        },
+                    )
+                }
+            };
+            let Some(tx) = blk.txs.get(index_in_block) else {
+                return scan_unavailable(
+                    &want,
+                    &ScanOutcome::Incomplete {
+                        at: block_hash,
+                        why: WHY_MISSING_BODY,
+                    },
+                );
+            };
 
-    let mut cur_hash = tip;
-    let mut cur_height = hi.height;
-    let mut scanned: u64 = 0;
+            let inputs_json: Vec<serde_json::Value> = tx.inputs.iter().map(|inp| {
+                let script_sig_hex = format!("0x{}", hex::encode(&inp.script_sig));
 
-    while scanned < MAX_BACK {
-        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
-            break;
-        };
-
-        let blk: Block = match c().deserialize(&v) {
-            Ok(b) => b,
-            Err(_) => break,
-        };
-
-        for tx in &blk.txs {
-            let id = txid(tx);
-            if id == want {
-                let inputs_json: Vec<serde_json::Value> = tx.inputs.iter().map(|inp| {
-                    let script_sig_hex = format!("0x{}", hex::encode(&inp.script_sig));
-
-                    let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX {
-                        if inp.script_sig.len() > 9 {
-                            std::str::from_utf8(&inp.script_sig[9..])
-                                .ok()
-                                .map(|s| s.to_string())
-                        } else {
-                            None
-                        }
+                let script_sig_text = if inp.prevout.txid == [0u8; 32] && inp.prevout.vout == u32::MAX {
+                    if inp.script_sig.len() > 9 {
+                        std::str::from_utf8(&inp.script_sig[9..])
+                            .ok()
+                            .map(|s| s.to_string())
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
+                serde_json::json!({
+                    "prev_txid": format!("0x{}", hex::encode(inp.prevout.txid)),
+                    "vout": inp.prevout.vout,
+                    "script_sig": script_sig_hex,
+                    "script_sig_text": script_sig_text,
+                })
+            }).collect();
+
+            let tx_json = serde_json::json!({
+                "txid": format!("0x{}", hex::encode(want)),
+                "version": tx.version,
+                "inputs": inputs_json,
+                "outputs": tx.outputs.iter().map(|o| {
                     serde_json::json!({
-                        "prev_txid": format!("0x{}", hex::encode(inp.prevout.txid)),
-                        "vout": inp.prevout.vout,
-                        "script_sig": script_sig_hex,
-                        "script_sig_text": script_sig_text,
+                        "value": o.value,
+                        "script_pubkey": format!("0x{}", hex::encode(o.script_pubkey)),
                     })
-                }).collect();
-
-                let tx_json = serde_json::json!({
-                    "txid": format!("0x{}", hex::encode(id)),
-                    "version": tx.version,
-                    "inputs": inputs_json,
-                    "outputs": tx.outputs.iter().map(|o| {
-                        serde_json::json!({
-                            "value": o.value,
-                            "script_pubkey": format!("0x{}", hex::encode(o.script_pubkey)),
-                        })
-                    }).collect::<Vec<_>>(),
-                    "locktime": tx.locktime,
+                }).collect::<Vec<_>>(),
+                "locktime": tx.locktime,
 "app": app_payload_json(&tx.app),
-                });
+            });
 
-                return Json(TxResp {
-                    ok: true,
-                    txid: format!("0x{}", hex::encode(id)),
-                    block_hash: Some(format!("0x{}", hex::encode(cur_hash))),
-                    height: Some(cur_height),
-                    time: Some(blk.header.time),
-                    tx: Some(tx_json),
-                    err: None,
-                });
-            }
+            Json(TxResp {
+                ok: true,
+                txid: format!("0x{}", hex::encode(want)),
+                block_hash: Some(format!("0x{}", hex::encode(block_hash))),
+                height: Some(height),
+                time: Some(blk.header.time),
+                tx: Some(tx_json),
+                err: None,
+                complete: None,
+                scanned: None,
+            })
+            .into_response()
         }
-
-        scanned += 1;
-
-        if blk.header.prev == [0u8; 32] || cur_height == 0 {
-            break;
-        }
-
-        cur_hash = blk.header.prev;
-        cur_height = cur_height.saturating_sub(1);
+        ScanOutcome::Absent { scanned } => Json(TxResp {
+            ok: false,
+            txid: format!("0x{}", hex::encode(want)),
+            block_hash: None,
+            height: None,
+            time: None,
+            tx: None,
+            err: Some("not found".to_string()),
+            complete: Some(true),
+            scanned: Some(scanned),
+        })
+        .into_response(),
+        other => scan_unavailable(&want, &other),
     }
-
-    Json(TxResp {
-        ok: false,
-        txid: format!("0x{}", hex::encode(want)),
-        block_hash: None,
-        height: None,
-        time: None,
-        tx: None,
-        err: Some("not found".to_string()),
-    })
 }
 
 fn merkle_branch(txids: &[[u8; 32]], index: usize) -> Vec<serde_json::Value> {
@@ -1354,129 +1689,167 @@ fn tx_json(tx: &Transaction, id: Hash32) -> serde_json::Value {
     })
 }
 
-async fn tx_proof_get(
-    State(st): State<ApiState>,
-    Path(id): Path<String>,
-) -> Json<serde_json::Value> {
+async fn tx_proof_get(State(st): State<ApiState>, Path(id): Path<String>) -> Response {
+    offload_o_chain(move || tx_proof_get_blocking(st, id)).await
+}
+
+fn tx_proof_get_blocking(
+    st: ApiState,
+    id: String,
+) -> Response {
     let want = match parse_hash32(&id) {
         Ok(h) => h,
-        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })).into_response(),
     };
 
-    let tip = match get_tip(&st.db) {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "txid": format!("0x{}", hex::encode(want)),
-                "error": "no chain tip"
-            }));
-        }
-        Err(e) => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "txid": format!("0x{}", hex::encode(want)),
-                "error": format!("get tip failed: {e}")
-            }));
-        }
-    };
+    use crate::state::tx_scan::{locate_tx, ScanOutcome, WHY_DECODE, WHY_MISSING_BODY};
 
-    let hi = get_hidx(&st.db, &tip)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| zero_hidx(tip));
-
-    const MAX_BACK: u64 = 100_000;
-
-    let mut cur_hash = tip;
-    let mut cur_height = hi.height;
-    let mut scanned: u64 = 0;
-    let mut seen = HashSet::<Hash32>::new();
-
-    while scanned < MAX_BACK {
-        if !seen.insert(cur_hash) {
-            return Json(serde_json::json!({
-                "ok": false,
-                "txid": format!("0x{}", hex::encode(want)),
-                "error": "chain traversal loop detected",
-                "scanned": scanned,
-                "at": format!("0x{}", hex::encode(cur_hash))
-            }));
-        }
-
-        let Some(v) = st.db.blocks.get(k_block(&cur_hash)).unwrap() else {
-            return Json(serde_json::json!({
-                "ok": false,
-                "txid": format!("0x{}", hex::encode(want)),
-                "error": "block missing during traversal",
-                "scanned": scanned,
-                "missing_block": format!("0x{}", hex::encode(cur_hash))
-            }));
-        };
-
-        let blk: Block = match c().deserialize(&v) {
-            Ok(b) => b,
-            Err(e) => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "txid": format!("0x{}", hex::encode(want)),
-                    "error": format!("decode block failed: {e}"),
-                    "block_hash": format!("0x{}", hex::encode(cur_hash))
-                }));
-            }
-        };
-
-        let txids: Vec<[u8; 32]> = blk.txs.iter().map(|tx| txid(tx)).collect();
-
-        for (i, tx) in blk.txs.iter().enumerate() {
-            if txids[i] == want {
-                return Json(serde_json::json!({
-                    "ok": true,
-                    "genesis_hash": format!("0x{}", hex::encode(GENESIS_HASH)),
-                    "txid": format!("0x{}", hex::encode(want)),
-                    "tx_index": i,
-                    "tx_raw": format!("0x{}", hex::encode(c().serialize(tx).unwrap())),
-"tx": tx_json(tx, want),
-                    "block_hash": format!("0x{}", hex::encode(cur_hash)),
-                    "height": cur_height,
-                    "confirmations": hi.height.saturating_sub(cur_height).saturating_add(1),
-                    "header": {
-                        "version": blk.header.version,
-                        "prev": format!("0x{}", hex::encode(blk.header.prev)),
-                        "merkle": format!("0x{}", hex::encode(blk.header.merkle)),
-                        "time": blk.header.time,
-                        "bits": blk.header.bits,
-                        "nonce": blk.header.nonce,
+    // The same four-way outcome mapping as /tx/:id (normative spec: node README
+    // "Scan-outcome wire contract").
+    match locate_tx(&st.db, &want, TX_SCAN_MAX_BACK) {
+        ScanOutcome::Found {
+            block_hash,
+            height,
+            index_in_block,
+        } => {
+            let Ok(Some(v)) = st.db.blocks.get(k_block(&block_hash)) else {
+                return scan_unavailable(
+                    &want,
+                    &ScanOutcome::Incomplete {
+                        at: block_hash,
+                        why: WHY_MISSING_BODY,
                     },
-                    "merkle_branch": merkle_branch(&txids, i),
-                    "scanned": scanned + 1
-                }));
-            }
+                );
+            };
+            let blk: Block = match c().deserialize(&v) {
+                Ok(b) => b,
+                Err(_) => {
+                    return scan_unavailable(
+                        &want,
+                        &ScanOutcome::Incomplete {
+                            at: block_hash,
+                            why: WHY_DECODE,
+                        },
+                    )
+                }
+            };
+            let txids: Vec<[u8; 32]> = blk.txs.iter().map(|tx| txid(tx)).collect();
+            let i = index_in_block;
+            let Some(tx) = blk.txs.get(i) else {
+                return scan_unavailable(
+                    &want,
+                    &ScanOutcome::Incomplete {
+                        at: block_hash,
+                        why: WHY_MISSING_BODY,
+                    },
+                );
+            };
+
+            // Tip height for confirmations + the scan-equivalent `scanned` value
+            // (tip_height - height + 1 = blocks a pre-0.1.6 walk reported on this hit),
+            // so an index-served proof is byte-identical to a scan-served one.
+            let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);
+            let tip_height = get_hidx(&st.db, &tip)
+                .ok()
+                .flatten()
+                .map(|hi| hi.height)
+                .unwrap_or(height);
+
+            Json(serde_json::json!({
+                "ok": true,
+                "genesis_hash": format!("0x{}", hex::encode(GENESIS_HASH)),
+                "txid": format!("0x{}", hex::encode(want)),
+                "tx_index": i,
+                "tx_raw": format!("0x{}", hex::encode(c().serialize(tx).unwrap())),
+"tx": tx_json(tx, want),
+                "block_hash": format!("0x{}", hex::encode(block_hash)),
+                "height": height,
+                "confirmations": tip_height.saturating_sub(height).saturating_add(1),
+                "header": {
+                    "version": blk.header.version,
+                    "prev": format!("0x{}", hex::encode(blk.header.prev)),
+                    "merkle": format!("0x{}", hex::encode(blk.header.merkle)),
+                    "time": blk.header.time,
+                    "bits": blk.header.bits,
+                    "nonce": blk.header.nonce,
+                },
+                "merkle_branch": merkle_branch(&txids, i),
+                "scanned": tip_height.saturating_sub(height).saturating_add(1)
+            }))
+            .into_response()
         }
-
-        scanned += 1;
-
-        if blk.header.prev == [0u8; 32] || cur_height == 0 {
-            break;
-        }
-
-        cur_hash = blk.header.prev;
-        cur_height = cur_height.saturating_sub(1);
+        ScanOutcome::Absent { scanned } => Json(serde_json::json!({
+            "ok": false,
+            "txid": format!("0x{}", hex::encode(want)),
+            "error": "tx not found in main chain",
+            "scanned": scanned,
+            "complete": true
+        }))
+        .into_response(),
+        other => scan_unavailable(&want, &other),
     }
-
-    Json(serde_json::json!({
-        "ok": false,
-        "txid": format!("0x{}", hex::encode(want)),
-        "error": "tx not found in main chain",
-        "scanned": scanned
-    }))
 }
 
 /// GET /utxos/:addr20
+/// Offload the two O(chain) read handlers to the blocking pool.
+///
+/// Measured on this host at tip ~61,200: /tip answers in well under a millisecond, /utxos in
+/// ~137 ms REGARDLESS of the address, because the cost is a full UTXO-tree scan plus a
+/// tip-to-genesis block walk, not the result size. /address/:addr20/activity is worse (~270 ms
+/// and ~48 MB of transient allocation per call). Both were plain `async fn` bodies, so that work
+/// ran on the same multi-threaded runtime that `tokio::spawn`s the p2p loop.
+///
+/// /utxos is on the public proxy allowlist under a generic per-IP request budget that was sized
+/// against /tx/:id back when THAT was the linear scan. /tx/:id is O(1) now and /utxos is not, so
+/// a caller staying inside its allowed request rate can spend minutes of node CPU per wall-clock
+/// minute and starve the swarm task: the RPC keeps answering while the tip stops moving, which
+/// is exactly the wedge shape /health's new liveness fields exist to report. Moving the body to
+/// the blocking pool severs that coupling. It does not make the endpoint cheap, and an address
+/// index is the durable fix; this is the small, byte-identical half.
 async fn utxos_for_addr20(
     Path(addr20): Path<String>,
     Query(q): Query<UtxosQuery>,
     State(st): State<ApiState>,
+) -> Response {
+    let Some(_permit) = acquire_or_shed(heavy_scan_gate()).await else {
+        return scan_unavailable_busy(
+            "SCAN_BUSY",
+            "too many chain scans in flight; this is a load shed, not a statement about the address",
+        );
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _p = _permit;
+        utxos_for_addr20_blocking(addr20, q, st)
+    })
+    .await
+    {
+        Ok(r) => r.into_response(),
+        Err(e) => {
+            // An internal failure MUST NOT be answerable as "this address has no coins". This is
+            // the wallet's coin-selection input: a 200 with count 0 and an empty utxo list is
+            // shape-identical to a genuinely empty address, so any consumer that does not check
+            // `ok` would render a zero balance and build the wrong transaction. Same
+            // confident-lie class the tx index removes, so answer 503 and let the caller retry.
+            eprintln!("[api] utxo scan task failed: {e}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(RETRY_AFTER, "5")],
+                Json(serde_json::json!({
+                    "ok": false,
+                    "code": "SCAN_TASK_FAILED",
+                    "err": "utxo scan did not complete; this is NOT an assertion that the address has no coins",
+                    "retry_after_secs": 5,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn utxos_for_addr20_blocking(
+    addr20: String,
+    q: UtxosQuery,
+    st: ApiState,
 ) -> Json<UtxosResp> {
     let a = match parse_addr20(&addr20) {
         Ok(x) => x,
@@ -1671,6 +2044,43 @@ async fn address_activity_get(
     Path(addr20): Path<String>,
     Query(q): Query<AddressActivityQuery>,
     State(st): State<ApiState>,
+) -> Response {
+    // Same offload as /utxos above, and more so: this one clones every block on the chain and
+    // builds a map of every outpoint ever created before applying `limit`. It is loopback-only
+    // today (no front-door proxy forwards it), so this is about not letting an operator's own
+    // explorer query stall block apply.
+    let Some(_permit) = acquire_or_shed(heavy_scan_gate()).await else {
+        return scan_unavailable_busy("SCAN_BUSY", "too many chain scans in flight");
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _p = _permit;
+        address_activity_get_blocking(addr20, q, st)
+    })
+    .await
+    {
+        Ok(r) => r.into_response(),
+        Err(e) => {
+            // Same reasoning as /utxos: an empty activity list is a claim, not an error.
+            eprintln!("[api] activity scan task failed: {e}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(RETRY_AFTER, "5")],
+                Json(serde_json::json!({
+                    "ok": false,
+                    "code": "SCAN_TASK_FAILED",
+                    "err": "activity scan did not complete",
+                    "retry_after_secs": 5,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn address_activity_get_blocking(
+    addr20: String,
+    q: AddressActivityQuery,
+    st: ApiState,
 ) -> Json<AddressActivityResp> {
 
     let a = match parse_addr20(&addr20) {
@@ -2562,6 +2972,24 @@ async fn mempool_info(State(st): State<ApiState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// GET /mempool/txids: [{txid, age_secs}] for up to 1000 mempool txs, oldest first. The
+/// txid-level source the strand sentinel needs to confirm a SPECIFIC tx is still pending across
+/// ticks (the count-based /mempool signal false-fires under any sustained flow). Loopback-gated
+/// like every other RPC route; read-only.
+async fn mempool_txids(State(st): State<ApiState>) -> Json<serde_json::Value> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let rows: Vec<serde_json::Value> = st
+        .mempool
+        .txids_with_age(now, 1000)
+        .into_iter()
+        .map(|(id, age)| serde_json::json!({ "txid": format!("0x{}", hex::encode(id)), "age_secs": age }))
+        .collect();
+    Json(serde_json::json!({ "ok": true, "count": rows.len(), "txids": rows }))
+}
+
 async fn tx_submit(State(st): State<ApiState>, Json(req): Json<TxSubmitReq>) -> Json<TxSubmitResp> {
     let id = txid(&req.tx);
     let txid_hex = format!("0x{}", hex::encode(id));
@@ -2574,7 +3002,7 @@ async fn tx_submit(State(st): State<ApiState>, Json(req): Json<TxSubmitReq>) -> 
     // - ensures inputs exist in current canonical UTXO set (so it can mine "now")
     // - prevents in-mempool double-spends
 
-let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
+match st.mempool.insert_checked(&st.db, req.tx.clone()) {
     Ok(true) => {
         if let Some(first_inp) = req.tx.inputs.first() {
             println!(
@@ -2597,7 +3025,7 @@ let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
             );
         }
 
-        if let Err(e) = st.tx_gossip.send(GossipTxEvent { tx: req.tx }) {
+        if let Err(e) = st.tx_gossip.send(GossipTxEvent { tx: req.tx, insure: true }) {
             println!("[tx_submit] gossip send failed for {}: {}", txid_hex, e);
         }
 
@@ -2609,12 +3037,38 @@ let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
         });
     }
     Ok(false) => {
-        println!("[tx_submit] REJECT txid={} reason=already-present-or-conflict", txid_hex);
+        // Re-gossip on a duplicate submit, but ONLY when this exact tx is what we hold: the
+        // original submit's gossip publish is single-shot and its errors are swallowed (e.g.
+        // InsufficientPeers right after startup), so a tx can sit here unminable while wallets
+        // resubmit byte-identical copies (deterministic signing) and get this branch forever,
+        // the 2026-06-12 ~40min strand. A resubmit is the user asking "please propagate this";
+        // re-sending the gossip event un-strands it network-wide (peers that saw it dedupe by
+        // message-id; peers that never saw it finally get it). The contains() guard matters:
+        // Ok(false) also covers an input CONFLICT with a DIFFERENT mempool tx, and re-gossiping
+        // an unheld conflicting tx would make this node amplify double-spend attempts.
+        // Distinct err strings for the two Ok(false) truths (review-gate finding): downstream
+        // consumers (a proxy's dual-submit insurance, a wallet's duplicate-submit
+        // classification) match /already present/, and with one combined string they treated a
+        // CONFLICT as a duplicate too: the proxy would copy a rejected double-spend to the second
+        // backend and the wallet would tell the user their payment "should settle" when it never
+        // will. The duplicate string still contains "already present", so older clients keep
+        // matching exactly the case they meant.
+        let err_msg = if st.mempool.contains(&id) {
+            if let Err(e) = st.tx_gossip.send(GossipTxEvent { tx: req.tx, insure: false }) {
+                println!("[tx_submit] duplicate re-gossip send failed for {}: {}", txid_hex, e);
+            } else {
+                println!("[tx_submit] DUPLICATE txid={} re-gossiped (held in mempool)", txid_hex);
+            }
+            "already present in mempool"
+        } else {
+            println!("[tx_submit] REJECT txid={} reason=mempool-conflict (not held; no re-gossip)", txid_hex);
+            "mempool conflict: a different pending transaction spends these coins"
+        };
         return Json(TxSubmitResp {
             ok: false,
             txid: txid_hex,
             mempool_len: st.mempool.len(),
-            err: Some("already present or mempool conflict".to_string()),
+            err: Some(err_msg.to_string()),
         });
     }
     Err(e) => {
@@ -2627,19 +3081,4 @@ let inserted = match st.mempool.insert_checked(&st.db, req.tx.clone()) {
         });
     }
 };
-
-
-
-
-
-    if inserted {
-        let _ = st.tx_gossip.send(GossipTxEvent { tx: req.tx });
-    }
-
-    Json(TxSubmitResp {
-        ok: inserted,
-        txid: txid_hex,
-        mempool_len: st.mempool.len(),
-        err: None,
-    })
 }
