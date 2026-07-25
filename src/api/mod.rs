@@ -262,7 +262,8 @@ pub struct TxResp {
     pub tx: Option<serde_json::Value>,
     pub err: Option<String>,
     // Set ONLY on a proved absence (walked to genesis, or a fresh txid index
-    // answered). Skipped otherwise so a Found response stays byte-identical to pre-0.1.6.
+    // answered). Skipped otherwise, so a Found response stays byte-identical to the previous
+    // behaviour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complete: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1449,8 +1450,8 @@ pub const TX_SCAN_MAX_BACK: u64 = 100_000;
 /// The background index reconciler converges within minutes even from cold.
 const SCAN_RETRY_AFTER_SECS: u64 = 30;
 
-/// Wire mapping for the non-decisive scan outcomes (normative spec: node README
-/// "Scan-outcome wire contract"). Horizon and Incomplete MUST be non-2xx-non-404 so fielded
+/// Wire mapping for the non-decisive scan outcomes. Horizon and Incomplete MUST be non-2xx and
+/// non-404 so fielded
 /// wallets classify them `transient` (fail closed) instead of `notfound` (silent ghost).
 fn scan_unavailable(want: &Hash32, outcome: &crate::state::tx_scan::ScanOutcome) -> Response {
     use crate::state::tx_scan::{ScanOutcome, WHY_DECODE};
@@ -1527,7 +1528,7 @@ fn tx_get_blocking(
             height,
             index_in_block,
         } => {
-            // Re-load the located block and build the response EXACTLY as pre-0.1.6 did:
+            // Re-load the located block and build the response EXACTLY as the scan did:
             // an in-horizon hit (and now an index hit) stays byte-identical on the wire.
             let Ok(Some(v)) = st.db.blocks.get(k_block(&block_hash)) else {
                 return scan_unavailable(
@@ -1704,8 +1705,7 @@ fn tx_proof_get_blocking(
 
     use crate::state::tx_scan::{locate_tx, ScanOutcome, WHY_DECODE, WHY_MISSING_BODY};
 
-    // The same four-way outcome mapping as /tx/:id (normative spec: node README
-    // "Scan-outcome wire contract").
+    // The same four-way outcome mapping as /tx/:id.
     match locate_tx(&st.db, &want, TX_SCAN_MAX_BACK) {
         ScanOutcome::Found {
             block_hash,
@@ -1746,7 +1746,7 @@ fn tx_proof_get_blocking(
             };
 
             // Tip height for confirmations + the scan-equivalent `scanned` value
-            // (tip_height - height + 1 = blocks a pre-0.1.6 walk reported on this hit),
+            // (tip_height - height + 1 = blocks the old walk reported on this hit),
             // so an index-served proof is byte-identical to a scan-served one.
             let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);
             let tip_height = get_hidx(&st.db, &tip)

@@ -1,27 +1,26 @@
-// Ghost-UTXO regression test (Plan 69, batch BN / finding 9:
-// NODE-REORG-PARTIAL-APPLY-GHOST).
+// Regression tests: a rejected block, and a reorg undo, must leave no UTXO residue.
 //
 // `validate_and_apply_block` mutates the sled UTXO/app trees DIRECTLY while accumulating an
-// in-memory `undo`, and only persists that undo log on SUCCESS. Historically, any early
-// `?`/bail! inside (missing utxo, app-phase existence/expiry, bad coinbase value) dropped
-// the in-memory `undo` and left the partial tree writes committed: a ghost create-output
-// persisted and a ghost-deleted input was never restored (the twice-observed h47114
-// incident; V28 sharpens the trigger, since a payment-bearing fill Attest that references a
-// short-lived / reorg-orphaned proposal is a designed-in boundary condition).
+// in-memory `undo`, and only persists that undo log on SUCCESS. Any early `?`/bail! inside
+// (missing utxo, app-phase existence/expiry, bad coinbase value) therefore dropped the in-memory
+// `undo` and left the partial tree writes committed: a created output persisted, and a spent
+// input was never restored. We hit this twice on mainnet. An attestation that references an
+// unknown (reorg-orphaned) or expired proposal is the easiest trigger, because that check runs
+// after the transaction has already spent its input and created its change output.
 //
-// After the fix, a REJECTED block must leave ZERO residue: spent inputs restored, created
-// outputs absent, app-state byte-for-byte unchanged. These tests exercise all four early-bail
-// points, including the V28-shaped fill-Attest triggers (orphaned/unknown proposal AND
-// expired short-lived proposal).
+// After the fix, a REJECTED block must leave ZERO residue: spent inputs restored, created outputs
+// absent, app state byte-for-byte unchanged. These tests exercise all four early-bail points.
+// The last two cover the undo path instead: a same-block create-then-spend must not resurrect on
+// undo, and a pre-block coin whose txid the block's coinbase duplicates must still be restored.
 //
-// NOTE ON HARNESS: the repo's testutil_chain builds toy chains via `index_header`, whose
-// genesis-identity check is gated on `#[cfg(test)]` (`allow_foreign_genesis_for_tests`). That
-// cfg is NOT active for the lib when it is linked by an integration test, so the toy-chain
-// helpers "foreign genesis header"-fail under a plain `cargo test` (documented pre-existing
-// upstream rot in README.md; several reorg_*/consensus_* share it). `validate_and_apply_block`
-// itself never touches the header index or genesis, so this test drives it DIRECTLY: it injects
-// spendable UTXOs into the sled trees and hand-builds blocks. That isolates exactly the
-// all-or-nothing apply surface and runs green with no special flags.
+// NOTE ON HARNESS: testutil_chain builds toy chains via `index_header`, whose genesis-identity
+// check is gated on `#[cfg(test)]` (`allow_foreign_genesis_for_tests`). That cfg is NOT active
+// for the lib when it is linked by an integration test, so the toy-chain helpers fail with
+// "foreign genesis header" under a plain `cargo test`. That is pre-existing on main and several
+// reorg_* and consensus_* targets share it. `validate_and_apply_block` itself never touches the
+// header index or genesis, so these tests drive it DIRECTLY: they inject spendable UTXOs into the
+// sled trees and hand-build blocks. That isolates exactly the apply/undo surface and runs green
+// with no special flags.
 
 use anyhow::Result;
 use tempfile::TempDir;
@@ -273,7 +272,7 @@ fn out0(tx: &Transaction) -> OutPoint {
 }
 
 // -----------------------------------------------------------------------------
-// Bail point 1 (V28-shaped): fill Attest referencing an ORPHANED / unknown proposal.
+// Bail point 1: an Attest referencing an ORPHANED / unknown proposal.
 //   -> app_state.rs existence bail, AFTER the fill spent its input + created change.
 // -----------------------------------------------------------------------------
 #[test]
@@ -309,7 +308,7 @@ fn ghost_reject_attest_unknown_proposal_leaves_zero_residue() -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// Bail point 2 (V28-shaped): fill Attest referencing an EXPIRED short-lived proposal.
+// Bail point 2: an Attest referencing an EXPIRED short-lived proposal.
 //   -> app_state.rs expiry bail, AFTER the fill spent its input + created change.
 //   The referenced proposal EXISTS (applied earlier) and must remain untouched.
 // -----------------------------------------------------------------------------

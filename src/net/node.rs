@@ -544,10 +544,17 @@ fn maybe_evict_excess_peers(
         .iter()
         .copied()
         .filter_map(|p| {
-            // never evict a peer WE dialed for being over-cap (anti-eclipse):
-            // an attacker floods inbound to push our chosen peers out; this makes them unshakeable --
-            // EXCEPT when that dialed peer has itself misbehaved (banned or quarantined), in which case
-            // it loses its protection and can be shed (review S3: bad peers must never be eviction-immune).
+            // Never evict a peer WE dialed for being over-cap. The attack this blocks is an
+            // inbound flood that pushes our chosen peers out purely by arriving; inbound
+            // connections alone can no longer displace anything. This mirrors Bitcoin Core, whose
+            // eviction logic only ever considers inbound peers.
+            //
+            // It is protection from over-cap eviction, not a trust statement. Outbound peers
+            // include addresses learned through PEX, so a peer already connected to us can get
+            // its own addresses into our address book and be dialed later. What it cannot do is
+            // displace an existing outbound peer by connecting to us. A dialed peer that
+            // misbehaves is banned or quarantined and loses this protection immediately, so a bad
+            // peer is never eviction-immune.
             if outbound.contains(&p) && !is_banned(bans, &p) && !is_quarantined(quarantine, &p) {
                 return None;
             }
@@ -1573,8 +1580,10 @@ fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
     for line in lines {
         let parts: Vec<&str> = line.split_whitespace().collect();
 // v2 records are always 12 columns. The old 11-column form is only reachable through a
-// hand-edited or truncated file, and accepting it here while indexing parts[11] below is a
-// panic on the startup path, inside the supervised p2p task: RPC up, tip frozen, no restart.
+// hand-edited or truncated file. main tolerates an 11-column line because it reads
+// canonical_block through `parts.get(11)`; this loader indexes `parts[11]` directly, so it must
+// reject a short line rather than panic on the startup path inside the p2p task, which would
+// leave the RPC up and the tip frozen.
 if parts.len() != 12 {
     continue;
 }
@@ -3082,11 +3091,13 @@ for pid in startup_peer_ids {
     // NEW: connection refcount to avoid duplicate “connected” spam
     let mut conn_refcnt: HashMap<PeerId, usize> = HashMap::new();
 
-    // peers WE dialed (outbound). An attacker cannot force us to open these, so
-    // they are the anti-eclipse anchor: protect them from excess-cap eviction (never from the hard
-    // accept-cap, from a ban/quarantine, or from libp2p tearing down a dead connection). Shedding is
-    // always possible: a misbehaving dialed peer is banned/quarantined and thereby loses protection
-    // (see maybe_evict_excess_peers), so protection can never wedge the node over cap.
+    // Peers WE dialed (outbound). They are protected from excess-cap eviction only, never from
+    // the hard accept-cap, a ban or quarantine, or libp2p tearing down a dead connection. The
+    // property this buys is narrow and worth stating precisely: a peer that merely connects to us
+    // cannot displace one we chose. It does not mean the set is attacker-free, since dial targets
+    // include PEX-learned addresses. Shedding stays possible, because a misbehaving dialed peer is
+    // banned or quarantined and thereby loses protection (see maybe_evict_excess_peers), so
+    // protection can never wedge the node over cap.
     let mut outbound: HashSet<PeerId> = HashSet::new();
 
 let mut connected_since: HashMap<PeerId, Instant> = HashMap::new();

@@ -234,11 +234,11 @@ if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
     // in-memory `undo`, and that undo log is only persisted on success (at the end). Any
     // early `?`/bail! inside (missing utxo, app-phase existence/expiry, bad coinbase value)
     // previously DROPPED the in-memory `undo` and left the partial tree writes committed:
-    // ghost create-outputs persist, ghost-deleted inputs never restored (the h47114 root
+    // created outputs persist and spent inputs are never restored (the root
     // cause). We run the fallible body in a closure; on Err we replay the accumulated
     // `undo` so a REJECTED block leaves ZERO residue, then re-return the ORIGINAL error.
     // The SUCCESS path is byte-for-byte unchanged (same accept/reject decisions, same
-    // persisted undo bytes). See RELEASING.md "Frozen-set waiver (finding 9)".
+    // persisted undo bytes).
     let apply_result: Result<()> = (|| {
 
     // Apply non-coinbase txs first (fees), then coinbase.
@@ -363,7 +363,7 @@ if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
     Ok(())
     })();
 
-    // finding 9: on ANY validation failure, reverse the partial in-memory writes so the
+    // On ANY validation failure, reverse the partial in-memory writes so the
     // rejected block leaves zero residue, then return the ORIGINAL validation error. The
     // cleanup is best-effort (its own error must not mask the real reject reason).
     if let Err(e) = apply_result {
@@ -393,7 +393,7 @@ if height >= COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT {
 ///   3) restore spent UTXOs.
 /// This is the EXACT reverse that was previously inlined in `undo_block`; it is now shared
 /// so the error/cleanup path of `validate_and_apply_block` can replay the IN-MEMORY undo of
-/// a partially-applied, then-rejected block (finding 9). The step ORDER is unchanged from the
+/// a partially-applied, then-rejected block. The step ORDER is unchanged from the
 /// historical `undo_block`; the one behavioural correction is below: a same-block
 /// create-then-spend outpoint is no longer restored as a phantom (this converges incremental
 /// undo to the from-genesis UTXO set; it is not an app-layer/consensus-rule change).

@@ -227,7 +227,7 @@ pub enum Commands {
 
     /// Print the UTXO/app state fingerprint of a datadir. Does not modify chain state.
     ///
-    /// This is the pre-rotation check from RELEASING.md: sync a spare node from genesis, run
+    /// Intended as a pre-rotation check: sync a spare node from genesis, run
     /// this against both datadirs, and compare. Identical fingerprints mean the running node's
     /// state matches a from-genesis replay. A divergence means the live set carries something a
     /// fresh node does not (the phantom-UTXO class), which a fixed build will later refuse to
@@ -1082,8 +1082,8 @@ Commands::Fingerprint { datadir, long } => {
     // when the path is not one, so without this guard a mistyped path, a wrong working
     // directory, or the parent of the real datadir all produce the same fixed output: the zero
     // tip and the SHA-256 of the empty string for every root, with exit status 0. Two such
-    // mistakes compare EQUAL, and the operator applies the RELEASING.md rule "identical
-    // fingerprints => safe to rotate" to a comparison that never looked at any chain state. A
+    // mistakes compare EQUAL, and the operator reads "identical fingerprints, safe to rotate"
+    // from a comparison that never looked at any chain state. A
     // safety check that can manufacture its own pass is worse than no check.
     let dir = std::path::Path::new(&datadir);
     if !dir.exists() {

@@ -135,7 +135,7 @@ fn scan_finds_tx_at_depth_3_within_max_back_8() -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// (2) THE W9 PIN: beyond-horizon must be Horizon, NOT Absent. The pre-fix code
+// (2) Beyond-horizon must be Horizon, NOT Absent. The pre-fix code
 // mapped budget exhaustion to the same "not found" as a proved absence; mapping
 // Horizon back to Absent (the pre-fix semantics) turns this test red.
 // -----------------------------------------------------------------------------
@@ -149,7 +149,7 @@ fn scan_beyond_horizon_is_horizon_not_absent() -> Result<()> {
     let out = find_tx_in_chain(&db, &want, 8);
     assert!(
         !matches!(out, ScanOutcome::Absent { .. }),
-        "W9: budget exhaustion answered as a PROVED absence (the pre-0.1.6 lie): {out:?}"
+        "budget exhaustion answered as a PROVED absence, which is the confident lie: {out:?}"
     );
     assert_eq!(
         out,
@@ -390,7 +390,7 @@ fn stale_index_marker_falls_back_to_scan() -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// (8) G14 pre-gate LOW fix: the intra-call TOCTOU. `fresh_tip()` validates the index at tip
+// (8) The intra-call TOCTOU. `fresh_tip()` validates the index at tip
 // T1; a new tip block Y containing `want` is applied BEFORE the absence-bound is derived.
 // The pre-fix code read `get_tip` a second time and returned Absent{Y.height+1} for a tx that
 // IS in Y (the exact confident-lie class the scan/index subsystem exists to remove). `resolve_via_index` is the
@@ -421,7 +421,7 @@ fn fresh_index_miss_does_not_lie_when_tip_advances_midcall() -> Result<()> {
     assert_eq!(
         resolve_via_index(&db, &want, t1),
         None,
-        "G14: a fresh-index miss pinned to T1 emitted a proved-absence for a tx applied at a \
+        "a fresh-index miss pinned to T1 emitted a proved-absence for a tx applied at a \
          newer tip (the intra-call TOCTOU confident lie)"
     );
 

@@ -39,7 +39,7 @@ use crate::chain::index::get_hidx;
 use crate::crypto::txid;
 use crate::state::db::{get_tip, k_block, meta_del, Stores};
 use crate::state::tx_index::{
-    get_tx_locator, index_canonical_block, unindex_canonical_block, TxLocator,
+    index_canonical_block, unindex_canonical_block, TxLocator,
 };
 use crate::types::{Block, Hash32};
 
@@ -88,8 +88,8 @@ pub const WHY_NO_TIP: &str = "no-chain-tip";
 /// - body missing / undecodable / defect      -> Incomplete (NOT proved)
 pub fn find_tx_in_chain(db: &Stores, want: &Hash32, max_back: u64) -> ScanOutcome {
     let Ok(Some(tip)) = get_tip(db) else {
-        // No tip at all: nothing is provable. The pre-0.1.6 code walked a zero hash into a
-        // missing-body break and answered "not found"; that was one of the confident lies.
+        // No tip at all: nothing is provable. The old code walked a zero hash into a
+        // missing-body break and answered "not found", which was one of the confident lies.
         return ScanOutcome::Incomplete {
             at: [0u8; 32],
             why: WHY_NO_TIP,
@@ -254,7 +254,7 @@ pub fn locate_tx(db: &Stores, want: &Hash32, max_back: u64) -> ScanOutcome {
 /// - `None`         when the caller must fall back to the scan (index no longer authoritative
 ///   at `at_tip`, a hit that did not verify, or a read error).
 ///
-/// The re-check is the G14 pre-gate LOW fix: a fresh-index miss is a proved absence over the
+/// The re-check closes an intra-call race: a fresh-index miss is a proved absence over the
 /// whole chain ONLY while the marker still points at the exact tip that gated entry AND the
 /// tip has not moved (`idx_tip == at_tip && meta:tip == at_tip`). If a new tip block carrying
 /// `want` was applied after `fresh_tip` returned, `get_tip` now differs from `at_tip`, so we
@@ -555,7 +555,7 @@ fn plan_head_matches(p: &ReconcilePlan, indexed: Option<Hash32>) -> bool {
 }
 
 /// Convenience wrapper: one reconcile step with a throwaway plan. Same behaviour as the
-/// pre-0.1.7 `reconcile_tick`, kept for tests and any one-shot caller.
+/// original unplanned `reconcile_tick`, kept for tests and any one-shot caller.
 pub fn reconcile_tick(db: &Stores, budget: usize) -> Result<bool> {
     let mut plan = None;
     reconcile_tick_planned(db, budget, &mut plan)
@@ -584,7 +584,7 @@ pub fn reset_index(db: &Stores) -> Result<()> {
 
     db.idx.clear().context("idx.clear")?;
 
-    // Pre-0.1.7 kept the markers in the meta tree; clear those too so an old node's leftovers
+    // Version 1 kept the markers in the meta tree; clear those too so an old node's leftovers
     // can never be mistaken for a marker.
     meta_del(db, k_idx_tip()).ok();
     meta_del(db, k_idx_version()).ok();
