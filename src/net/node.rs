@@ -50,7 +50,7 @@ const MAX_RR_MSG_BYTES: u64 = 1024 * 1024;
 const MAX_GOSSIP_MSG_BYTES: usize = 256 * 1024; // 256 KiB
 
 const RL_WINDOW: Duration = Duration::from_secs(10);
-const RL_MAX_RR_REQS_PER_WINDOW: u32 = 120;           
+const RL_MAX_RR_REQS_PER_WINDOW: u32 = 120;
 const RL_MAX_RR_REQS_PER_WINDOW_BOOTNODE: u32 = 1200;
 const RL_MAX_GOSSIP_MSGS_PER_WINDOW: u32 = 1024;
 // csd-patches: a catching-up node must not ban its OWN sync peers for normal
@@ -103,6 +103,14 @@ const MAX_LOCATOR_LEN: usize = 128;
 const MAX_INFLIGHT_BLOCKS: usize = 8;
 const MAX_WANT_QUEUE: usize = 5_000;
 const BLOCK_REQ_TIMEOUT_SECS: u64 = 60;
+// head-of-line block-request timeout. Blocks apply in height order, so a silent
+// staller on the LOWEST-height inflight block blocks ALL apply progress while the flat 60s ticks.
+// Give ONLY that head-of-line block a shorter timeout; every other inflight block keeps the flat
+// BLOCK_REQ_TIMEOUT_SECS. On expiry we requeue (never disconnect) and, when this is our ONLY block
+// server, we do NOT stamp it bad (we still depend on it). Env CSD_HOL_TIMEOUT=0 disables (pure
+// flat-60s upstream behavior). Safe because a late response to the retired request is now accepted
+// WITHOUT penalty (the graceful-late-response fix in the Block handler), not struck as unrequested.
+const HOL_TIMEOUT_HEAD_SECS: u64 = 25;
 // csd-patches: after a peer replies "historical block serving disabled" it serves
 // headers only, not old blocks — skip it for block requests for this long so the
 // scheduler converges onto the few archive peers instead of wasting inflight slots.
@@ -162,6 +170,62 @@ const BOOTNODE_SYNC_ACTIVE_SECS: u64 = 60;
 const IDLE_PEER_MIN_AGE_SECS: u64 = 5 * 60;
 const IDLE_PEER_EVICT_SECS: u64 = 10 * 60;
 const IDLE_PEER_NEAR_BEST_WORK_DIVISOR: u128 = 1000;
+
+// Optional runtime override of the connected-peer cap via CSD_MAX_PEERS, so ONE binary serves
+// both roles: a high cap on the well-connected node, a low cap on the miner/fallback. Read once and
+// cached. Safe to raise only because gossipsub 0.48 (libp2p 0.55) bounds the send_queue. Unset =>
+// identical to the compile-time defaults above (no behavior change).
+fn peer_cap_override() -> Option<usize> {
+    use std::sync::OnceLock;
+    static V: OnceLock<Option<usize>> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("CSD_MAX_PEERS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+    })
+}
+
+fn effective_max_connected(is_bootnode: bool) -> usize {
+    peer_cap_override().unwrap_or(if is_bootnode {
+        BOOTNODE_MAX_CONNECTED
+    } else {
+        MAX_CONNECTED_PEERS
+    })
+}
+
+fn effective_target_connected(is_bootnode: bool) -> usize {
+    // Hold ~7/8 of the cap before the evictor trims, so the node sustains near its cap instead of
+    // oscillating down to a fixed low target.
+    if let Some(c) = peer_cap_override() {
+        return c.saturating_sub(c / 8).max(1);
+    }
+    if is_bootnode {
+        BOOTNODE_TARGET_CONNECTED
+    } else {
+        TARGET_CONNECTED_PEERS
+    }
+}
+
+// runtime kill-switches for the two behavioural sync changes, so they can be
+// A/B-benchmarked within one binary and disabled without a rebuild. Both default ON. Read once, cached.
+fn env_flag_on(key: &str) -> bool {
+    std::env::var(key).map(|s| s.trim() != "0").unwrap_or(true)
+}
+fn gossip_fetch_enabled() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    // Default OFF. In this node's sparse 2-4-peer mesh the gossip announcer (propagation_source) is
+    // frequently a FORWARDER that relayed the header before it holds the block, so eager-fetching from
+    // it wastes a request and can 120s-bad-stamp one of our few archives. Present + A/B-benchmarkable;
+    // enable with CSD_GOSSIP_FETCH=1 where the mesh is denser (opt-in tip-latency win).
+    *V.get_or_init(|| std::env::var("CSD_GOSSIP_FETCH").map(|s| s.trim() == "1").unwrap_or(false))
+}
+fn hol_timeout_enabled() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_flag_on("CSD_HOL_TIMEOUT"))
+}
 
 // ----------------- time helpers -----------------
 
@@ -454,18 +518,13 @@ fn maybe_evict_excess_peers(
     connected_since: &HashMap<PeerId, Instant>,
     peer_score: &HashMap<PeerId, i32>,
     peer_work: &HashMap<PeerId, u128>,
+    outbound: &HashSet<PeerId>,
+    bans: &HashMap<PeerId, Instant>,
+    quarantine: &HashMap<PeerId, Instant>,
 ) {
-    let max_connected = if cfg.is_bootnode {
-        BOOTNODE_MAX_CONNECTED
-    } else {
-        MAX_CONNECTED_PEERS
-    };
+    let max_connected = effective_max_connected(cfg.is_bootnode);
 
-    let target_connected = if cfg.is_bootnode {
-        BOOTNODE_TARGET_CONNECTED
-    } else {
-        TARGET_CONNECTED_PEERS
-    };
+    let target_connected = effective_target_connected(cfg.is_bootnode);
 
     if connected.len() <= max_connected {
         return;
@@ -485,6 +544,14 @@ fn maybe_evict_excess_peers(
         .iter()
         .copied()
         .filter_map(|p| {
+            // never evict a peer WE dialed for being over-cap (anti-eclipse):
+            // an attacker floods inbound to push our chosen peers out; this makes them unshakeable --
+            // EXCEPT when that dialed peer has itself misbehaved (banned or quarantined), in which case
+            // it loses its protection and can be shed (review S3: bad peers must never be eviction-immune).
+            if outbound.contains(&p) && !is_banned(bans, &p) && !is_quarantined(quarantine, &p) {
+                return None;
+            }
+
             let age = connected_since
                 .get(&p)
                 .map(|t| now.duration_since(*t).as_secs())
@@ -529,11 +596,7 @@ fn maybe_evict_idle_peers(
     peer_work: &HashMap<PeerId, u128>,
     best_work: u128,
 ) {
-    let target_connected = if cfg.is_bootnode {
-        BOOTNODE_TARGET_CONNECTED
-    } else {
-        TARGET_CONNECTED_PEERS
-    };
+    let target_connected = effective_target_connected(cfg.is_bootnode);
 
     if connected.len() <= target_connected {
         return;
@@ -1049,33 +1112,50 @@ impl Default for RateBucket {
     }
 }
 
-// Outbound request pacing, per peer, in RL_WINDOW. Single-threaded swarm loop,
-// so a thread_local map keeps this self-contained (no signature/call-site churn).
-thread_local! {
-    static OUTBOUND_PACE: std::cell::RefCell<HashMap<PeerId, (Instant, u32)>> =
-        std::cell::RefCell::new(HashMap::new());
+// Outbound request pacing, per peer, in RL_WINDOW.
+//
+// This map must NOT be a thread_local. The swarm loop is a single task, but spawn_p2p starts it with `tokio::spawn` on the
+// multi-threaded runtime, so the runtime is free to poll it on a different worker thread after
+// any `.await`. With a thread_local map each worker keeps its own counters: the effective
+// per-peer cap becomes (worker count) x OUTBOUND_MAX_RR_PER_PEER_PER_WINDOW, which is exactly the
+// burst the pacing exists to prevent (a peer whose own RL_MAX_RR_REQS_PER_WINDOW is 120 then bans
+// us mid-sync, the self-isolation class this overlay already fought once). Process-wide instead:
+// one p2p loop runs per process, the critical section is a couple of map operations, and
+// correctness no longer depends on which worker happens to poll the task.
+//
+// Entries are dropped once their window has elapsed (see `pace_prune_locked`), so the map cannot
+// grow without bound over the lifetime of a long-running node that meets many peers.
+// This is upstream-reportable as-is; see the pr/p2p-pace-shared-state branch.
+static OUTBOUND_PACE: std::sync::Mutex<std::collections::BTreeMap<PeerId, (Instant, u32)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Above this many tracked peers, drop entries whose pacing window has already elapsed.
+const PACE_PRUNE_AT: usize = 1024;
+
+fn pace_prune_locked(m: &mut std::collections::BTreeMap<PeerId, (Instant, u32)>) {
+    if m.len() > PACE_PRUNE_AT {
+        m.retain(|_, e| e.0.elapsed() < RL_WINDOW);
+    }
 }
 
 fn pace_saturated(p: &PeerId) -> bool {
-    OUTBOUND_PACE.with(|m| {
-        let mut m = m.borrow_mut();
-        let e = m.entry(*p).or_insert_with(|| (Instant::now(), 0));
-        if e.0.elapsed() >= RL_WINDOW {
-            *e = (Instant::now(), 0);
-        }
-        e.1 >= OUTBOUND_MAX_RR_PER_PEER_PER_WINDOW
-    })
+    let mut m = OUTBOUND_PACE.lock().unwrap_or_else(|e| e.into_inner());
+    pace_prune_locked(&mut m);
+    let e = m.entry(*p).or_insert_with(|| (Instant::now(), 0));
+    if e.0.elapsed() >= RL_WINDOW {
+        *e = (Instant::now(), 0);
+    }
+    e.1 >= OUTBOUND_MAX_RR_PER_PEER_PER_WINDOW
 }
 
 fn pace_note_sent(p: &PeerId) {
-    OUTBOUND_PACE.with(|m| {
-        let mut m = m.borrow_mut();
-        let e = m.entry(*p).or_insert_with(|| (Instant::now(), 0));
-        if e.0.elapsed() >= RL_WINDOW {
-            *e = (Instant::now(), 0);
-        }
-        e.1 = e.1.saturating_add(1);
-    })
+    let mut m = OUTBOUND_PACE.lock().unwrap_or_else(|e| e.into_inner());
+    pace_prune_locked(&mut m);
+    let e = m.entry(*p).or_insert_with(|| (Instant::now(), 0));
+    if e.0.elapsed() >= RL_WINDOW {
+        *e = (Instant::now(), 0);
+    }
+    e.1 = e.1.saturating_add(1);
 }
 
 
@@ -1186,6 +1266,16 @@ pub struct NetHandle {
 }
 
 impl NetHandle {
+
+// Shared handles to the two p2p gauges the RPC reports on /health.
+// Returned as Arc clones rather than making the fields pub, so NetHandle keeps its shape.
+pub fn best_peer_height_gauge(&self) -> Arc<AtomicU64> {
+    self.best_peer_height.clone()
+}
+
+pub fn tip_activity_gauge(&self) -> Arc<AtomicU64> {
+    self.last_tip_seen_unix.clone()
+}
 
 pub fn known_peers(&self) -> usize {
     self.known_peers.load(Ordering::Relaxed)
@@ -1446,6 +1536,21 @@ fn peer_scores_path(datadir: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(datadir).join(PEER_SCORES_FILE)
 }
 
+/// Format tag for peer_scores.txt (test-visible).
+///
+/// Every file written before this version was rotated by the column bug fixed in
+/// `load_peer_quality`, and each save/load cycle rotated it further, so the values on disk are
+/// not recoverable. Rather than migrate garbage, a file without this exact first line is
+/// ignored: one session of slightly worse startup dial ordering, then correct data forever.
+const PEER_QUALITY_FORMAT: &str = "csd-peer-quality v2";
+
+/// Cap on persisted reputation records. `peers.txt` is bounded by MAX_KNOWN_PEERS, but this file
+/// never was: the live miner had 1,443 records against a 128-peer cap.
+const MAX_QUALITY_RECORDS: usize = 512;
+
+/// Records older than this are dropped on save; a peer not seen in a month tells us nothing.
+const QUALITY_RECORD_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
 fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
     let mut out = HashMap::new();
     let p = peer_scores_path(datadir);
@@ -1454,9 +1559,23 @@ fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
         return out;
     };
 
-    for line in s.lines() {
+    let mut lines = s.lines();
+    match lines.next() {
+        Some(first) if first.trim() == PEER_QUALITY_FORMAT => {}
+        _ => {
+            println!(
+                "[p2p] peer quality file is in the older column-rotated format; ignoring it and starting fresh"
+            );
+            return out;
+        }
+    }
+
+    for line in lines {
         let parts: Vec<&str> = line.split_whitespace().collect();
-if parts.len() != 11 && parts.len() != 12 {
+// v2 records are always 12 columns. The old 11-column form is only reachable through a
+// hand-edited or truncated file, and accepting it here while indexing parts[11] below is a
+// panic on the startup path, inside the supervised p2p task: RPC up, tip frozen, no restart.
+if parts.len() != 12 {
     continue;
 }
 
@@ -1470,12 +1589,31 @@ if parts.len() != 11 && parts.len() != 12 {
             good_tip: parts[3].parse().unwrap_or(0),
             good_headers: parts[4].parse().unwrap_or(0),
             good_block: parts[5].parse().unwrap_or(0),
-			canonical_block: parts.get(11).and_then(|x| x.parse().ok()).unwrap_or(0),
-            timeout: parts[6].parse().unwrap_or(0),
-            invalid: parts[7].parse().unwrap_or(0),
-            last_seen_unix: parts[8].parse().unwrap_or(0),
-            last_tip_height: parts[9].parse().unwrap_or(0),
-			last_tip_work: parts[10].parse().unwrap_or(0),
+            // Column order. save_peer_quality writes
+            //   pid ds df gt gh gb canonical timeout invalid last_seen lth ltw
+            // i.e. canonical_block at index 6. The loader used to read canonical_block from index
+            // 11 and everything from index 6 onward one column early, so a record did not survive
+            // a round trip.
+            //
+            // The dominant effect was not that good peers ranked slightly wrong, it was that the
+            // file stopped carrying reputation and started overriding it. canonical_block is
+            // weighted x100 in peer_quality_score and was loading last_tip_work, so on a chain at
+            // about 2.0e19 cumulative work every record read from disk carried roughly 2.0e21
+            // points from that one term. Anything in the file therefore outranked anything whose
+            // reputation had been earned during the current session, however badly it had since
+            // behaved, and that order feeds sort_peer_ids_by_quality. Two smaller effects rode
+            // along: a peer was charged 20 points per canonical block it had served, through the
+            // shifted timeout field, and last_seen_unix loaded from invalid (normally 0), so every
+            // persisted peer also took the -50 stale-record penalty.
+            //
+            // Confirmed on live peer_scores.txt files: a unix timestamp had migrated into the
+            // canonical_block column.
+            canonical_block: parts[6].parse().unwrap_or(0),
+            timeout: parts[7].parse().unwrap_or(0),
+            invalid: parts[8].parse().unwrap_or(0),
+            last_seen_unix: parts[9].parse().unwrap_or(0),
+            last_tip_height: parts[10].parse().unwrap_or(0),
+            last_tip_work: parts[11].parse().unwrap_or(0),
         };
 
         out.insert(pid, q);
@@ -1488,12 +1626,28 @@ fn save_peer_quality(datadir: &str, qmap: &HashMap<PeerId, PeerQuality>) {
     let p = peer_scores_path(datadir);
     let tmp = p.with_extension("tmp");
 
-    let mut rows = Vec::new();
+    let mut rows = vec![PEER_QUALITY_FORMAT.to_string()];
 
-    let mut peers: Vec<_> = qmap.keys().copied().collect();
-    peers.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    // Bound the file: drop records we have not seen in a month, then keep the best
+    // MAX_QUALITY_RECORDS by the same score the dial ordering uses.
+    let now = unix_now();
+    let mut peers: Vec<_> = qmap
+        .iter()
+        .filter(|(_, q)| {
+            q.last_seen_unix == 0 || now.saturating_sub(q.last_seen_unix) < QUALITY_RECORD_MAX_AGE_SECS
+        })
+        .map(|(pid, q)| (*pid, peer_quality_score(q)))
+        .collect();
+    peers.sort_by(|a, b| b.1.cmp(&a.1));
+    peers.truncate(MAX_QUALITY_RECORDS);
+    // Stable on-disk ordering so a diff of two files is meaningful. Encode each PeerId ONCE:
+    // sorting by `a.to_string().cmp(&b.to_string())` re-encodes both sides of every comparison,
+    // which is thousands of base58 encodings and allocations per save, on the swarm loop.
+    let mut peers: Vec<(String, PeerId)> =
+        peers.into_iter().map(|(pid, _)| (pid.to_string(), pid)).collect();
+    peers.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for pid in peers {
+    for (_, pid) in peers {
         let Some(q) = qmap.get(&pid) else { continue };
 
         rows.push(format!(
@@ -1773,29 +1927,69 @@ peer_quality: &mut HashMap<PeerId, PeerQuality>,
 let (_local_tip, _local_height, local_work) = local_tip_and_work(db);
 
             let now = Instant::now();
-            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
 
+            // head-of-line = lowest-height inflight block. Cheap: only scan
+            // heights when >1 inflight (a single inflight IS the head). None when disabled.
+            let head_hash: Option<Hash32> = if !hol_timeout_enabled() {
+                None
+            } else if inflight.len() > 1 {
+                inflight
+                    .keys()
+                    .filter_map(|h| get_hidx(db, h).ok().flatten().map(|hi| (hi.height, *h)))
+                    .min_by_key(|(ht, _)| *ht)
+                    .map(|(_, h)| h)
+            } else {
+                inflight.keys().next().copied()
+            };
+
+            // Count peers that can actually SERVE a block right now, mirroring
+            // pump_blocks eligibility EXACTLY (not banned/quarantined/header-only/pace-saturated). The
+            // short head-of-line timeout only makes sense when there is an ALTERNATIVE server to switch
+            // to; with a sole real block server, switching is pointless and a fast timeout would just
+            // double-fetch from that same peer (and, if it is slow-but-honest, erode it toward
+            // quarantine). So the head keeps the flat 60s whenever block_servers <= 1 -- identical to
+            // upstream in the single-archive case, and a strict improvement only when a real switch
+            // target exists.
+            // NB: is_header_only is a read-only lookup in the process-wide map. We deliberately do NOT
+            // include pace_saturated here -- it MUTATES the pacing window as a side effect, and a
+            // pace-saturated peer is a transient (<=10s) state, so at worst we very occasionally treat a
+            // pace-limited peer as an available alternative (a harmless extra fast-timeout, never a stall).
+            let block_servers = connected
+                .iter()
+                .filter(|p| !is_banned(bans, p) && !is_quarantined(quarantine, p) && !is_header_only(p))
+                .count();
+            let hol_active = block_servers > 1;
+
+            let mut timed_out: Vec<(Hash32, PeerId)> = vec![];
             for (h, (_rid, t0, peer)) in inflight.iter() {
-                if now.duration_since(*t0).as_secs() >= BLOCK_REQ_TIMEOUT_SECS {
+                let limit = if hol_active && Some(*h) == head_hash {
+                    HOL_TIMEOUT_HEAD_SECS
+                } else {
+                    BLOCK_REQ_TIMEOUT_SECS
+                };
+                if now.duration_since(*t0).as_secs() >= limit {
                     timed_out.push((*h, *peer));
                 }
             }
 
-
 for (h, peer) in timed_out {
+    // We only reach a head fast-timeout when there is another server to switch to, so penalizing +
+    // bad-stamping the slow one (to move to the alternative) is correct; the non-head 60s path is
+    // unchanged from upstream. A late answer from the retired request is accepted without penalty
+    // (graceful-late-response), so an honest slow peer is not struck for merely being slow.
     if let Some((rid, _t0, _peer2)) = inflight.remove(&h) {
         rid_to_hash.remove(&rid);
     }
 
     bump_score(peer_score, quarantine, peer, SCORE_BAD_TIMEOUT);
 
-{
-    let q = peer_quality.entry(peer).or_default();
-    q.timeout = q.timeout.saturating_add(1);
-    q.last_seen_unix = unix_now();
-}
+    {
+        let q = peer_quality.entry(peer).or_default();
+        q.timeout = q.timeout.saturating_add(1);
+        q.last_seen_unix = unix_now();
+    }
 
-bad_providers.entry(h).or_default().insert(peer, Instant::now());
+    bad_providers.entry(h).or_default().insert(peer, Instant::now());
 
     if want_blocks.len() < MAX_WANT_QUEUE {
         want_blocks.push_back(h);
@@ -2037,27 +2231,29 @@ fn is_bad(
         .unwrap_or(false)
 }
 
-// csd-patches: peers that answer "historical block serving disabled" serve headers
-// only. Track them (single-threaded swarm loop → thread_local, same pattern as the
-// upstream OUTBOUND_PACE) so the block scheduler deprioritizes them.
-thread_local! {
-    static HEADER_ONLY_PEERS: std::cell::RefCell<HashMap<PeerId, Instant>> =
-        std::cell::RefCell::new(HashMap::new());
-}
+// Peers that answer "historical block serving disabled" serve headers only. Track them so the
+// block scheduler deprioritizes them.
+//
+// Process-wide for the same reason as OUTBOUND_PACE above: the mark is
+// written when a response arrives and read when the next block request is scheduled, and those
+// two points can be polled on different worker threads, so a thread_local map would lose the mark
+// and keep scattering block requests at peers that only serve headers. It also feeds the
+// head-of-line timeout's block_servers count, which is why a lost mark is worse than a missed
+// optimization here. Stale entries are dropped on write.
+static HEADER_ONLY_PEERS: std::sync::Mutex<std::collections::BTreeMap<PeerId, Instant>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 fn note_header_only(p: &PeerId) {
-    HEADER_ONLY_PEERS.with(|m| {
-        m.borrow_mut().insert(*p, Instant::now());
-    });
+    let mut m = HEADER_ONLY_PEERS.lock().unwrap_or_else(|e| e.into_inner());
+    m.retain(|_, t| t.elapsed().as_secs() < HEADER_ONLY_COOLDOWN_SECS);
+    m.insert(*p, Instant::now());
 }
 
 fn is_header_only(p: &PeerId) -> bool {
-    HEADER_ONLY_PEERS.with(|m| {
-        m.borrow()
-            .get(p)
-            .map(|t| t.elapsed().as_secs() < HEADER_ONLY_COOLDOWN_SECS)
-            .unwrap_or(false)
-    })
+    let m = HEADER_ONLY_PEERS.lock().unwrap_or_else(|e| e.into_inner());
+    m.get(p)
+        .map(|t| t.elapsed().as_secs() < HEADER_ONLY_COOLDOWN_SECS)
+        .unwrap_or(false)
 }
 
 fn is_quarantined(
@@ -2350,9 +2546,14 @@ fn try_apply_pending(
                 continue;
             }
 
-            {
-                let _g = chain_lock.lock();
+            // ONE guard for the whole iteration. This used to be two: a short one here and a
+            // second taken twelve lines below. parking_lot::Mutex is not reentrant, nothing in
+            // the type system enforced the gap between them, and it cost two global-lock
+            // round-trips per candidate. Collapsing them is simpler and removes a self-deadlock
+            // that was one stray brace away.
+            let _apply_guard = chain_lock.lock();
 
+            {
                 // Ensure raw block exists.
                 if db.blocks.get(k_block(&h)).ok().flatten().is_none() {
                     if let Ok(bytes) = crate::codec::consensus_bincode().serialize(blk) {
@@ -2375,6 +2576,11 @@ fn try_apply_pending(
                 });
             }
 
+            // The guard above covers this too. It used to cover only the raw-block store and the
+            // header index, leaving both `maybe_reorg_to` calls below, which are the actual
+            // five-tree apply, outside it. `maybe_reorg_to` does not lock internally and
+            // `mine.rs` DOES hold the lock across its own call, so on a mining node the sync path
+            // and the miner could apply concurrently.
             let Some(new_hi) = get_hidx(db, &h).ok().flatten() else {
                 continue;
             };
@@ -2470,15 +2676,115 @@ fn handle_gossipsub_event(event: &OutEvent) -> Option<(Option<PeerId>, Vec<u8>, 
     }
 }
 
-fn publish_header(swarm: &mut Swarm<Behaviour>, header: BlockHeader) -> Result<()> {
+// ── bounded publish-retry queue (2026-07-10) ────────────────────────────────────────────────────
+// gossipsub.publish is SINGLE-SHOT and its errors were discarded at every application call site.
+// Two of those sites originate content this node is the sole/first source of: the mined-block
+// header announce and the tx gossip. A swallowed InsufficientPeers there (e.g. right after a
+// restart, before the mesh re-forms) silently stranded submitted txs in this node's mempool
+// (2026-06-12 incident, ~40min while our own miner mined empty blocks) or left a freshly mined
+// block unannounced (our own coinbase at orphan risk). Those two are queued here and re-attempted
+// on the existing 5s poll tick. Err(Duplicate) is RETRYABLE: gossipsub 0.48's AllQueuesFull path
+// inserts the message into its duplicate cache BEFORE returning the error, so an immediate retry
+// reports Duplicate having sent nothing: the cache entry expires (60s default) inside the retry
+// window, after which the retry truly publishes.
+//
+// The RELAY publish sites (re-broadcasting a header/tx we RECEIVED from a peer) deliberately do NOT
+// queue: the message is already propagating via the sender + mesh redundancy, and a received
+// message sits in our own 60s duplicate cache, so a queued relay would only ever re-flood a stale
+// header once its cache entry expired, which is pointless traffic. Relay sites pass insure=false.
+//
+// Bounds: best-effort insurance, not a durable queue: 256 entries drop-oldest,
+// PUBLISH_RETRY_MAX_ATTEMPTS ticks (~2min) then dropped. TOPIC_TX entries carry the txid so a tx
+// that got mined during its retry window is dropped rather than re-flooded as a now-invalid tx
+// (which would earn peer strikes).
+const PUBLISH_RETRY_MAX_ATTEMPTS: u32 = 24;
+const PUBLISH_RETRY_MAX_QUEUE: usize = 256;
+
+struct PublishEntry {
+    topic: &'static str,
+    bytes: Vec<u8>,
+    attempts: u32,
+    txid: Option<Hash32>, // Some for TOPIC_TX (mined-drop check), None for headers
+}
+
+#[derive(Default)]
+struct PublishRetry {
+    q: VecDeque<PublishEntry>,
+    dropped_since_log: u64, // rate-limits the "queue full" log to one summary line per drain
+}
+
+impl PublishRetry {
+    fn enqueue(&mut self, topic: &'static str, bytes: Vec<u8>, txid: Option<Hash32>) {
+        // Dedup identical bytes: repeated duplicate submits re-gossip the same tx, each returning
+        // Err(Duplicate) while the gossipsub cache holds it; without this every one would enqueue
+        // another multi-KB clone (worst case 256 x 100KB of the same tx, re-published every tick).
+        if self.q.iter().any(|e| e.topic == topic && e.bytes == bytes) {
+            return;
+        }
+        if self.q.len() >= PUBLISH_RETRY_MAX_QUEUE {
+            // Evict the oldest TRANSACTION, not simply the oldest entry. A mined-header entry is
+            // our own freshly solved block and is by construction the oldest the moment tx
+            // pressure arrives, so a plain pop_front drops the one entry whose loss costs a block.
+            let victim = self.q.iter().position(|e| e.topic == TOPIC_TX).unwrap_or(0);
+            self.q.remove(victim);
+            self.dropped_since_log += 1; // logged as a summary in drain(), not per drop (cold-sync spam)
+        }
+        self.q.push_back(PublishEntry { topic, bytes, attempts: 0, txid });
+    }
+
+    fn drain(&mut self, swarm: &mut Swarm<Behaviour>, mempool: &Mempool) {
+        if self.dropped_since_log > 0 {
+            println!("[p2p] publish-retry queue full, dropped {} oldest entr(ies)", self.dropped_since_log);
+            self.dropped_since_log = 0;
+        }
+        if self.q.is_empty() {
+            return;
+        }
+        let mut still: VecDeque<PublishEntry> = VecDeque::new();
+        while let Some(mut e) = self.q.pop_front() {
+            // A TOPIC_TX entry whose tx is no longer in our mempool was mined (or evicted); do not
+            // re-flood it: a mined tx re-published to peers is now invalid and earns peer strikes.
+            if let Some(id) = e.txid {
+                if !mempool.contains(&id) {
+                    continue;
+                }
+            }
+            match swarm.behaviour_mut().gossipsub.publish(IdentTopic::new(e.topic), e.bytes.clone()) {
+                Ok(_) => println!("[p2p] publish-retry succeeded on {} after {} attempt(s)", e.topic, e.attempts + 1),
+                Err(err) => {
+                    e.attempts += 1;
+                    if e.attempts >= PUBLISH_RETRY_MAX_ATTEMPTS {
+                        println!("[p2p] publish-retry gave up on {} after {} attempts ({err})", e.topic, e.attempts);
+                    } else {
+                        still.push_back(e);
+                    }
+                }
+            }
+        }
+        self.q = still;
+    }
+}
+
+// Announce a header. `insure`=true (the mined-block announce) queues a failed publish for retry;
+// `insure`=false (relaying a peer's header) does not (see the queue's doc block). The happy path
+// moves `bytes` into publish with no clone; only the cold error path re-serializes.
+fn publish_header(swarm: &mut Swarm<Behaviour>, retryq: &mut PublishRetry, header: BlockHeader, insure: bool) -> Result<()> {
     let gh = GossipHeader { header };
     let bytes = crate::codec::consensus_bincode().serialize(&gh)?;
 
     if bytes.len() <= MAX_GOSSIP_MSG_BYTES {
-        let _ = swarm
+        if let Err(e) = swarm
             .behaviour_mut()
             .gossipsub
-            .publish(IdentTopic::new(TOPIC_HDR), bytes);
+            .publish(IdentTopic::new(TOPIC_HDR), bytes)
+        {
+            if insure {
+                println!("[p2p] mined-header publish failed ({e}), queued for retry");
+                if let Ok(rebytes) = crate::codec::consensus_bincode().serialize(&gh) {
+                    retryq.enqueue(TOPIC_HDR, rebytes, None);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -2526,7 +2832,10 @@ let handle = NetHandle {
     listen_addr: listen_addr.clone(),
 };
 
-    tokio::spawn(async move {
+    crate::state::subsystem::spawn_supervised(
+        "p2p loop",
+        &crate::state::subsystem::SUBSYSTEMS.p2p,
+        async move {
 
 if let Err(e) = run_p2p_loop(
     db,
@@ -2551,7 +2860,8 @@ if let Err(e) = run_p2p_loop(
         {
             eprintln!("[p2p] fatal: {e}");
         }
-    });
+    },
+    );
 
     Ok(handle)
 }
@@ -2772,6 +3082,13 @@ for pid in startup_peer_ids {
     // NEW: connection refcount to avoid duplicate “connected” spam
     let mut conn_refcnt: HashMap<PeerId, usize> = HashMap::new();
 
+    // peers WE dialed (outbound). An attacker cannot force us to open these, so
+    // they are the anti-eclipse anchor: protect them from excess-cap eviction (never from the hard
+    // accept-cap, from a ban/quarantine, or from libp2p tearing down a dead connection). Shedding is
+    // always possible: a misbehaving dialed peer is banned/quarantined and thereby loses protection
+    // (see maybe_evict_excess_peers), so protection can never wedge the node over cap.
+    let mut outbound: HashSet<PeerId> = HashSet::new();
+
 let mut connected_since: HashMap<PeerId, Instant> = HashMap::new();
 let mut last_sync_request_from: HashMap<PeerId, Instant> = HashMap::new();
 
@@ -2828,10 +3145,16 @@ let p2p_started_at = Instant::now();
 
 let rr_serve_sem = Arc::new(tokio::sync::Semaphore::new(1));
 
+// failed gossip publishes (mined-header announce, tx gossip) awaiting re-attempt. See the
+// queue's doc block next to publish_header.
+let mut publish_retry: PublishRetry = PublishRetry::default();
+
     loop {
         tokio::select! {
 
 _ = poll.tick() => {
+
+publish_retry.drain(&mut swarm, mempool.as_ref());
 
 outbound_rr.retain(|_, t| t.elapsed() < Duration::from_secs(60));
 prune_peer_state(&mut buckets, &mut bans, &mut quarantine, &connected);
@@ -2985,6 +3308,9 @@ maybe_evict_excess_peers(
     &connected_since,
     &peer_score,
     &peer_work,
+    &outbound,
+    &bans,
+    &quarantine,
 );
 
 maybe_evict_idle_peers(
@@ -3058,11 +3384,7 @@ println!(
 
 for pid in peer_ids {
 
-    let max_connected = if cfg.is_bootnode {
-        BOOTNODE_MAX_CONNECTED
-    } else {
-        MAX_CONNECTED_PEERS
-    };
+    let max_connected = effective_max_connected(cfg.is_bootnode);
 
     if connected.len() >= max_connected {
         break;
@@ -3161,7 +3483,7 @@ let _ = pump_blocks(
             }
 
 Some(ev) = mined_rx.recv() => {
-    let _ = publish_header(&mut swarm, ev.header);
+    let _ = publish_header(&mut swarm, &mut publish_retry, ev.header, true);
 }
 
             Some(ev) = tx_gossip_rx.recv() => {
@@ -3172,10 +3494,29 @@ Some(ev) = mined_rx.recv() => {
                     }
                 }
 
+                let insure_this_tx = ev.insure;
                 let gt = GossipTx { tx: ev.tx.clone() };
                 let bytes = crate::codec::consensus_bincode().serialize(&gt)?;
                 if bytes.len() <= MAX_GOSSIP_MSG_BYTES {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(IdentTopic::new(TOPIC_TX), bytes);
+                    // Queue on failure instead of discarding it: this single publish used to be a
+                    // submitted tx's ONLY chance to reach the miners (the 2026-06-12 strand class).
+                    // Happy path moves `bytes` into publish (no clone); the cold error path
+                    // re-serializes from `gt` and carries the txid so drain drops it if it mines.
+                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(IdentTopic::new(TOPIC_TX), bytes) {
+                        if insure_this_tx {
+                            println!("[p2p] tx gossip publish failed ({e}), queued for retry");
+                            if let Ok(rebytes) = crate::codec::consensus_bincode().serialize(&gt) {
+                                publish_retry.enqueue(TOPIC_TX, rebytes, Some(crate::crypto::txid(&gt.tx)));
+                            }
+                        } else {
+                            // Re-gossip of a duplicate submit. NOT insured: the message-id is a
+                            // content hash, so a tx we already hold sits in our own 60 s duplicate
+                            // cache and Err(Duplicate) here is benign. Queuing it would schedule a
+                            // full-mesh re-broadcast about 60 s later, buyable with one
+                            // unauthenticated POST of any already-known transaction.
+                            println!("[p2p] duplicate re-gossip returned ({e}), not queued");
+                        }
+                    }
                 }
             }
 
@@ -3192,7 +3533,7 @@ SwarmEvent::NewListenAddr { address, .. } => {
     }
 }
 
-SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
     for addr in take_pending_dials(&mut pending_dials, &peer_id) {
         note_addr_dial_success(&mut addr_backoff, &addr);
     }
@@ -3205,16 +3546,17 @@ SwarmEvent::ConnectionEstablished { peer_id, .. } => {
     let e = conn_refcnt.entry(peer_id).or_insert(0);
     *e += 1;
 
+    // record peers we dialed (Dialer endpoint) for anti-eclipse eviction protection.
+    if endpoint.is_dialer() {
+        outbound.insert(peer_id);
+    }
+
     let is_first_logical_connection = connected.insert(peer_id);
     if !is_first_logical_connection {
         continue;
     }
 
-let max_connected = if cfg.is_bootnode {
-    BOOTNODE_MAX_CONNECTED
-} else {
-    MAX_CONNECTED_PEERS
-};
+let max_connected = effective_max_connected(cfg.is_bootnode);
 
 if connected.len() > max_connected.saturating_add(PEER_CAP_BURST) {
     println!(
@@ -3226,6 +3568,7 @@ if connected.len() > max_connected.saturating_add(PEER_CAP_BURST) {
 
     connected.remove(&peer_id);
     conn_refcnt.remove(&peer_id);
+    outbound.remove(&peer_id);
     connected_peers.store(connected.len(), Ordering::Relaxed);
 
     let _ = swarm.disconnect_peer_id(peer_id);
@@ -3335,6 +3678,7 @@ SwarmEvent::Dialing { peer_id, connection_id } => {
                             }
                         }
                         conn_refcnt.remove(&peer_id);
+                        outbound.remove(&peer_id);
 
                         if connected.remove(&peer_id) {
                             connected_peers.store(connected.len(), Ordering::Relaxed);
@@ -3454,14 +3798,27 @@ maybe_send_bootstrap_requests(
                                 continue;
                             }
 
+// CATCH-UP GUARD (caught_up): the aggressive ban-disconnect is correct AT TIP -- it sheds the flaky
+// peers whose un-drained gossipsub send_queue is the memory leak. But a node that is BEHIND cannot
+// validate current gossip (stale UTXO set), so it would ban/drop the very peers it must sync from and
+// isolate itself (this stranded the catching-up miner at 0 peers). So: only disconnect/penalize when
+// caught up (within a few blocks of the best peer); while behind, keep peers and ignore.
+let caught_up = {
+    let bh = peer_heights.values().copied().max().unwrap_or(0);
+    let lh = local_tip_and_work(&db).1;
+    // bh==0 (no peer heights yet, e.g. startup) => treat as behind => lenient. At tip => aggressive.
+    const CATCHUP_LAG: u64 = 3;
+    bh > 0 && lh.saturating_add(CATCHUP_LAG) >= bh
+};
+
 if let Some(p) = src {
     if !allow_gossip(&mut buckets, &mut bans, p) {
-        let _ = swarm.disconnect_peer_id(p);
+        if caught_up { let _ = swarm.disconnect_peer_id(p); }
         continue;
     }
 
     if is_quarantined(&quarantine, &p) {
-        let _ = swarm.disconnect_peer_id(p);
+        if caught_up { let _ = swarm.disconnect_peer_id(p); }
         continue;
     }
 }
@@ -3546,7 +3903,7 @@ if headers_due && outbound_rr.len() < MAX_BACKGROUND_OUTBOUND_RR {
 }
 
 if newly_indexed_header {
-    let _ = publish_header(&mut swarm, gh.header.clone());
+    let _ = publish_header(&mut swarm, &mut publish_retry, gh.header.clone(), false);
 }
 
                                 if let Some(p) = src {
@@ -3555,9 +3912,26 @@ if newly_indexed_header {
                                 }
 
 if seen_blocks.insert(h) {
-    // Gossip headers are relay hints only.
-    // Do not enqueue block downloads from gossip alone.
-    // Headers responses will enqueue real provider-backed blocks.
+    // With CSD_GOSSIP_FETCH on, ENQUEUE the announced block immediately (a gossip
+    // header we just indexed, parent known, whose block we lack) so the pump_blocks call right below
+    // fetches it this tick instead of waiting for the ~10s tip-pull headers round. We do NOT register
+    // the announcer as providers[h]: propagation_source is the mesh FORWARDER, which may have relayed
+    // the header before it holds the block -- recording it as the provider (and eager-requesting the
+    // body from it) risks a 120s bad-stamp on one of our few archives (review S2). Provider discovery
+    // stays with headers-sync, which learns a peer that actually served a block. pump_blocks picks an
+    // eligible peer via its normal branches; if none has it yet, the block is fetched on the next
+    // headers round exactly as upstream. CSD_GOSSIP_FETCH=0 (default) => upstream behavior (wait).
+    if gossip_fetch_enabled() && newly_indexed_header {
+        let already_have_block = db.blocks.get(k_block(&h))?.is_some();
+        if !already_have_block
+            && !inflight.contains_key(&h)
+            && !pending_apply.contains_key(&h)
+            && !want_blocks.iter().any(|x| x == &h)
+            && want_blocks.len() < MAX_WANT_QUEUE
+        {
+            want_blocks.push_back(h);
+        }
+    }
 
 let _ = compact_and_log_want_queue(
     &db,
@@ -3620,10 +3994,26 @@ match mempool.insert_checked(&db, gt.tx) {
 
                                     Ok(_added) => {}
                                     Err(_) => {
-
-
-
-                                        
+                                        // main deletes this penalty entirely, because with no
+                                        // catch-up concept the UNCONDITIONAL version self-banned
+                                        // the very peers a BEHIND node must sync from (a behind node's UTXO
+                                        // set is stale, so valid live txs look "invalid"). We keep a
+                                        // SOFTENED, caught_up-gated version. While behind we ignore the
+                                        // failure; only AT TIP, where a peer sending txs our current UTXO
+                                        // set rejects is genuinely misbehaving, do we score it. We do NOT
+                                        // add a bespoke inline "N strikes -> instant disconnect": the
+                                        // graduated ladder already handles it -- note_invalid bans at
+                                        // RL_MAX_INVALID_PER_WINDOW (32/window) and bump_score feeds the
+                                        // standard quarantine path (SCORE_BAD_INVALID -6, quarantine at -30,
+                                        // and the quarantine gate above disconnects a quarantined peer once
+                                        // at tip). That path is less prone to false-positiving a legitimate
+                                        // peer during a micro-reorg or double-spend race.
+                                        if let Some(p) = src {
+                                            if caught_up {
+                                                note_invalid(&mut buckets, &mut bans, p, "gossip tx failed mempool validation");
+                                                bump_score(&mut peer_score, &mut quarantine, p, SCORE_BAD_INVALID);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3637,7 +4027,7 @@ match mempool.insert_checked(&db, gt.tx) {
                             use request_response::{Event, Message};
 
                             match rr_ev {
-                                Event::Message { peer, message } => {
+                                Event::Message { peer, message, .. } => {
                                     if is_banned(&bans, &peer) {
                                         continue;
                                     }
@@ -4033,7 +4423,7 @@ if idx_res.is_err() {
 // Relay valid/indexed headers immediately.
 // This improves global propagation and reduces orphan advantage.
 if newly_indexed_header {
-    let _ = publish_header(&mut swarm, hdr.clone());
+    let _ = publish_header(&mut swarm, &mut publish_retry, hdr.clone(), false);
 }
 indexed_batch.push((h, hdr.clone()));
 
@@ -4228,10 +4618,30 @@ SyncResponse::Block { block } => {
     let bh = header_hash(&block.header);
     println!("[sync] got block {} from {}", hex32(&bh), peer);
 
-    let Some(expected_h) = rid_to_hash.remove(&rid) else {
-        note_invalid(&mut buckets, &mut bans, peer, "unrequested block response");
-        bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNREQUESTED_BLOCK);
-        continue;
+    let expected_h = match rid_to_hash.remove(&rid) {
+        Some(h) => h,
+        None => {
+            // Graceful late/duplicate response. The rid was already retired
+            // (e.g. the head-of-line timeout requeued this block, or a plain 60s timeout fired) but
+            // the peer answered anyway. Three cases keyed on the block's real hash bh (which the peer
+            // cannot forge -- get_hidx is true only after we indexed a full-PoW header):
+            //   - header indexed AND block not yet stored -> still-wanted: ACCEPT it without penalty.
+            //   - header indexed AND block already stored  -> benign DUPLICATE: drop it silently, no
+            //     penalty (review M2: a retired request whose block since arrived from another peer
+            //     must NOT strike a slow-but-honest peer toward quarantine).
+            //   - no indexed header                        -> genuinely unsolicited: strike as before.
+            let header_indexed = get_hidx(&db, &bh)?.is_some();
+            let already_stored = db.blocks.get(k_block(&bh))?.is_some();
+            if header_indexed && !already_stored {
+                bh
+            } else if header_indexed && already_stored {
+                continue;
+            } else {
+                note_invalid(&mut buckets, &mut bans, peer, "unrequested block response");
+                bump_score(&mut peer_score, &mut quarantine, peer, SCORE_BAD_UNREQUESTED_BLOCK);
+                continue;
+            }
+        }
     };
 
     if expected_h != bh {
@@ -4350,7 +4760,7 @@ if let Ok(Some(hi2)) = get_hidx(&db, &bh) {
 
 // We now possess the full block and indexed its header,
 // so it is safe to relay the header as a real provider.
-let _ = publish_header(&mut swarm, block.header.clone());
+let _ = publish_header(&mut swarm, &mut publish_retry, block.header.clone(), false);
 
 let best_tip_now = recompute_best_peer_tip(
     &connected,
@@ -4426,11 +4836,7 @@ let mut dials_from_peers_response = 0usize;
 
 for pid in peer_ids {
 
-    let max_connected = if cfg.is_bootnode {
-        BOOTNODE_MAX_CONNECTED
-    } else {
-        MAX_CONNECTED_PEERS
-    };
+    let max_connected = effective_max_connected(cfg.is_bootnode);
 
     if connected.len() >= max_connected {
         break;
@@ -4570,7 +4976,7 @@ let _ = compact_and_log_want_queue(
                                 }
 
 
-Event::OutboundFailure { peer, request_id, error } => {
+Event::OutboundFailure { peer, request_id, error, .. } => {
 
 outbound_rr.remove(&request_id);
 
@@ -4876,4 +5282,167 @@ SyncRequest::GetPeers { .. } => {
 
     }
 
+}
+
+#[cfg(test)]
+mod peer_state_tests {
+    use super::*;
+
+    // The swarm loop is one task, but `tokio::spawn` on the multi-threaded runtime may poll it on
+    // a different worker thread after any await point. These two tests pin the property that the
+    // per-peer maps survive that: they fail if either map is a thread_local, because the write and
+    // the read then land in different maps.
+
+    #[test]
+    fn outbound_pacing_accumulates_across_threads() {
+        let peer = PeerId::random();
+        let half = (OUTBOUND_MAX_RR_PER_PEER_PER_WINDOW / 2) as usize;
+
+        // Two threads, each sending fewer requests than the per-peer cap on its own.
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..half {
+                    pace_note_sent(&peer);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("pacing thread");
+        }
+
+        // Together they reached the cap, so the peer must read as saturated from anywhere.
+        assert!(
+            pace_saturated(&peer),
+            "outbound pacing did not observe {} sends made on other threads",
+            2 * half
+        );
+    }
+
+    // The persisted reputation file must round-trip exactly. The loader used to read
+    // canonical_block from index 11 and everything from index 6 onward one column early, so
+    // canonical_block loaded last_tip_work. That term is weighted x100, so every persisted record
+    // came back carrying roughly 100x the chain's cumulative work and outranked any peer whose
+    // reputation had been earned live. All fields here are deliberately distinct so a shifted
+    // column cannot coincidentally match.
+    #[test]
+    fn peer_quality_round_trip_is_identity() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+        let peer = PeerId::random();
+
+        // A distinct value per field, so ANY rotation is visible.
+        let q = PeerQuality {
+            dial_success: 11,
+            dial_failure: 22,
+            good_tip: 33,
+            good_headers: 44,
+            good_block: 55,
+            canonical_block: 66,
+            timeout: 77,
+            invalid: 88,
+            last_seen_unix: unix_now(),
+            last_tip_height: 1010,
+            last_tip_work: 1111,
+        };
+        let expect_last_seen = q.last_seen_unix;
+        let mut m = HashMap::new();
+        m.insert(peer, q);
+        save_peer_quality(&path, &m);
+
+        let back = load_peer_quality(&path);
+        let got = back.get(&peer).expect("record survives the round trip");
+        assert_eq!(got.dial_success, 11);
+        assert_eq!(got.dial_failure, 22);
+        assert_eq!(got.good_tip, 33);
+        assert_eq!(got.good_headers, 44);
+        assert_eq!(got.good_block, 55);
+        assert_eq!(got.canonical_block, 66, "canonical_block rotated");
+        assert_eq!(got.timeout, 77, "timeout rotated (this is the -20/each field)");
+        assert_eq!(got.invalid, 88, "invalid rotated");
+        assert_eq!(got.last_seen_unix, expect_last_seen, "last_seen_unix rotated");
+        assert_eq!(got.last_tip_height, 1010);
+        assert_eq!(got.last_tip_work, 1111);
+    }
+
+    #[test]
+    fn peer_quality_rejects_the_pre_v018_format() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+        // TWO records, deliberately. With a one-line fixture this test passes even with the
+        // format guard deleted, because `lines.next()` consumes the only record as a header and
+        // the map comes back empty either way. It would then be green while the loader happily
+        // re-imported the rotated values it exists to reject.
+        let legacy = format!(
+            "{} 1 0 0 0 0 1783804074 0 0 0 0 0\n{} 2 0 0 0 0 1783804075 0 0 0 0 0",
+            PeerId::random(),
+            PeerId::random()
+        );
+        std::fs::write(peer_scores_path(&path), legacy).expect("write legacy file");
+
+        assert!(
+            load_peer_quality(&path).is_empty(),
+            "a rotated legacy file must be ignored, not imported"
+        );
+
+        // And the guard is what does it: the same records under a v2 header DO load, so the test
+        // is discriminating rather than passing for an unrelated reason.
+        let tagged = format!(
+            "{PEER_QUALITY_FORMAT}\n{} 1 2 3 4 5 6 7 8 9 10 11",
+            PeerId::random()
+        );
+        std::fs::write(peer_scores_path(&path), tagged).expect("write tagged file");
+        assert_eq!(
+            load_peer_quality(&path).len(),
+            1,
+            "a correctly tagged file must still load"
+        );
+    }
+
+    #[test]
+    fn peer_quality_save_is_bounded() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+
+        let mut m = HashMap::new();
+        for i in 0..(MAX_QUALITY_RECORDS + 500) {
+            let mut q = PeerQuality::default();
+            q.last_seen_unix = unix_now();
+            q.canonical_block = i as u64; // higher index = better score
+            m.insert(PeerId::random(), q);
+        }
+        // Plus one record that is far too old to be worth keeping.
+        let mut stale = PeerQuality::default();
+        stale.last_seen_unix = unix_now() - QUALITY_RECORD_MAX_AGE_SECS - 1;
+        stale.canonical_block = u64::MAX / 2; // would otherwise rank first
+        let stale_peer = PeerId::random();
+        m.insert(stale_peer, stale);
+
+        save_peer_quality(&path, &m);
+        let back = load_peer_quality(&path);
+
+        assert!(
+            back.len() <= MAX_QUALITY_RECORDS,
+            "persisted {} records, cap is {}",
+            back.len(),
+            MAX_QUALITY_RECORDS
+        );
+        assert!(
+            !back.contains_key(&stale_peer),
+            "a month-old record must be dropped even though it scores highest"
+        );
+    }
+
+    #[test]
+    fn header_only_mark_is_visible_from_another_thread() {
+        let peer = PeerId::random();
+        std::thread::spawn(move || note_header_only(&peer))
+            .join()
+            .expect("marking thread");
+
+        assert!(
+            is_header_only(&peer),
+            "header-only mark written on another thread was not observed"
+        );
+    }
 }
