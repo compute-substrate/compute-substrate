@@ -667,3 +667,311 @@ fn undo_restores_a_pre_block_coin_whose_txid_the_coinbase_duplicates() -> Result
     );
     Ok(())
 }
+
+// The created-set skip was still a PROXY for the property it wanted.
+//
+// The previous commit on this branch refined it to `created_set.contains(op) && !meta.coinbase`, which covers the case where
+// the duplicate-coinbase block SPENDS the pre-block coin. It does not cover the case where the
+// block merely OVERWRITES it, nor the non-coinbase leg, because `meta.coinbase` is not the property
+// under test. The property under test is "did this outpoint hold a coin BEFORE this block".
+//
+// This commit captures exactly that, at the FIRST touch of each outpoint during apply, and routes the
+// outpoint into exactly one of `undo.created` (did not exist: delete on undo) or `undo.spent`
+// (existed: restore that value on undo). The three tests below are the legs the refined proxy still gets wrong.
+// -----------------------------------------------------------------------------
+
+/// Leg 1: the duplicate-coinbase block does NOT spend the pre-block coin, it only overwrites it.
+/// The outpoint therefore lands in `undo.created` alone, and the created-loop deletes it, so a coin
+/// that a from-genesis replay still holds is gone. Cheaper to construct than the this change case: an
+/// empty block, no spend transaction.
+#[test]
+fn undo_restores_an_unspent_pre_block_coinbase_that_the_new_coinbase_overwrote() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 9u64;
+
+    // Empty block, so the coinbase value is exactly the reward and no fee matching is needed.
+    let cb = csd::chain::mine::coinbase(signer_addr(), block_reward(height), height, None);
+    let cb_op = out0(&cb);
+
+    // An earlier block produced a byte-identical coinbase and its output is still unspent.
+    put_utxo(&db, &cb_op, &cb.outputs[0])?;
+    put_utxo_meta(&db, &cb_op, &UtxoMeta { height: 1, coinbase: true })?;
+    let pristine = state_snapshot(&db);
+
+    let blk = mk_block([0u8; 32], vec![cb]);
+    let bh = block_hash(&blk);
+    validate_and_apply_block(&db, &blk, epoch_of(height), height)
+        .expect("a block whose coinbase txid duplicates an earlier one is consensus-legal today");
+
+    undo_block(&db, &bh).expect("undo_block must succeed");
+
+    assert!(
+        get_utxo(&db, &cb_op)?.is_some(),
+        "the pre-block coin at (T,0) must survive undo; a from-genesis replay without this block \
+         still holds it"
+    );
+    assert_eq!(state_snapshot(&db), pristine, "undo did not converge to the pre-block state");
+    Ok(())
+}
+
+/// Leg 2: the same overwrite, but on a NON-coinbase output, which is the leg `meta.coinbase`
+/// structurally cannot see. Reachable only after a coinbase duplication has already recreated a
+/// spent input, so it is a second step rather than a second bug, but it is the same divergence.
+#[test]
+fn undo_restores_a_pre_block_noncoinbase_output_that_a_replayed_tx_overwrote() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 9u64;
+    const OLD_VALUE: u64 = 654_000_000;
+
+    // The input the replayed transaction spends.
+    let funding = inject_coin(&db, 0xC1);
+
+    // The transaction being replayed. Its txid fixes the outpoint it creates.
+    let replay = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn { prevout: funding, script_sig: vec![0u8; 99] }],
+        outputs: vec![TxOut { value: COIN_VALUE - 1_000, script_pubkey: signer_addr() }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+    let replay_op = out0(&replay);
+
+    // That outpoint already holds a coin from when the transaction was first mined. Seeded
+    // directly: what is under test is undo, not how the collision arises.
+    put_utxo(&db, &replay_op, &TxOut { value: OLD_VALUE, script_pubkey: signer_addr() })?;
+    put_utxo_meta(&db, &replay_op, &UtxoMeta { height: 2, coinbase: false })?;
+    let pristine = state_snapshot(&db);
+
+    let fee = 1_000u64;
+    let cb = csd::chain::mine::coinbase(signer_addr(), block_reward(height) + fee, height, None);
+    let blk = mk_block([0u8; 32], vec![cb, replay]);
+    let bh = block_hash(&blk);
+    validate_and_apply_block(&db, &blk, epoch_of(height), height)
+        .expect("replaying a transaction whose output is still unspent is consensus-legal today");
+
+    undo_block(&db, &bh).expect("undo_block must succeed");
+
+    let restored = get_utxo(&db, &replay_op)?.expect(
+        "the pre-block non-coinbase coin must be restored on undo, not deleted by the created-loop",
+    );
+    assert_eq!(restored.value, OLD_VALUE, "restored the wrong value");
+    assert_eq!(state_snapshot(&db), pristine, "undo did not converge to the pre-block state");
+    Ok(())
+}
+
+/// Leg 3: pins the MECHANISM rather than a symptom. The block touches one outpoint three times:
+/// it spends the pre-block coin, a replayed transaction recreates it, and a third transaction
+/// spends it again. Only the FIRST touch sees the pre-block value, so an implementation that
+/// records the value at every touch (or at the last one) restores this block's own value instead of
+/// the ancestor's and diverges without ever deleting anything.
+#[test]
+fn undo_restores_the_first_touch_value_when_a_block_spends_recreates_and_respends() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 9u64;
+    const OLD_VALUE: u64 = 500_000_000;
+    const FEE: u64 = 1_000;
+
+    // Funding for the replayed transaction.
+    let funding = inject_coin(&db, 0xC2);
+
+    // The replayed transaction. Its txid fixes the contested outpoint.
+    let replay = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn { prevout: funding, script_sig: vec![0u8; 99] }],
+        outputs: vec![TxOut { value: COIN_VALUE - FEE, script_pubkey: signer_addr() }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+    let contested = out0(&replay);
+
+    // Pre-block: the contested outpoint already holds a DIFFERENT value.
+    put_utxo(&db, &contested, &TxOut { value: OLD_VALUE, script_pubkey: signer_addr() })?;
+    put_utxo_meta(&db, &contested, &UtxoMeta { height: 3, coinbase: false })?;
+    let pristine = state_snapshot(&db);
+
+    // tx_a spends the PRE-BLOCK coin at the contested outpoint.
+    let tx_a = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn { prevout: contested, script_sig: vec![0u8; 99] }],
+        outputs: vec![TxOut { value: OLD_VALUE - FEE, script_pubkey: [0x81; 20] }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+
+    // tx_c spends the contested outpoint AGAIN, after `replay` has recreated it.
+    let tx_c = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn { prevout: contested, script_sig: vec![0u8; 99] }],
+        outputs: vec![TxOut { value: COIN_VALUE - FEE - FEE, script_pubkey: [0x82; 20] }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+
+    // Three transactions, each paying FEE.
+    let cb = csd::chain::mine::coinbase(signer_addr(), block_reward(height) + 3 * FEE, height, None);
+    let blk = mk_block([0u8; 32], vec![cb, tx_a, replay, tx_c]);
+    let bh = block_hash(&blk);
+    validate_and_apply_block(&db, &blk, epoch_of(height), height)
+        .expect("spend, replay-recreate and respend are each consensus-legal today");
+
+    undo_block(&db, &bh).expect("undo_block must succeed");
+
+    let restored = get_utxo(&db, &contested)?
+        .expect("the contested outpoint must be restored to its pre-block coin");
+    assert_eq!(
+        restored.value, OLD_VALUE,
+        "undo restored a value this block wrote instead of the pre-block value"
+    );
+    assert_eq!(state_snapshot(&db), pristine, "undo did not converge to the pre-block state");
+    Ok(())
+}
+
+/// The invariant this change establishes, asserted DIRECTLY on the log the apply path produces:
+/// no outpoint may appear in both `undo.created` and `undo.spent`. That is what lets the undo side
+/// stop inferring. Exercised on an honest same-block create-then-spend, which is precisely the shape
+/// that used to land in both lists.
+#[test]
+fn an_undo_log_never_puts_an_outpoint_in_both_lists() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 7u64;
+    const FEE: u64 = 1_000;
+
+    let coin = inject_coin(&db, 0xB7);
+
+    // tx1 creates an output; tx2, in the SAME block, spends it.
+    let tx1 = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn { prevout: coin, script_sig: vec![0u8; 99] }],
+        outputs: vec![TxOut { value: COIN_VALUE - FEE, script_pubkey: signer_addr() }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+    let mid = out0(&tx1);
+    let tx2 = sign_all(Transaction {
+        version: 1,
+        inputs: vec![TxIn { prevout: mid, script_sig: vec![0u8; 99] }],
+        outputs: vec![TxOut { value: COIN_VALUE - FEE - FEE, script_pubkey: [0x91; 20] }],
+        locktime: 0,
+        app: AppPayload::None,
+    });
+
+    let cb = csd::chain::mine::coinbase(signer_addr(), block_reward(height) + 2 * FEE, height, None);
+    let blk = mk_block([0u8; 32], vec![cb, tx1, tx2]);
+    let undo = validate_and_apply_block(&db, &blk, epoch_of(height), height).expect("apply");
+
+    // The create-then-spend outpoint is recorded ONCE, as created (delete on undo).
+    assert!(undo.created.contains(&mid), "the same-block output must be in created");
+    assert!(
+        !undo.spent.iter().any(|(op, _, _)| *op == mid),
+        "a log written by this code must NOT also record the same-block output as spent; that ambiguity is what \
+         the undo side used to have to guess its way out of"
+    );
+
+    // And no outpoint at all appears in both lists.
+    let created: std::collections::HashSet<OutPoint> = undo.created.iter().copied().collect();
+    let both: Vec<OutPoint> = undo
+        .spent
+        .iter()
+        .map(|(op, _, _)| *op)
+        .filter(|op| created.contains(op))
+        .collect();
+    assert!(both.is_empty(), "outpoints in BOTH lists: {both:?}");
+    Ok(())
+}
+
+/// LEGACY LOG COMPATIBILITY, pinned rather than asserted in a comment.
+///
+/// Undo logs written by this change and earlier are still on disk and still replayable, and they DO put
+/// a same-block create-then-spend outpoint in both lists. This hand-builds a log in the old shape
+/// and replays it through the real `undo_block`, so the retained create-then-spend skip is proven to still be doing
+/// its job. Delete this test only when the skip itself can go.
+#[test]
+fn a_legacy_shaped_undo_log_still_replays_without_resurrecting_a_phantom() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 8u64;
+
+    // State as it would be with the block APPLIED: the pre-block coin `spent_op` is gone, and the
+    // block's own output `mid` is present.
+    let spent_op = OutPoint { txid: [0xD1; 32], vout: 0 };
+    let spent_out = TxOut { value: 4_200_000, script_pubkey: signer_addr() };
+    let spent_meta = UtxoMeta { height: 2, coinbase: true };
+
+    let mid = OutPoint { txid: [0xD2; 32], vout: 0 };
+    let mid_out = TxOut { value: 111_000, script_pubkey: signer_addr() };
+    put_utxo(&db, &mid, &mid_out)?;
+    put_utxo_meta(&db, &mid, &UtxoMeta { height, coinbase: false })?;
+
+    // The OLD log shape: `mid` was created and then spent inside the block, so it appears in BOTH
+    // lists, and `spent_op` is an ordinary pre-block spend.
+    let legacy = csd::state::utxo::UndoLog {
+        spent: vec![
+            (spent_op, spent_out.clone(), spent_meta),
+            (mid, mid_out.clone(), UtxoMeta { height, coinbase: false }),
+        ],
+        created: vec![mid],
+        app_undo: vec![],
+    };
+
+    let bh = [0xEE; 32];
+    let bytes = csd::codec::consensus_bincode().serialize(&legacy).expect("serialize legacy undo");
+    db.undo.insert(k_undo(&bh), bytes)?;
+
+    undo_block(&db, &bh).expect("a legacy-shaped undo log must still replay");
+
+    assert!(
+        get_utxo(&db, &mid)?.is_none(),
+        "the same-block create-then-spend outpoint must NOT be resurrected; removing the retained \
+         skip would reintroduce the phantom for every log written before this change"
+    );
+    let restored = get_utxo(&db, &spent_op)?.expect("the ordinary pre-block spend must be restored");
+    assert_eq!(restored.value, spent_out.value);
+    Ok(())
+}
+
+/// The other legacy-log shape: TWO `undo.spent` entries for one outpoint.
+///
+/// Earlier binaries pushed a spent entry on EVERY spend, so a block that spent an outpoint,
+/// recreated it via a replayed txid and spent it again produced two entries: the first holding the
+/// pre-block coin, the second holding what the block itself wrote. Replaying that in order leaves the
+/// LAST value in place, so the node ends up holding a coin the ancestor state never had. This pins
+/// the first-entry-wins rule that makes such a log replay correctly.
+#[test]
+fn a_legacy_log_with_two_spent_entries_for_one_outpoint_restores_the_pre_block_value() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp);
+    let height = 8u64;
+
+    let contested = OutPoint { txid: [0xD3; 32], vout: 0 };
+    let pre_block = TxOut { value: 900_000_000, script_pubkey: signer_addr() };
+    let within_block = TxOut { value: 7_000, script_pubkey: signer_addr() };
+
+    // The old shape: first entry is the pre-block coin, second is the block's own recreation.
+    // `contested` is NOT in `created`, because the block did not create it out of nothing.
+    let legacy = csd::state::utxo::UndoLog {
+        spent: vec![
+            (contested, pre_block.clone(), UtxoMeta { height: 3, coinbase: false }),
+            (contested, within_block, UtxoMeta { height, coinbase: false }),
+        ],
+        created: vec![],
+        app_undo: vec![],
+    };
+
+    let bh = [0xEF; 32];
+    let bytes = csd::codec::consensus_bincode().serialize(&legacy).expect("serialize legacy undo");
+    db.undo.insert(k_undo(&bh), bytes)?;
+
+    undo_block(&db, &bh).expect("a legacy log with a repeated outpoint must still replay");
+
+    let restored = get_utxo(&db, &contested)?.expect("the contested outpoint must be restored");
+    assert_eq!(
+        restored.value, pre_block.value,
+        "the FIRST spent entry holds the pre-block coin; restoring the later one leaves this node \
+         holding a coin the ancestor state never had"
+    );
+    Ok(())
+}
