@@ -1,0 +1,214 @@
+{
+ "unregistered_dois": [
+  {
+   "doi": "10.1090/S0002-9939-1956-0075933-9",
+   "cited_in": [
+    {
+     "manuscript": "A-Counterexample-to-Kuroshs-Division-Ring-Problem-September-23-2026",
+     "proposal": "0x315943e641385d9921d76f3b8733bc36467a8356c646278a48b34b018444128c"
+    }
+   ]
+  },
+  {
+   "doi": "10.1090/pspum/094/01620",
+   "cited_in": [
+    {
+     "manuscript": "Conditional-good-minimal-models-for-compact-Kahler-fourfolds-October-5-2026",
+     "proposal": "0xd19d84caaf81c3b9adfeb4197bb504065419a96fda627e24443420c9ae5b470d"
+    },
+    {
+     "manuscript": "Conditional-good-minimal-models-for-compact-Kahler-fourfolds-October-6-2026",
+     "proposal": "0x5a1a4b817b79835ada131e4ca8b9fa9d4c174d19d06ce1d54b9bb7b881452a7e"
+    },
+    {
+     "manuscript": "Log-abundance-in-characteristic-zero-September-24-2026",
+     "proposal": "0x654324f88a9fe7cb6b4eca3cbbe02ca84cc357cf7f66e5970c2e72ff16620fda"
+    },
+    {
+     "manuscript": "Logarithmic-Kodaira-dimension-and-whole-fiber-variation-September-26-2026",
+     "proposal": "0xc7b701ba8bd6511e502c470a17857a839f001b46f0877062be3bbe2a3e533629"
+    }
+   ]
+  },
+  {
+   "doi": "10.1090/pspum/102/01809",
+   "cited_in": [
+    {
+     "manuscript": "The-Hilbert-Smith-conjecture-in-every-finite-dimension-September-23-2026",
+     "proposal": "0x9b5d5560db21098e5b521b1587ae257bfc14e097847f9440863124d5c22c5e42"
+    }
+   ]
+  },
+  {
+   "doi": "10.1093/oso/9780198511762.001.0001",
+   "cited_in": [
+    {
+     "manuscript": "Failure-of-rational-injectivity-for-maximal-coarse-assembly-October-5-2026",
+     "proposal": "0x97c418bead201d6e587f2c0f930d50f2230df161067895762c312905ee07820b"
+    }
+   ]
+  },
+  {
+   "doi": "10.1145/1347082.1347125",
+   "cited_in": [
+    {
+     "manuscript": "Uniform-quasipolynomial-time-trace-reconstruction-October-5-2026",
+     "proposal": "0xcb50aa2ab3e9084a56882a37addea4565d130585b938636eb6394a8e93b8a66d"
+    }
+   ]
+  },
+  {
+   "doi": "10.11606/resimeusp.v2i2.74798",
+   "cited_in": [
+    {
+     "manuscript": "An-asymptotic-formula-for-the-number-of-totients-September-25-2026",
+     "proposal": "0xaa1cc3ed6e8a8f88af8f6d1e9aa34914f06ce20c5b14053ad5941607ca74149b"
+    }
+   ]
+  },
+  {
+   "doi": "10.1515/9781400882498",
+   "cited_in": [
+    {
+     "manuscript": "The-Selmer-converse-for-elliptic-curves-at-every-prime-October-7-2026",
+     "proposal": "0x19e120ced28c5bf4cbf1250e8c741c5d8305ad4a7445044a1a884af6c4318c0e"
+    },
+    {
+     "manuscript": "The-Selmer-converse-for-elliptic-curves-at-every-prime-September-24-2026",
+     "proposal": "0x7313e9689e09adfde9dca148a5f6cbc3c9054a573fe56590398d55a163dd9392"
+    }
+   ]
+  },
+  {
+   "doi": "10.19086/da.117575",
+   "cited_in": [
+    {
+     "manuscript": "Monochromatic-finite-sums-and-products-in-the-positive-integers-September-23-2026",
+     "proposal": "0xcc0a4570ca5d85606dc622d00ac70474190a856ce2f88f54098c51198162a287"
+    }
+   ]
+  },
+  {
+   "doi": "10.19086/da.144978",
+   "cited_in": [
+    {
+     "manuscript": "An-atomic-certificate-for-triangular-lattice-universal-optimality-September-26-2026",
+     "proposal": "0x6ed8bcc4b54d685527dd0483bfe8b687fed86b4113ee2df5c46585dc4c599788"
+    },
+    {
+     "manuscript": "Universal-optimality-of-the-triangular-lattice-September-23-2026",
+     "proposal": "0xf61754044cd8f529628b430eb5af06e6bcff74258aa0a987bf94c4fcfb2a3a61"
+    }
+   ]
+  },
+  {
+   "doi": "10.19086/da.57741",
+   "cited_in": [
+    {
+     "manuscript": "A-superquadratic-separation-between-sensitivity-and-block-sensitivity-September-25-2026",
+     "proposal": "0xa48aed20a59606633444c29d815ac9ced05be29dd5c00b4eb0b1ec841af74298"
+    }
+   ]
+  },
+  {
+   "doi": "10.24033/ast.198",
+   "cited_in": [
+    {
+     "manuscript": "Conditional-good-minimal-models-for-compact-Kahler-fourfolds-October-5-2026",
+     "proposal": "0xd19d84caaf81c3b9adfeb4197bb504065419a96fda627e24443420c9ae5b470d"
+    },
+    {
+     "manuscript": "Conditional-good-minimal-models-for-compact-Kahler-fourfolds-October-6-2026",
+     "proposal": "0x5a1a4b817b79835ada131e4ca8b9fa9d4c174d19d06ce1d54b9bb7b881452a7e"
+    },
+    {
+     "manuscript": "Termination-for-projective-log-canonical-fourfolds-with-rational-boundary-September-24-2026",
+     "proposal": "0x5bbad1425d8c681981c06e00ebe262e37effe845774e203af37decd3f860cc55"
+    },
+    {
+     "manuscript": "Uniform-effective-log-Iitaka-fibrations-for-fourfolds-September-26-2026",
+     "proposal": "0x67ff9f3eba52c38174fd8ced7879e7ce2cbe365afef6a387f8e4c8d50501a72a"
+    }
+   ]
+  },
+  {
+   "doi": "10.24033/ast.245",
+   "cited_in": [
+    {
+     "manuscript": "Commuting-Division-Coefficient-Forms-and-the-Artinian-Eisenbud-Green-Harris-Conjecture-September-23-2026",
+     "proposal": "0x40f00ed37bdf0f3017c10b0931658042e560463aeebb9b357833bc40990557b6"
+    }
+   ]
+  },
+  {
+   "doi": "10.24033/ast.534",
+   "cited_in": [
+    {
+     "manuscript": "Filtered-chromatic-splitting-at-generic-primes-September-25-2026",
+     "proposal": "0x86f35aee1b7299ea76fad5d49ed994f99b9b99c8dcda89ce98392443be333492"
+    }
+   ]
+  },
+  {
+   "doi": "10.24033/ast.93",
+   "cited_in": [
+    {
+     "manuscript": "Open-Homomorphisms-of-Global-Solvably-Closed-Galois-Groups-October-5-2026",
+     "proposal": "0x02c37e44ec6032193ca2345e2d92cf016b212c46f50b993b8e6099c6e44eaaad"
+    }
+   ]
+  },
+  {
+   "doi": "10.4007/annals.2003.157.891",
+   "cited_in": [
+    {
+     "manuscript": "The-two-primary-Birch-Swinnerton-Dyer-formula-in-Selmer-corank-at-most-one-October-6-2026",
+     "proposal": "0x7629460b1ea7a20702677561ac05999870f7fc876fae6e562d29e9df50559909"
+    },
+    {
+     "manuscript": "The-two-primary-Birch-Swinnerton-Dyer-formula-in-Selmer-corank-at-most-one-September-24-2026",
+     "proposal": "0xcceade17ee5e00478346f163637e3072e5811ce753b765068b37dc6032d0a60c"
+    }
+   ]
+  },
+  {
+   "doi": "10.47013/16.4.6",
+   "cited_in": [
+    {
+     "manuscript": "Cycle-clique-Ramsey-numbers-September-25-2026",
+     "proposal": "0x82195efbcccf2a9a9c34825988b22f3507bad12e79811f70070bb05b69216ed3"
+    }
+   ]
+  }
+ ],
+ "dois_resolving_to_another_work": [
+  {
+   "manuscript": "Positive-scalar-curvature-forces-rational-inessentiality-September-23-2026",
+   "proposal": "0x812f3484cc95bc7687c97b023e227d7ba4ec9dd9f0e25bbf37f321f0075551ec",
+   "bib_key": "Gromov1982",
+   "doi": "10.1007/BF02698699",
+   "resolves_to_title": "Stability of a surface-charged viscous jet in an electric field"
+  },
+  {
+   "manuscript": "Global-quantum-geometric-Langlands-at-irrational-level-October-4-2026",
+   "proposal": "0x0be7438241ef72d7b97eb8f6d784e716eb97fff8aac3235f20c6374afe8d7034",
+   "bib_key": "GaitsgoryStrange",
+   "doi": "10.24033/asens.2641",
+   "resolves_to_title": "Algebraization Techniques and Rigid-Analytic Artin-Grothendieck Vanishing"
+  },
+  {
+   "manuscript": "Bounded-recovery-for-modular-spectral-averages-September-23-2026",
+   "proposal": "0x7e7b1b168ceb82043363c5366bfb959cd599a55fdd2cc0c49e7f57adc2f7acff",
+   "bib_key": "IoanaVaes2015",
+   "doi": "10.24033/asens.2239",
+   "resolves_to_title": "Cartan subalgebras of amalgamated free product $II_1$ factors"
+  },
+  {
+   "manuscript": "Virtual-compact-specialness-of-hyperbolic-one-relator-groups-September-25-2026",
+   "proposal": "0xac0904268993cf974cc6e03e20e422db5694d9e8097c5334c0c39d4d6e4ca46c",
+   "bib_key": "Coulon2014",
+   "doi": "10.1142/S0218196714500143",
+   "resolves_to_title": "On the geometry of burnside quotients of torsion free hyperbolic groups"
+  }
+ ]
+}
