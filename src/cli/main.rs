@@ -9,7 +9,7 @@ use crate::state::db::Stores;
 #[command(
     name = "csd",
     version = env!("CARGO_PKG_VERSION"),   // tracks Cargo.toml
-    about = "Cairn-Node: Compute Substrate node, miner, and wallet CLI",
+    about = "Compute Substrate node and wallet CLI",
     long_about = "Compute Substrate node and wallet CLI.\n\nUse `csd node` to run a node or miner.\nUse `csd wallet` to create keys, inspect balances, build transactions, and submit proposals or attestations.",
     arg_required_else_help = true
 )]
@@ -1638,7 +1638,6 @@ println!("[p2p] bootnode mode: {}", is_bootnode);
 
             let listener = tokio::net::TcpListener::bind(&rpc).await?;
             println!("RPC on http://{}", rpc);
-            println!("[node] overlay {}", crate::net::node::OVERLAY_ID);
 
             // Bounded background txid-index reconciler (~64 blocks/tick, unindex-then-
             // index on reorgs, completeness marker idx:tip_hash). Loops forever, logs and

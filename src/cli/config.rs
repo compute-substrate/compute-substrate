@@ -96,7 +96,7 @@ mod key_exposure_tests {
                 "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
             ),
             default_rpc_url: Some("http://127.0.0.1:8789".to_string()),
-            default_datadir: Some("/opt/substrate_miner/node-db".to_string()),
+            default_datadir: Some("cs.db".to_string()),
             default_change_addr20: Some("0x00000000000000000000000000000000000000ff".to_string()),
         }
     }
@@ -161,7 +161,7 @@ mod key_exposure_tests {
 
         // Rewriting truncates rather than leaving a tail of the previous, longer content.
         let mut shorter = CliConfig::default();
-        shorter.default_rpc_url = Some("http://127.0.0.1:8795".to_string());
+        shorter.default_rpc_url = Some("http://localhost:8789".to_string());
         save_config_at(&path, &shorter).unwrap();
         let back2: CliConfig = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(back2.default_privkey.is_none());

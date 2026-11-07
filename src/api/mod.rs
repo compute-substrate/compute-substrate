@@ -96,7 +96,6 @@ pub known_peers: usize,
 struct NodeInfoResp {
     pub ok: bool,
     pub version: String,
-    pub overlay: String,
     pub peer_id: String,
     pub height: u64,
     pub best_peer_height: Option<u64>,
@@ -569,7 +568,6 @@ async fn node_info(State(st): State<ApiState>) -> Json<NodeInfoResp> {
     Json(NodeInfoResp {
         ok: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        overlay: crate::net::node::OVERLAY_ID.to_string(),
         peer_id: st.peer_id.to_string(),
         height,
         best_peer_height: (best_peer_height > 0).then_some(best_peer_height),

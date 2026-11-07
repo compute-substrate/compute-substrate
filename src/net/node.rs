@@ -4528,13 +4528,6 @@ fn close_line(
 // a minute later.
 const PUBLISH_RETRY_MAX_QUEUE: usize = 256;
 
-// Printed at node startup so an operator can identify the exact build from the journal without
-// guessing from binary mtimes. Kept in step with the Cargo package version and the release tag.
-pub const OVERLAY_ID: &str =
-    // This build carries a DELIBERATE consensus delta from upstream (the undo reclassification
-    // below), so it is not consensus-neutral; the property it keeps is replay-equivalence.
-    "Cairn-Node v0.1.16 (upstream compute-substrate v1.1.2 base + deliberate-consensus-delta overlay (undo classifies every outpoint by pre-block existence at first touch, so it matches a from-genesis replay); libp2p 0.57 / gossipsub 0.50.1 / yamux 0.14.1; stranding-insurance; sync: gossip-fetch + outbound-protect + process-wide peer pacing + repaired peer-quality persistence; tx lookup: ScanOutcome wire contract + txid index with linear catch-up, atomic markers and per-txid ambiguity; ops: graceful shutdown, offloaded O(chain) reads, csd fingerprint; sync-path apply under the chain lock; O(chain) reads gated and offloaded; tip-driven index wake; store-time and serve-time body-to-header merkle bind; a gossip content failure strikes nobody and every gossip peer decision uses the noise-authenticated forwarder; mempool admission is app-state-aware (RT-N1); sync transport cap is upstream's 1 MiB again (M5-X1-02); tx scan budget always reaches genesis (#9); panic counter and inbound/outbound peer gauges on /node/info; display scans gated in their own pool; a failed reorg step rolls back and marks only a rejected block, a body that fails on bytes its header does not fix is dropped and fetched again, and a stronger tip is retried once its bodies are stored)";
-
 /// What a queued publish is for, and so how long it is retried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetryFor {
@@ -8907,9 +8900,11 @@ mod peer_state_tests {
         ] {
             assert!(!stored(planted), "{planted} entered the book");
         }
-        // The paired honest path: public addresses in both families, and a mapped public IPv4,
-        // which the IPv4 rules admit.
-        for public in ["/ip4/162.55.132.151", "/ip4/1.0.0.1", "/ip4/223.255.255.1", "/ip6/2a01:4f8:271:5ea3::2", "/ip6/::ffff:8.8.8.8"] {
+        // The paired honest path: public IPv4 addresses, an IPv6 address the IPv6 rules admit (the
+        // documentation prefix 2001:db8::/32 is not among the ranges they refuse; the IPv4
+        // documentation ranges are, so the IPv4 examples are public ones), and a mapped public
+        // IPv4, which the IPv4 rules admit.
+        for public in ["/ip4/8.8.8.8", "/ip4/1.0.0.1", "/ip4/223.255.255.1", "/ip6/2001:db8::2", "/ip6/::ffff:8.8.8.8"] {
             assert!(stored(public), "{public} was refused");
         }
     }

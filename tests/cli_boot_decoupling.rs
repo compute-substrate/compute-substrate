@@ -137,12 +137,12 @@ fn a_valid_config_still_drives_the_wallet_commands_unchanged() {
 
     write_config(
         home.path(),
-        r#"{"default_privkey":null,"default_rpc_url":"http://127.0.0.1:8795","default_datadir":"/tmp/x","default_change_addr20":null}"#,
+        r#"{"default_privkey":null,"default_rpc_url":"http://localhost:8789","default_datadir":"/tmp/x","default_change_addr20":null}"#,
     );
     let out = run(home.path(), &["wallet", "config"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success());
-    assert!(stdout.contains("http://127.0.0.1:8795"));
+    assert!(stdout.contains("http://localhost:8789"));
     assert!(stdout.contains("/tmp/x"));
 }
 
