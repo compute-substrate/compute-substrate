@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -57,7 +58,6 @@ fn sign_tx(mut tx: Transaction) -> Transaction {
 
 #[test]
 fn accepts_propose_with_expires_epoch_equal_current() -> Result<()> {
-    std::env::set_var("CSD_BYPASS_POW", "1");
 
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;

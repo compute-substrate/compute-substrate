@@ -1,7 +1,8 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{ensure, Result};
 use tempfile::TempDir;
 
-use csd::chain::mine::{build_template_for_tests, coinbase};
+use csd::chain::mine::build_template_for_tests;
 use csd::crypto::txid;
 use csd::net::mempool::Mempool;
 use csd::state::db::{k_utxo, Stores};
@@ -215,10 +216,14 @@ fn block_byte_pressure_skips_deterministically_and_preserves_order() -> Result<(
     admit_tx(&db, &mp, tx2.clone())?;
     admit_tx(&db, &mp, tx3.clone())?;
 
-    let cb = coinbase(h20(0xAA), csd::params::block_reward(1), 1, None);
-    let cb_bytes = tx_bytes(&cb);
+    // The template builder's coinbase carries a variable-length miner-entropy memo
+    // ("host:pid:instance", see mine.rs::miner_entropy), so its serialized size is NOT
+    // fixed and cannot be reproduced here. Budget a generous allowance that always
+    // covers it; the byte-pressure skip still bites because tx2 (~2.4 KB of dust
+    // outputs) exceeds the remaining room under any plausible entropy length.
+    let cb_allowance = 512usize;
 
-    let cap = cb_bytes + tx_bytes(&tx1) + tx_bytes(&tx3);
+    let cap = cb_allowance + tx_bytes(&tx1) + tx_bytes(&tx3);
 
     let ids = template_ids(&db, &mp, 1, 16, cap)?;
 

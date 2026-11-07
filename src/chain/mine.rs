@@ -28,6 +28,21 @@ use std::time::Instant;
 
 const MINER_BLOCK_SIZE_SAFETY_BYTES: usize = 16 * 1024;
 
+// The template belt: every node refuses a request-response message of 1 MiB or more
+// (net/node.rs MAX_RR_MSG_BYTES, upstream's bound too), though consensus admits a block up to
+// MAX_BLOCK_BYTES. A block we templated above it could be fetched by no peer, and a mempool flood
+// would make one. The cap stays while consensus admits blocks the transport refuses
+// (docs/behaviour.md "Transport cap and blocks above 1 MiB").
+const MINER_TEMPLATE_TRANSPORT_SAFE_BYTES: usize = 1024 * 1024 - 32 * 1024;
+
+/// The effective template byte cap: the consensus cap minus the safety margin, belted below the
+/// 1 MiB transport cap.
+pub(crate) fn template_byte_cap() -> usize {
+    MAX_BLOCK_BYTES
+        .saturating_sub(MINER_BLOCK_SIZE_SAFETY_BYTES)
+        .min(MINER_TEMPLATE_TRANSPORT_SAFE_BYTES)
+}
+
 
 
 /// Bitcoin-ish merkle root from txids.
@@ -166,16 +181,48 @@ fn compute_fee_from_utxos(db: &Stores, tx: &Transaction) -> Result<u64> {
     Ok(in_sum - out_sum)
 }
 
+/// How far our stamps stay inside the consensus future bound: a peer refuses
+/// a header stamped past its own now + MAX_FUTURE_DRIFT_SECS (index.rs), and the time between our
+/// stamp and its check only advances its clock, so a peer whose clock is up to this far behind ours
+/// accepts every header we stamp. It also bounds the wait on a parent stamped at the drift limit
+/// to this plus MIN_BLOCK_SPACING_SECS.
+pub const MINER_CLOCK_SKEW_MARGIN_SECS: u64 = 600;
+
+/// The miner's stamp for a block whose earliest valid time is `min_ok`, at wall clock `now`:
+/// `Ok(max(now, min_ok))` whenever min_ok is at most now + MAX_FUTURE_DRIFT_SECS -
+/// MINER_CLOCK_SKEW_MARGIN_SECS, else `Err(seconds until it is)`. Upstream's miner waits until the
+/// wall clock passes min_ok, so one tip stamped near the 2 h drift limit idles it for up to 2 h
+/// while consensus accepts a child at once. The consensus rules are unchanged; this is only the
+/// miner's choice inside them.
+pub fn miner_block_time(now: u64, min_ok: u64) -> std::result::Result<u64, u64> {
+    let latest = now
+        .saturating_add(MAX_FUTURE_DRIFT_SECS)
+        .saturating_sub(MINER_CLOCK_SKEW_MARGIN_SECS);
+    if min_ok <= latest {
+        Ok(now.max(min_ok))
+    } else {
+        Err(min_ok - latest)
+    }
+}
+
 /// Choose a block time that matches the consensus rules in index_header:
 /// - time >= parent.time + MIN_BLOCK_SPACING_SECS
 /// - time > MTP(parent)
 /// - time <= now + MAX_FUTURE_DRIFT_SECS
 ///
-/// This MUST track wall-clock time (clamped), or LWMA will drift the wrong way.
-
-fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&HeaderIndex>) -> u64 {
+/// This MUST track wall-clock time (clamped), or LWMA will drift the wrong way. It does
+/// except while the parent is stamped ahead of the clock, when it is the earliest valid time; the
+/// LWMA effect of that is measured in docs/behaviour.md "Block time on a parent stamped ahead".
+/// The stamp is `miner_block_time`'s; a wait for a parent stamped beyond its bound ends with `None`
+/// as soon as `stale` is set (the tip moved: `mine_one`'s watcher runs during the wait).
+fn choose_block_time(
+    db: &Stores,
+    parent_tip: &Hash32,
+    parent_hi: Option<&HeaderIndex>,
+    stale: &AtomicBool,
+) -> Option<u64> {
     if *parent_tip == [0u8; 32] || parent_hi.is_none() {
-        return 0;
+        return Some(0);
     }
 
     let p = parent_hi.unwrap();
@@ -186,25 +233,34 @@ fn choose_block_time(db: &Stores, parent_tip: &Hash32, parent_hi: Option<&Header
         .saturating_add(MIN_BLOCK_SPACING_SECS)
         .max(mtp.saturating_add(1));
 
+    let mut logged = false;
     loop {
         let now = now_secs();
-
-        if min_ok <= now {
-            return now;
+        let wait = match miner_block_time(now, min_ok) {
+            Ok(t) => return Some(t),
+            Err(wait) => wait,
+        };
+        if stale.load(Ordering::Relaxed) {
+            return None;
         }
-
-        let wait = min_ok.saturating_sub(now).min(5);
-
-        println!(
-            "[mine] waiting for wall clock: next_valid_time={} now={} wait={}s",
-            min_ok,
-            now,
-            wait
-        );
-
-        std::thread::sleep(std::time::Duration::from_secs(wait));
+        if !logged {
+            println!(
+                "[mine] parent stamped {}s ahead of the wall clock: waiting {}s for next_valid_time={} to come within {}s of now",
+                p.time.saturating_sub(now),
+                wait,
+                min_ok,
+                MAX_FUTURE_DRIFT_SECS - MINER_CLOCK_SKEW_MARGIN_SECS,
+            );
+            logged = true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
+
+/// Test-only record of the parent of every solution `mine_one` received, before it takes the chain
+/// lock to commit it (`tests/mine_one_rebases_on_tip_change.rs` holds the lock across a solve).
+#[cfg(feature = "test-bypass")]
+pub static TEST_SOLVED_PARENTS: std::sync::Mutex<Vec<Hash32>> = std::sync::Mutex::new(Vec::new());
 
 /// Build a fresh block template from the current tip + current UTXO set.
 ///
@@ -227,7 +283,7 @@ fn build_template(
         miner_h160,
         height,
         max_mempool_txs,
-        MAX_BLOCK_BYTES.saturating_sub(MINER_BLOCK_SIZE_SAFETY_BYTES),
+        template_byte_cap(),
     )
 }
 
@@ -372,7 +428,10 @@ let cb = coinbase(miner_h160, cb_value, height, Some(&entropy));
     Ok((final_txs, included_ids, total_fees))
 }
 
-#[cfg(test)]
+/// Test-only template builder entry point. Gated on `test` (unit tests) OR the
+/// `test-bypass` cargo feature (integration tests in tests/, which link the lib
+/// without cfg(test)). Never compiled into production release builds.
+#[cfg(any(test, feature = "test-bypass"))]
 pub fn build_template_for_tests(
     db: &Stores,
     mempool: &Mempool,
@@ -453,38 +512,18 @@ mine_log_event(
     ),
 );
 
+    // `time` is chosen below, once the stale-tip watcher runs.
     let mut hdr = BlockHeader {
         version: 1,
         prev: parent_tip,
         merkle: merkle_root(&txs),
-        time: choose_block_time(db, &parent_tip, parent_hi_opt.as_ref()),
+        time: 0,
         bits: expected_bits(db, height, parent_hi_opt.as_ref())?,
         nonce: 0u32,
     };
 
 let pow_target = PowTarget::from_bits(hdr.bits)
     .ok_or_else(|| anyhow!("invalid mining bits"))?;
-
-println!(
-    "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
-    height,
-    hex::encode(hdr.prev),
-    hdr.bits,
-    hdr.time
-);
-
-mine_log_event(
-    "pow_search_started",
-    height,
-    None,
-    &format!(
-        "prev=0x{} bits=0x{:08x} time={} workers={}",
-        hex::encode(hdr.prev),
-        hdr.bits,
-        hdr.time,
-        miner_thread_count()
-    ),
-);
 
 #[derive(Clone)]
 enum MineMsg {
@@ -537,6 +576,35 @@ if cur_tip != parent_tip {
         });
     }
 
+    // The time is chosen with the watcher running, so a wait on a parent stamped beyond
+    // `miner_block_time`'s bound ends when the tip moves.
+    let Some(time) = choose_block_time(db, &parent_tip, parent_hi_opt.as_ref(), &stale) else {
+        stop.store(true, Ordering::Relaxed);
+        return Err(anyhow!("stale template"));
+    };
+    hdr.time = time;
+
+println!(
+    "[mine] enter: height={} prev=0x{} bits=0x{:08x} time={}",
+    height,
+    hex::encode(hdr.prev),
+    hdr.bits,
+    hdr.time
+);
+
+mine_log_event(
+    "pow_search_started",
+    height,
+    None,
+    &format!(
+        "prev=0x{} bits=0x{:08x} time={} workers={}",
+        hex::encode(hdr.prev),
+        hdr.bits,
+        hdr.time,
+        miner_thread_count()
+    ),
+);
+
     for worker_id in 0..workers {
 
         let stop = stop.clone();
@@ -569,6 +637,13 @@ let base_script_sig = wtxs[0].inputs[0].script_sig.clone();
 let pow_target = pow_target;
 
 scope.spawn(move || {
+    // Deprioritize PoW grind threads (SCHED_IDLE) so networking/apply threads (normal priority) always
+    // preempt them -- mine on every core without starving block-apply. Best-effort; ignored on failure.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let p = libc::sched_param { sched_priority: 0 };
+        let _ = libc::sched_setscheduler(0, libc::SCHED_IDLE, &p);
+    }
     #[allow(unused_assignments)]
     let mut checks: u64 = 0;
     let mut extra_nonce: u64 = 0;
@@ -622,7 +697,10 @@ if tx_found.send(MineMsg::Found(h, block)).is_err() {
 if whdr.nonce < old_nonce {
     extra_nonce = extra_nonce.wrapping_add(1);
 
-    whdr.time = choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref());
+    whdr.time = match choose_block_time(db, &parent_tip, parent_hi_for_worker.as_ref(), &stale) {
+        Some(t) => t,
+        None => return,
+    };
 
     let marker = extra_nonce.to_le_bytes();
 
@@ -783,11 +861,15 @@ if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
                     Some(b) => nonce_base = b,
                     None => {
                         extra_nonce = extra_nonce.wrapping_add(1);
-                        whdr_gpu.time = choose_block_time(
+                        whdr_gpu.time = match choose_block_time(
                             db,
                             &parent_tip_for_worker,
                             parent_hi_for_worker.as_ref(),
-                        );
+                            &stale,
+                        ) {
+                            Some(t) => t,
+                            None => return,
+                        };
                         let marker = extra_nonce.to_le_bytes();
                         wtxs_gpu[0].inputs[0].script_sig = base_script_sig_gpu.clone();
                         wtxs_gpu[0].inputs[0].script_sig.push(0x00);
@@ -816,6 +898,8 @@ if checks >= HASH_COUNTER_FLUSH_EVERY_NONCES {
 
 Ok(MineMsg::Found(h, block)) => {
     let solved_hdr = block.header.clone();
+    #[cfg(feature = "test-bypass")]
+    TEST_SOLVED_PARENTS.lock().unwrap().push(solved_hdr.prev);
 
 let solved_at = Instant::now();
 
@@ -964,4 +1048,173 @@ if accepted_as_tip {
         Err(_) => Err(anyhow!("miner workers exited without result")),
     }
 })
+}
+
+// The miner's stamp on a parent stamped ahead of the wall clock.
+#[cfg(test)]
+mod block_time_tests {
+    use super::*;
+
+    const NOW: u64 = 1_800_000_000;
+    const BOUND: u64 = MAX_FUTURE_DRIFT_SECS - MINER_CLOCK_SKEW_MARGIN_SECS;
+
+    // Honest path: a parent in the past, or the earliest valid time already reached, stamps the
+    // wall clock, as upstream's miner does.
+    #[test]
+    fn a_parent_in_the_past_stamps_the_wall_clock() {
+        assert_eq!(miner_block_time(NOW, NOW - 300), Ok(NOW));
+        assert_eq!(miner_block_time(NOW, NOW), Ok(NOW));
+    }
+
+    // The earliest valid time ahead of the clock but within the bound is stamped at once, with no
+    // wait: 30 s ahead (a parent found 30 s ago) and 6,560 s ahead (a parent stamped 6,500 s ahead).
+    // Upstream's miner waits until the clock reaches it.
+    #[test]
+    fn an_earliest_time_within_the_bound_is_stamped_at_once() {
+        assert_eq!(miner_block_time(NOW, NOW + 30), Ok(NOW + 30));
+        assert_eq!(miner_block_time(NOW, NOW + 6_560), Ok(NOW + 6_560));
+        assert_eq!(miner_block_time(NOW, NOW + BOUND), Ok(NOW + BOUND));
+    }
+
+    // A parent at the consensus limit (now + MAX_FUTURE_DRIFT_SECS) waits the margin plus the
+    // spacing, 660 s, not the two hours until the clock passes it.
+    #[test]
+    fn a_parent_at_the_drift_limit_waits_the_margin_plus_the_spacing() {
+        let min_ok = NOW + MAX_FUTURE_DRIFT_SECS + MIN_BLOCK_SPACING_SECS;
+        let wait = MINER_CLOCK_SKEW_MARGIN_SECS + MIN_BLOCK_SPACING_SECS;
+        assert_eq!(miner_block_time(NOW, min_ok), Err(wait));
+        assert_eq!(miner_block_time(NOW + wait, min_ok), Ok(min_ok));
+    }
+
+    // Every stamp is accepted by a receiver whose clock is MINER_CLOCK_SKEW_MARGIN_SECS behind ours
+    // (index_header refuses only a stamp past its own now + MAX_FUTURE_DRIFT_SECS) and is at least
+    // the earliest valid time.
+    #[test]
+    fn every_stamp_is_valid_for_a_receiver_whose_clock_is_the_margin_behind() {
+        let receiver_now = NOW - MINER_CLOCK_SKEW_MARGIN_SECS;
+        for min_ok in [NOW - 1, NOW, NOW + 1, NOW + 3_600, NOW + BOUND] {
+            let stamp = miner_block_time(NOW, min_ok).unwrap();
+            assert!(stamp >= min_ok && stamp <= receiver_now + MAX_FUTURE_DRIFT_SECS, "min_ok {min_ok}");
+        }
+    }
+}
+
+// ── tests: template path ──
+// A poison that bypassed admission (a mempool carried over from a build without the app-state
+// gate, or a refeed) must be excluded at template build, because the selection re-runs
+// validate_tx_for_mempool (app-state-aware) on every candidate. These tests plant a poison
+// directly in the mempool (test-only seam) and prove the template excludes it, and pin the
+// template byte cap below the transport cap.
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+    use crate::chain::index::{put_hidx, HeaderIndex};
+    use crate::crypto::{hash160, sign_tx_compact_secp256k1, txid};
+    use crate::params::{COIN, MIN_FEE_PROPOSE};
+    use crate::state::db::{put_utxo, put_utxo_meta, set_tip, UtxoMeta};
+    use crate::types::{AppPayload, OutPoint, Transaction, TxIn, TxOut};
+    use tempfile::TempDir;
+
+    const SK: [u8; 32] = [7u8; 32];
+    const START_TIME: u64 = 1_702_000_000;
+
+    fn signer_addr() -> [u8; 20] {
+        let dummy = Transaction {
+            version: 1,
+            inputs: vec![TxIn { prevout: OutPoint { txid: [0u8; 32], vout: 0 }, script_sig: vec![] }],
+            outputs: vec![TxOut { value: 1, script_pubkey: [0u8; 20] }],
+            locktime: 0,
+            app: AppPayload::None,
+        };
+        let (_sig, pub33) = sign_tx_compact_secp256k1(&dummy, SK);
+        hash160(&pub33)
+    }
+
+    fn sign(mut tx: Transaction) -> Transaction {
+        let (sig64, pub33) = sign_tx_compact_secp256k1(&tx, SK);
+        let mut ss = Vec::with_capacity(99);
+        ss.push(64);
+        ss.extend_from_slice(&sig64);
+        ss.push(33);
+        ss.extend_from_slice(&pub33);
+        for inp in &mut tx.inputs {
+            inp.script_sig = ss.clone();
+        }
+        tx
+    }
+
+    fn open_db() -> (TempDir, Stores) {
+        let tmp = TempDir::new().unwrap();
+        let db = Stores::open(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, db)
+    }
+
+    fn insert_utxo(db: &Stores, op: OutPoint, value: u64, owner: [u8; 20]) {
+        put_utxo(db, &op, &TxOut { value, script_pubkey: owner }).unwrap();
+        put_utxo_meta(db, &op, &UtxoMeta { height: 1, coinbase: false }).unwrap();
+    }
+
+    // Fabricate a canonical tip at `height` so the app-state gate reads the intended epoch.
+    fn set_tip_at_height(db: &Stores, height: u64) {
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&height.to_le_bytes());
+        hash[31] = 0xFF;
+        let hi = HeaderIndex { hash, parent: [0u8; 32], height, chainwork: 0, bits: 0, time: START_TIME };
+        put_hidx(db, &hi).unwrap();
+        set_tip(db, &hash).unwrap();
+    }
+
+    fn propose_tx(op: OutPoint, owner: [u8; 20], expires_epoch: u64) -> Transaction {
+        sign(Transaction {
+            version: 1,
+            inputs: vec![TxIn { prevout: op, script_sig: vec![0u8; 99] }],
+            outputs: vec![TxOut { value: COIN - MIN_FEE_PROPOSE, script_pubkey: owner }],
+            locktime: 0,
+            app: AppPayload::Propose {
+                domain: "test-domain".to_string(),
+                payload_hash: [0x66; 32],
+                uri: "https://example.com/x".to_string(),
+                expires_epoch,
+            },
+        })
+    }
+
+    #[test]
+    fn template_excludes_app_state_poison() {
+        // Tip at height 60 → the next block is in epoch 2 (30 blocks/epoch).
+        let (_tmp, db) = open_db();
+        set_tip_at_height(&db, 60);
+        let owner = signer_addr();
+        let good_op = OutPoint { txid: [0xA1; 32], vout: 0 };
+        let poison_op = OutPoint { txid: [0xA2; 32], vout: 0 };
+        insert_utxo(&db, good_op, COIN, owner);
+        insert_utxo(&db, poison_op, COIN, owner);
+        let good = propose_tx(good_op, owner, 10); // expires epoch 10 ≥ current 2: valid
+        let poison = propose_tx(poison_op, owner, 1); // expires epoch 1 < current 2: poison
+
+        // Plant both directly in the mempool, bypassing admission (admission would have refused
+        // the poison): this simulates a mempool carried over from a build without the gate, or a
+        // refeed, the "poisoned mempool -> template" state.
+        let mp = Mempool::new();
+        let poison_id = mp.force_insert_for_test(poison.clone(), 1000);
+        let good_id = mp.force_insert_for_test(good.clone(), 500);
+
+        let (_txs, ids, _fees) = build_template_for_tests(&db, &mp, [0x99; 20], 61, 100, 1_000_000)
+            .expect("template builds");
+        assert!(ids.contains(&good_id), "the valid tx is templated");
+        assert!(
+            !ids.contains(&poison_id),
+            "RT-N1: an app-state poison in the mempool is EXCLUDED at template build"
+        );
+    }
+
+    #[test]
+    fn template_byte_cap_is_belted_below_the_transport_cap() {
+        // Every block we template must stay fetchable by every node (the 1 MiB request-response
+        // cap, upstream's too): the cap sits below it with envelope room, and strictly below the
+        // consensus cap (otherwise the belt is decorative). The full Block answer is pinned in
+        // net::node::sync_transport_cap_tests.
+        assert!(template_byte_cap() <= 1024 * 1024);
+        assert!(template_byte_cap() < MAX_BLOCK_BYTES);
+    }
 }

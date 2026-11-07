@@ -1,16 +1,18 @@
 // src/chain/reorg.rs
 use anyhow::{bail, Context, Result};
 
+use crate::chain::body_fault::{blame_rejection, Blame, BodyDropped};
 use crate::chain::failpoints;
 use crate::chain::index::{get_hidx, HeaderIndex};
 use crate::chain::reorg_journal::{journal_clear, journal_read, journal_write, Phase, ReorgJournal};
+use crate::chain::stored_chain::{best_complete, RejectedChains};
 use crate::crypto::txid;
 use crate::net::mempool::Mempool;
 use crate::state::app_state::epoch_of;
-use crate::state::db::{get_tip, k_bad, k_block, k_undo, set_tip, Stores};
+use crate::state::db::{get_tip, k_bad, k_bad_prefix, k_block, k_undo, set_tip, Stores};
 use crate::state::utxo::{undo_block, validate_and_apply_block};
 use crate::types::{Block, Hash32};
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 fn hex32(h: &Hash32) -> String {
     format!("0x{}", hex::encode(h))
@@ -163,11 +165,6 @@ fn header_min_valid(bh: &Hash32, blk: &Block) -> bool {
     true
 }
 
-fn is_missing_block_bytes_err(e: &anyhow::Error) -> bool {
-    let s = format!("{e:#}");
-    s.contains("missing block bytes for 0x")
-}
-
 fn chain_to_tip_safe(db: &Stores, tip: &Hash32) -> Result<Vec<Hash32>> {
     // Try hdr chain first, but only accept it if ALL block bytes exist.
     if let Ok(chain) = chain_to_tip_from_hdr(db, tip) {
@@ -208,7 +205,10 @@ fn hash_from_block_key(k: &[u8]) -> Option<Hash32> {
 // ----------------------
 
 //Iterative. No recursive chain walk
-fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>> {
+fn best_tip_from_blocks_only(
+    db: &Stores,
+    rejected: &HashSet<Hash32>,
+) -> Result<Option<(Hash32, u64, u128)>> {
     let mut best: Option<(Hash32, u64, u128)> = None;
 
     for kv in db.blocks.iter() {
@@ -222,7 +222,7 @@ fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>>
         let mut valid = true;
 
         loop {
-            if !seen.insert(cur) {
+            if !seen.insert(cur) || rejected.contains(&cur) {
                 valid = false;
                 break;
             }
@@ -286,28 +286,23 @@ fn best_tip_from_blocks_only(db: &Stores) -> Result<Option<(Hash32, u64, u128)>>
     Ok(best)
 }
 
-fn best_tip_with_block_bytes(db: &Stores) -> Result<Option<HeaderIndex>> {
-    let mut best: Option<HeaderIndex> = None;
-
+/// The highest-work stored block whose header chain has every body stored and passes no excluded
+/// block (`chain::stored_chain::best_complete`, down to genesis).
+fn best_rebuildable_tip_with_block_bytes(
+    db: &Stores,
+    on_rejected: &mut RejectedChains,
+) -> Result<Option<HeaderIndex>> {
+    let mut candidates: Vec<HeaderIndex> = Vec::new();
     for kv in db.blocks.iter() {
         let (k, _v) = kv.context("blocks.iter()")?;
         let Some(h) = hash_from_block_key(&k) else { continue };
-
-        let Some(hi) = get_hidx(db, &h).ok().flatten() else { continue };
-
-        best = match best {
-            None => Some(hi),
-            Some(cur) => {
-                if better_candidate(hi.chainwork, hi.height, &hi.hash, cur.chainwork, cur.height, &cur.hash) {
-                    Some(hi)
-                } else {
-                    Some(cur)
-                }
-            }
-        };
+        if let Some(hi) = get_hidx(db, &h).ok().flatten() {
+            candidates.push(hi);
+        }
     }
-
-    Ok(best)
+    best_complete(db, candidates, on_rejected, |hi| Ok(hi.height == 0), |h| {
+        can_rebuild_to_tip(db, h).unwrap_or(false)
+    })
 }
 
 fn must_hidx(db: &Stores, hash: &Hash32) -> Result<HeaderIndex> {
@@ -338,7 +333,8 @@ fn best_header_tip(db: &Stores) -> Result<Option<HeaderIndex>> {
 
     Ok(best)
 }
-fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<HeaderIndex> {
+/// `pub(crate)` for `net::node`'s deferred-reorg bookkeeping, a visibility change only.
+pub(crate) fn find_ancestor(db: &Stores, mut a: HeaderIndex, mut b: HeaderIndex) -> Result<HeaderIndex> {
     while a.height > b.height {
         a = must_hidx(db, &a.parent)?;
     }
@@ -396,7 +392,8 @@ fn jw(db: &Stores, j: &mut ReorgJournal, ctx: &'static str) -> Result<()> {
 }
 
 // Bad-block persistence
-fn is_bad(db: &Stores, h: &Hash32) -> Result<bool> {
+/// `pub(crate)` for `net::node`'s deferred-reorg bookkeeping, a visibility change only.
+pub(crate) fn is_bad(db: &Stores, h: &Hash32) -> Result<bool> {
     Ok(db.meta.get(k_bad(h))?.is_some())
 }
 
@@ -404,6 +401,40 @@ fn mark_bad(db: &Stores, h: &Hash32, why: &str) -> Result<()> {
     db.meta.insert(k_bad(h), b"1")?;
     println!("[reorg] marked bad {} ({})", hex32(h), why);
     Ok(())
+}
+
+/// Classifies an error returned by `validate_and_apply_block`. Its consensus rejections are
+/// `bail!`/`anyhow!` messages and secp256k1 errors; a sled, bincode or io error in the chain was
+/// raised by this node's own trees, so the block itself is not at fault
+/// (tests/reorg_bad_mark_scope.rs).
+fn is_block_fault(e: &anyhow::Error) -> bool {
+    !e.chain().any(|c| {
+        c.is::<sled::Error>() || c.is::<bincode::Error>() || c.is::<std::io::Error>()
+    })
+}
+
+/// Context on a rebuild error when `validate_and_apply_block` rejected that block's content.
+#[derive(Debug)]
+struct RejectedBlock(Hash32);
+
+impl std::fmt::Display for RejectedBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "block {} failed validation", hex32(&self.0))
+    }
+}
+
+/// Removes every `bad:` mark. The marks are local liveness state derived from the trees a rebuild
+/// clears, and the rebuild re-validates every block it replays.
+fn clear_bad_marks(db: &Stores) -> Result<usize> {
+    let keys = db
+        .meta
+        .scan_prefix(k_bad_prefix())
+        .keys()
+        .collect::<sled::Result<Vec<_>>>()?;
+    for k in &keys {
+        db.meta.remove(k)?;
+    }
+    Ok(keys.len())
 }
 
 // Mempool helpers
@@ -666,6 +697,8 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
     db.utxo_meta.clear().context("rebuild utxo_meta.clear")?;
     db.undo.clear().context("rebuild undo.clear")?;
     db.app.clear().context("rebuild app.clear")?;
+    let cleared = clear_bad_marks(db).context("rebuild clear bad marks")?;
+    println!("[reorg] rebuild: cleared {cleared} bad-block marks");
     flush_state_step(db).context("rebuild flush after clears")?;
 
     for (i, bh) in chain.iter().enumerate() {
@@ -673,8 +706,16 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 
         let height = i as u64;
 
-        validate_and_apply_block(db, &blk, epoch_of(height), height)
-            .with_context(|| format!("rebuild validate_and_apply_block {}", hex32(bh)))?;
+        if let Err(e) = validate_and_apply_block(db, &blk, epoch_of(height), height) {
+            let e = e.context(format!("rebuild validate_and_apply_block {}", hex32(bh)));
+            return Err(if !is_block_fault(&e) {
+                e
+            } else if blame_rejection(db, bh, &blk)? == Blame::Body {
+                e.context(BodyDropped(*bh))
+            } else {
+                e.context(RejectedBlock(*bh))
+            });
+        }
 
         mempool_remove_mined(mempool, &blk);
 
@@ -705,29 +746,25 @@ fn consider_best_tip(
     };
 }
 
-fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &'static str)>> {
-    let meta_tip = get_tip(db).ok().flatten();
+fn pick_best_rebuildable_tip(
+    db: &Stores,
+    own_tips: &[(Hash32, &'static str)],
+    rejected: &HashSet<Hash32>,
+) -> Result<Option<(Hash32, u64, u128, &'static str)>> {
+    let mut on_rejected = RejectedChains::new(db, rejected)?;
 
     let mut best: Option<(Hash32, u64, u128, &'static str)> = None;
 
-    if let Some(t) = meta_tip {
-        if can_rebuild_to_tip(db, &t).unwrap_or(false) {
+    for &(t, tag) in own_tips {
+        if !on_rejected.contains(&t)? && can_rebuild_to_tip(db, &t).unwrap_or(false) {
             if let Ok(Some(hi)) = get_hidx(db, &t) {
-                consider_best_tip(&mut best, hi.hash, hi.height, hi.chainwork, "meta_tip");
+                consider_best_tip(&mut best, hi.hash, hi.height, hi.chainwork, tag);
             }
         }
     }
 
-    if let Some(hi) = best_tip_with_block_bytes(db)? {
-        if can_rebuild_to_tip(db, &hi.hash).unwrap_or(false) {
-            consider_best_tip(
-                &mut best,
-                hi.hash,
-                hi.height,
-                hi.chainwork,
-                "hdr_best_with_block_bytes",
-            );
-        }
+    if let Some(hi) = best_rebuildable_tip_with_block_bytes(db, &mut on_rejected)? {
+        consider_best_tip(&mut best, hi.hash, hi.height, hi.chainwork, "hdr_best_with_block_bytes");
     }
 
     if best.is_some() {
@@ -735,7 +772,7 @@ fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &
     }
 
     if let Some((h, height, cw)) =
-        best_tip_from_blocks_only(db).context("pick_best best_tip_from_blocks_only")?
+        best_tip_from_blocks_only(db, rejected).context("pick_best best_tip_from_blocks_only")?
     {
         if can_rebuild_to_tip(db, &h).unwrap_or(false) {
             consider_best_tip(&mut best, h, height, cw, "blocks_only_best");
@@ -746,28 +783,59 @@ fn pick_best_rebuildable_tip(db: &Stores) -> Result<Option<(Hash32, u64, u128, &
 }
 
 fn recover_journal_less(db: &Stores, mempool: Option<&Mempool>) -> Result<()> {
+    recover_journal_less_from(db, mempool, &[], HashSet::new())
+}
+
+/// Journal-less recovery. `own_tips` are tips this node held before recovery moved meta:tip and
+/// stay candidates beside it; `rejected` holds blocks a caller already found invalid.
+fn recover_journal_less_from(
+    db: &Stores,
+    mempool: Option<&Mempool>,
+    own_tips: &[(Hash32, &'static str)],
+    mut rejected: HashSet<Hash32>,
+) -> Result<()> {
     eprintln!("[reorg] ENTER journal-less recovery branch");
     println!("[reorg] recovery(journal-less): selecting canonical tip");
 
     let meta_tip = get_tip(db).ok().flatten();
     println!("[reorg] journal-less: meta_tip={}", fmt_opt32(meta_tip));
+    let mut candidates = own_tips.to_vec();
+    candidates.extend(meta_tip.map(|t| (t, "meta_tip")));
 
-    match pick_best_rebuildable_tip(db).context("journal-less pick_best_rebuildable_tip")? {
-        Some((h, height, cw, tag)) => {
-            println!(
-                "[reorg] journal-less: selected {} tip={} (h={}, w={})",
-                tag,
-                hex32(&h),
-                height,
-                cw
-            );
-
-            rebuild_state_to_tip(db, &h, mempool)
-                .with_context(|| format!("journal-less rebuild_state_to_tip({})", tag))?;
-            flush_state_step(db).ok();
-        }
-        None => {
+    // `rejected` collects blocks whose content failed validation; chains through them are skipped.
+    loop {
+        let picked = pick_best_rebuildable_tip(db, &candidates, &rejected)
+            .context("journal-less pick_best_rebuildable_tip")?;
+        let Some((h, height, cw, tag)) = picked else {
             println!("[reorg] journal-less: no rebuildable candidate tip found");
+            break;
+        };
+        println!(
+            "[reorg] journal-less: selected {} tip={} (h={}, w={})",
+            tag,
+            hex32(&h),
+            height,
+            cw
+        );
+
+        match rebuild_state_to_tip(db, &h, mempool) {
+            Ok(()) => {
+                flush_state_step(db).ok();
+                break;
+            }
+            Err(e) => {
+                if e.downcast_ref::<BodyDropped>().is_some() {
+                    // The body is gone, so no chain through it is rebuildable now.
+                    println!("[reorg] journal-less: {e:#}; selecting again");
+                    continue;
+                }
+                let bad = e.downcast_ref::<RejectedBlock>().map(|r| r.0);
+                // A block rejected twice means the selection did not exclude it: stop, do not loop.
+                if !bad.is_some_and(|b| rejected.insert(b)) {
+                    return Err(e.context(format!("journal-less rebuild_state_to_tip({tag})")));
+                }
+                println!("[reorg] journal-less: {e:#}; selecting again without that block");
+            }
         }
     }
 
@@ -1002,12 +1070,16 @@ return recover_journal_less(db, mempool);
 
             // --- APPLY remainder ---
             if !ensure_apply_blocks_present(db, &j.apply_path, &j.new_tip)? {
+                // An apply-path body is gone (dropped by chain::body_fault, or lost): the fork
+                // cannot complete now. Recover the heaviest complete chain, the journal's old tip a
+                // candidate, rather than staying at the ancestor; sync fetches the body later.
                 println!(
-                    "[reorg] recovery: missing block bytes for apply path; leaving journal in-place (tip={})",
+                    "[reorg] recovery: missing block bytes for apply path; discarding the journal (tip={})",
                     fmt_opt32(get_tip(db).ok().flatten())
                 );
-                mempool_prune_if_present(db, mempool);
-                return Ok(());
+                journal_clear(db).context("recover journal_clear(missing apply body)")?;
+                flush_state_step(db).context("recover flush(journal_clear missing apply body)")?;
+                return recover_journal_less_from(db, mempool, &[(j.old_tip, "journal_old_tip")], HashSet::new());
             }
 
             for i in (j.cursor as usize)..j.apply_path.len() {
@@ -1027,8 +1099,22 @@ return recover_journal_less(db, mempool);
                     (chain_to_tip_from_blocks(db, &bh)?.len().saturating_sub(1)) as u64
                 };
 
-                validate_and_apply_block(db, &blk, epoch_of(height), height)
-                    .with_context(|| format!("recover validate_and_apply_block {}", hex32(&bh)))?;
+                if let Err(e) = validate_and_apply_block(db, &blk, epoch_of(height), height) {
+                    let e = e.context(format!("recover validate_and_apply_block {}", hex32(&bh)));
+                    if !is_block_fault(&e) {
+                        return Err(e);
+                    }
+                    // The journal's target chain does not validate: recover as a boot without
+                    // a journal would, skipping this block when the rejection holds for its hash.
+                    let mut rejected = HashSet::new();
+                    if blame_rejection(db, &bh, &blk)? == Blame::Block {
+                        rejected.insert(bh);
+                    }
+                    println!("[reorg] recovery(journal): {e:#}; discarding the journal");
+                    journal_clear(db).context("recover journal_clear(rejected apply)")?;
+                    flush_state_step(db).context("recover flush(journal_clear rejected apply)")?;
+                    return recover_journal_less_from(db, mempool, &[(j.old_tip, "journal_old_tip")], rejected);
+                }
 
                 mempool_remove_mined(mempool, &blk);
 
@@ -1230,6 +1316,9 @@ failpoints::hit("reorg:after_undo");
 
     let mut applied_new: Vec<Hash32> = Vec::with_capacity(apply_path.len());
     let mut last_applying: Option<Hash32> = None;
+    // Only a rejection by validate_and_apply_block that holds for the hash (Blame::Block) marks a
+    // block bad; the other steps of the loop read or write this node's own trees.
+    let mut block_fault = false;
 
     // ----------------------
     // APPLY: state, tip, journal, ONE flush
@@ -1243,8 +1332,19 @@ for (i, bh) in apply_path.iter().enumerate() {
         load_block(db, bh).with_context(|| format!("[reorg] load_block {}", hex32(bh)))?;
     let hi = must_hidx(db, bh).with_context(|| format!("[reorg] must_hidx {}", hex32(bh)))?;
 
-    validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height)
-        .with_context(|| format!("[reorg] validate_and_apply_block {}", hex32(bh)))?;
+    if let Err(e) = validate_and_apply_block(db, &blk, epoch_of(hi.height), hi.height) {
+        let e = e.context(format!("[reorg] validate_and_apply_block {}", hex32(bh)));
+        if !is_block_fault(&e) {
+            return Err(e);
+        }
+        if blame_rejection(db, bh, &blk)? == Blame::Body {
+            return Err(e.context(BodyDropped(*bh)));
+        }
+        block_fault = true;
+        return Err(e);
+    }
+    // Recorded before any later step can fail, so the rollback below undoes this block too.
+    applied_new.push(*bh);
 
     mempool_remove_mined(mempool, &blk);
 
@@ -1254,8 +1354,6 @@ for (i, bh) in apply_path.iter().enumerate() {
 
     // allow tip to point here (presence check)
     set_tip_checked(db, bh, "apply")?;
-
-            applied_new.push(*bh);
 
             // journal progress
             j.cursor = (i as u64) + 1;
@@ -1275,13 +1373,13 @@ for (i, bh) in apply_path.iter().enumerate() {
             last_applying.map(|h| hex32(&h))
         );
 
-        if !is_missing_block_bytes_err(&e) {
+        if block_fault {
             if let Some(bad_bh) = last_applying {
                 let _ = mark_bad(db, &bad_bh, "apply failed");
                 let _ = mark_bad(db, new_tip, "apply path contains invalid block");
             }
         } else {
-            println!("[reorg] apply failed due to missing local block bytes; not marking branch bad.");
+            println!("[reorg] apply failed on a dropped body or a local storage, codec or tip error; not marking branch bad.");
         }
 
         // Roll back applied_new (each undo commits with a flush; journal is still "apply" in progress)

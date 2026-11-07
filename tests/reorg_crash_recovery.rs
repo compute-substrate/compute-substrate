@@ -1,13 +1,14 @@
 // tests/reorg_crash_recovery.rs
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tempfile::TempDir;
 
 use csd::chain::index::{get_hidx, HeaderIndex};
 use csd::chain::reorg::{maybe_reorg_to, recover_if_needed};
-use csd::chain::reorg_journal::{journal_clear, journal_write, Phase, ReorgJournal};
+use csd::chain::reorg_journal::{journal_clear, journal_read, journal_write, Phase, ReorgJournal};
 use csd::state::app_state::epoch_of;
-use csd::state::db::{get_tip, set_tip, Stores};
+use csd::state::db::{get_tip, k_block, set_tip, Stores};
 use csd::state::fingerprint::{fingerprint, fmt_fp};
 use csd::state::utxo::{undo_block, validate_and_apply_block};
 
@@ -252,5 +253,84 @@ fn crash_fuzz_reorg_then_recover_matches_clean_replay() -> Result<()> {
         drop(db_replay);
     }
 
+    Ok(())
+}
+
+/// The meta tree (tip, journal, bad marks) and the four state trees, in key order.
+fn dump_state(db: &Stores) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut out = Vec::new();
+    for (tag, tree) in [(b'M', &db.meta), (b'U', &db.utxo), (b'T', &db.utxo_meta), (b'X', &db.undo), (b'A', &db.app)] {
+        for kv in tree.iter() {
+            let (k, v) = kv?;
+            let mut key = vec![tag];
+            key.extend_from_slice(&k);
+            out.push((key, v.to_vec()));
+        }
+    }
+    Ok(out)
+}
+
+// No fallback: when a body on the path to the journal's resume tip is missing, recovery fails at
+// its first can_rebuild_to_tip check and writes nothing, so the boot fails and the next start
+// retries with the journal intact. The ancestor, old-tip and
+// "cannot rebuild" branches after that check stay unreachable.
+#[test]
+fn missing_resume_tip_body_fails_recovery_and_changes_no_state() -> Result<()> {
+    for phase in [Phase::Undo, Phase::Apply] {
+        let tmp = TempDir::new()?;
+        let db = open_db(&tmp)?;
+        let start = 1_700_600_000u64;
+        let a = build_base_chain(&db, 10, start)?;
+        let fork = build_fork_index_only(&db, &a, 5, 7, start)?;
+        let (old_tip, new_tip) = (a[9], *fork.last().unwrap());
+        flush_all_state_trees(&db)?;
+        let (anc, undo_path, apply_path) = build_paths(&db, old_tip, new_tip)?;
+        let mut j = ReorgJournal {
+            seq: 0,
+            old_tip,
+            new_tip,
+            ancestor: anc.hash,
+            phase: Phase::Undo,
+            cursor: 0,
+            undo_path: undo_path.clone(),
+            apply_path: apply_path.clone(),
+        };
+        jw_sim(&db, &mut j, "jw_sim(start)")?;
+
+        // Resume tip of the interrupted reorg: old_tip at (Undo, 0), apply_path[1] at (Apply, 2).
+        let resume_tip = if phase == Phase::Undo {
+            old_tip
+        } else {
+            for (i, bh) in undo_path.iter().enumerate() {
+                undo_block(&db, bh)?;
+                set_tip(&db, &must_hidx(&db, bh)?.parent)?;
+                j.cursor = (i as u64) + 1;
+                jw_sim(&db, &mut j, "jw_sim(progress_undo)")?;
+            }
+            j.phase = Phase::Apply;
+            j.cursor = 0;
+            jw_sim(&db, &mut j, "jw_sim(start_apply)")?;
+            for (i, bh) in apply_path.iter().take(2).enumerate() {
+                apply_block_by_hash(&db, bh)?;
+                j.cursor = (i as u64) + 1;
+                jw_sim(&db, &mut j, "jw_sim(progress_apply)")?;
+            }
+            apply_path[1]
+        };
+        db.blocks.remove(k_block(&resume_tip))?;
+        flush_all_state_trees(&db)?;
+        let before = dump_state(&db)?;
+
+        for boot in 1..=2 {
+            let err = recover_if_needed(&db, None)
+                .expect_err("recovery must fail while the resume tip's body is missing");
+            assert!(
+                format!("{err:#}").contains("can_rebuild_to_tip(resume_tip)"),
+                "{phase:?} boot {boot}: failed somewhere else: {err:#}"
+            );
+            assert!(dump_state(&db)? == before, "{phase:?} boot {boot}: the failed recovery changed state");
+        }
+        assert!(journal_read(&db)?.is_some(), "{phase:?}: the journal must survive for the next boot");
+    }
     Ok(())
 }

@@ -17,7 +17,11 @@ fn h20(n: u8) -> Hash20 {
     [n; 20]
 }
 
+// IGNORED pending consensus activation: see consensus_rejects_bad_coinbase_script_sig_format.rs.
+// The height-commitment rule is gated at u64::MAX in src/state/utxo.rs, so a wrong-height
+// coinbase is ACCEPTED by design today. Un-ignore as part of the activation change.
 #[test]
+#[ignore = "rule inactive until COINBASE_HEIGHT_PREFIX_ACTIVATION_HEIGHT is set"]
 fn rejects_block_with_coinbase_height_mismatch() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;

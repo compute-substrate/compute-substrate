@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 
 parking_lot = "0.12"
+libc = "0.2"  # set PoW worker threads to SCHED_IDLE (Linux) so sync never starves
 
 # --- Error handling ---
 anyhow = "1.0"
@@ -28,7 +29,6 @@ num-bigint = "0.4"
 num-traits = "0.2"
 
 # --- Async ---
-async-trait = "0.1"
 futures = "0.3"
 
 # --- Cryptography ---
@@ -51,12 +51,21 @@ tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "signal", "
 axum = "0.7"
 
 # --- Networking ---
-libp2p = {     version = "0.54", features = [   "tcp",  "dns",  "noise",  "yamux",  "gossipsub", "request-response", "tokio",  "macros", "identify"  ]}
+# Exact: a libp2p bump re-reads what node.rs relies on (docs/behaviour.md "Dependency internals the
+# code relies on"). No `dns`: the transport has no DNS layer, so the feature only compiled an unused
+# resolver.
+libp2p = { version = "=0.57.0", features = ["tcp", "noise", "yamux", "gossipsub", "request-response", "tokio", "macros", "identify"] }
+
+# --- Allocator ---
+# jemalloc returns freed memory to the OS (dirty/muzzy decay) and avoids glibc's per-thread-arena
+# fragmentation that made the RSS of a node serving RPC reads climb under churn until it wedged.
+# sled is pure-Rust so it allocates through this global allocator too.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 [features]
 default = []
 test-bypass = []
-explorer-index = []
 cuda = []
 
 [[bin]]

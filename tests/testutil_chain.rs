@@ -331,3 +331,6 @@ pub fn assert_tip_eq(db: &Stores, want: Hash32) -> Result<()> {
     );
     Ok(())
 }
+
+#[allow(unused_imports)] // not every test that includes this module measures CPU time
+pub use csd::testutil::{fastest, thread_cpu};

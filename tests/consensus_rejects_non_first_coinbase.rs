@@ -1,4 +1,5 @@
 // tests/consensus_rejects_non_first_coinbase.rs
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 

@@ -60,6 +60,19 @@ fn insert_utxo(db: &Stores, op: OutPoint, value: u64, owner: [u8; 20]) -> Result
     Ok(())
 }
 
+/// The pool's stats must describe exactly the txs it holds, `(tx, fee)` pairs: count, serialized
+/// bytes, and the lowest and highest feerate (ppm per byte, the pool's unit). A removal that left
+/// its `(feerate, txid)` in the eviction order would show in the feerates.
+fn assert_stats(mp: &Mempool, held: &[(&Transaction, u64)]) {
+    let c = csd::codec::consensus_bincode();
+    let rate = |tx: &Transaction, fee: u64| fee * 1_000_000 / c.serialized_size(tx).unwrap();
+    let s = mp.stats();
+    assert_eq!(s.txs, held.len());
+    assert_eq!(s.total_bytes, held.iter().map(|(tx, _)| c.serialized_size(*tx).unwrap() as usize).sum::<usize>());
+    assert_eq!(s.min_feerate_ppm, held.iter().map(|(tx, fee)| rate(tx, *fee)).min(), "min feerate");
+    assert_eq!(s.max_feerate_ppm, held.iter().map(|(tx, fee)| rate(tx, *fee)).max(), "max feerate");
+}
+
 fn make_tx(prev: OutPoint, value: u64, fee: u64, to: [u8; 20]) -> Transaction {
     let send = value - fee;
 
@@ -111,6 +124,7 @@ fn mempool_remove_mined_block_and_conflicts() -> Result<()> {
     assert_eq!(mp.insert_checked(&db, tx2.clone())?, true);
     assert_eq!(mp.insert_checked(&db, tx3.clone())?, true);
     assert_eq!(mp.len(), 3);
+    assert_stats(&mp, &[(&tx1, 1_000), (&tx2, 2_000), (&tx3, 3_000)]);
 
     // conflict tx is not inserted, but we’ll still test remove_conflicts path via mined inputs
     let conflict_with_tx3 = make_tx(dummy_prev(3), v, 4_000, h20(9));
@@ -148,6 +162,7 @@ fn mempool_remove_mined_block_and_conflicts() -> Result<()> {
     assert!(mp.contains(&txid(&tx1)));
     assert!(mp.contains(&txid(&tx3)));
     assert_eq!(mp.len(), 2);
+    assert_stats(&mp, &[(&tx1, 1_000), (&tx3, 3_000)]);
 
     // Now mine a tx that spends prevout 3; that should remove tx3 from mempool
     let blk2 = Block {
@@ -180,6 +195,7 @@ fn mempool_remove_mined_block_and_conflicts() -> Result<()> {
     assert!(mp.contains(&txid(&tx1)));
     assert!(!mp.contains(&txid(&tx3)));
     assert_eq!(mp.len(), 1);
+    assert_stats(&mp, &[(&tx1, 1_000)]);
 
     Ok(())
 }

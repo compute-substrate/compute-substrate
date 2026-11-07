@@ -1,4 +1,5 @@
 // tests/reorg_equivalence.rs
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 

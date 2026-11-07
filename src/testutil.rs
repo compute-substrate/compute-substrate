@@ -15,12 +15,14 @@ use crate::state::db::{k_block, set_tip, Stores};
 use crate::state::utxo::validate_and_apply_block;
 use crate::types::{Block, BlockHeader, Hash32, Transaction};
 
-/// Enable test bypass knobs used by tests/drivers.
+/// Set by `set_test_env`: the header miner below skips the nonce search. A process-wide flag
+/// rather than an environment variable, so no thread ever writes the environment.
+static BYPASS_POW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable the test bypass used by the crash driver (`src/bin/reorg_crash_driver.rs`).
 /// Not cfg(test): the crash driver is a normal binary.
 pub fn set_test_env() {
-    // If your bypass knobs differ, change here only.
-    std::env::set_var("CSD_TEST_BYPASS_POW", "1");
-    std::env::set_var("CSD_TEST_ALLOW_FOREIGN_GENESIS", "1");
+    BYPASS_POW.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Deterministic test miner (20 bytes).
@@ -69,7 +71,7 @@ pub fn merkle_root(txs: &[Transaction]) -> Hash32 {
 /// Mine a header by scanning nonce until pow_ok(hash, bits).
 /// If test bypass is enabled, skip mining and keep nonce=0.
 fn mine_header(mut hdr: BlockHeader) -> Result<BlockHeader> {
-    if std::env::var("CSD_TEST_BYPASS_POW").is_ok() {
+    if BYPASS_POW.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(hdr);
     }
 
@@ -135,7 +137,7 @@ fn apply_mined_block(
 /// Returns block hashes by height.
 ///
 /// `bits` is injected by the caller (driver/tests) and may be the easy pow limit
-/// when CSD_TEST_BYPASS_POW is enabled.
+/// when `set_test_env` has enabled the bypass.
 pub fn build_chain(db: &Stores, n: u64, start_time: u64, bits: u32) -> Result<Vec<Hash32>> {
     let mut out = Vec::with_capacity(n as usize);
     let mut prev = [0u8; 32];
@@ -178,4 +180,79 @@ pub fn build_fork(
     }
 
     Ok(out)
+}
+
+/// CPU time of the calling thread. The cost tests measure work that runs on the test thread, and
+/// unlike wall time this does not grow while the thread waits for a core on a loaded host.
+pub fn thread_cpu() -> std::time::Duration {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) }, 0);
+    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// The least thread CPU time `f` took over `runs` runs.
+pub fn fastest<F: FnMut()>(runs: usize, mut f: F) -> std::time::Duration {
+    (0..runs)
+        .map(|_| {
+            let t = thread_cpu();
+            f();
+            thread_cpu() - t
+        })
+        .min()
+        .unwrap()
+}
+
+/// Applies, with no header checks, a block whose coinbase pays a funding key and then one whose
+/// transactions pay one coin to each of `others` addresses and `mine` coins to `target`, each
+/// with its header index, and moves the tip to it. The index reconciler is left to the caller.
+pub fn chain_paying(db: &Stores, others: usize, target: crate::types::Hash20, mine: usize) -> Result<()> {
+    use crate::chain::index::{put_hidx, HeaderIndex};
+    use crate::chain::mine::merkle_root_txids;
+    use crate::crypto::{hash160, sign_tx_compact_secp256k1, txid};
+    use crate::params::block_reward;
+    use crate::types::{AppPayload, OutPoint, TxIn, TxOut};
+    const SK: [u8; 32] = [23u8; 32];
+    let funder = hash160(&sign_tx_compact_secp256k1(&coinbase([0u8; 20], 1, 0, None), SK).1);
+    let mut prev = [0u8; 32];
+    let mut apply = |height: u64, txs: Vec<Transaction>| -> Result<()> {
+        let ids: Vec<Hash32> = txs.iter().map(txid).collect();
+        let header = BlockHeader { version: 1, prev, merkle: merkle_root_txids(&ids), time: height, bits: 0, nonce: 0 };
+        let hash = header_hash(&header);
+        let block = Block { header, txs };
+        db.blocks.insert(k_block(&hash), codec::consensus_bincode().serialize(&block)?)?;
+        put_hidx(db, &HeaderIndex { hash, parent: prev, height, chainwork: 0, bits: 0, time: height })?;
+        validate_and_apply_block(db, &block, epoch_of(height), height)?;
+        set_tip(db, &hash)?;
+        prev = hash;
+        Ok(())
+    };
+    let cb0 = coinbase(funder, block_reward(0), 0, None);
+    let mut coin = (OutPoint { txid: txid(&cb0), vout: 0 }, block_reward(0));
+    apply(0, vec![cb0])?;
+    let mut payees: Vec<crate::types::Hash20> = (0..others as u32)
+        .map(|i| {
+            let mut a = [0x5au8; 20];
+            a[..4].copy_from_slice(&i.to_be_bytes());
+            a
+        })
+        .collect();
+    payees.extend(std::iter::repeat_n(target, mine));
+    let mut txs = vec![coinbase(funder, block_reward(1), 1, None)];
+    for chunk in payees.chunks(511) {
+        let change = coin.1 - chunk.len() as u64;
+        let mut outputs: Vec<TxOut> = chunk.iter().map(|a| TxOut { value: 1, script_pubkey: *a }).collect();
+        outputs.push(TxOut { value: change, script_pubkey: funder });
+        let mut tx = Transaction {
+            version: 1,
+            inputs: vec![TxIn { prevout: coin.0, script_sig: vec![] }],
+            outputs,
+            locktime: 0,
+            app: AppPayload::None,
+        };
+        let (sig, pubkey) = sign_tx_compact_secp256k1(&tx, SK);
+        tx.inputs[0].script_sig = [&[64u8][..], &sig, &[33u8], &pubkey].concat();
+        coin = (OutPoint { txid: txid(&tx), vout: chunk.len() as u32 }, change);
+        txs.push(tx);
+    }
+    apply(1, txs)
 }

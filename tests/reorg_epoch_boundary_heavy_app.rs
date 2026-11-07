@@ -1,5 +1,6 @@
 // tests/reorg_epoch_boundary_heavy_app.rs
 
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -156,7 +157,10 @@ assert!(boundary_h >= 3, "boundary too early for fork setup");
 
 // Move fork later so shared prefix contains enough funding outputs.
 // We still cross the SAME epoch boundary, just deeper in history.
-let fork_parent_height = boundary_h + 40;
+// Funds collected below = fork_parent_height - 1 (prefix blocks, skipping the first two);
+// the branches need >= 86, so the fork parent must sit at height >= 87 no matter where
+// the epoch boundary lies (EPOCH_LEN=30 puts it at 30, and +40 undershoots: 69 < 86).
+let fork_parent_height = (boundary_h + 40).max(87);
 
 // Shared prefix must extend beyond fork point.
 let shared_len = fork_parent_height + 1;

@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use crate::crypto::txid;
 use crate::params::{MAX_TX_BYTES, MAX_TX_INPUTS, MAX_TX_OUTPUTS};
 use crate::state::db::get_utxo;
-use crate::state::utxo::validate_tx_for_mempool;
+use crate::state::utxo::{validate_app_state_mempool, validate_tx_for_mempool};
 use crate::types::{Block, Hash32, OutPoint, Transaction};
 
 
@@ -34,6 +34,22 @@ pub struct Mempool {
     max_spent: usize,
 }
 
+// Unmined-tx time-to-live (in-memory policy only; never touches consensus bytes). The mempool has
+// no RBF ("input already spent in mempool" rejects replacements) and, without this, no expiry; a
+// valid tx that missed its single gossip window would sit here FOREVER holding its inputs hostage in
+// this node's available-utxo view (a user-visible fund freeze until a process restart). 36h is
+// orders of magnitude above any honest inclusion delay on a 120s-block chain, so expiry can only
+// ever free a genuinely stuck tx; a wallet then simply resubmits. Swept in prune() (runs on
+// every block connect + reorg).
+const MEMPOOL_TX_TTL_SECS: u64 = 36 * 3600;
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 struct Inner {
     // txid -> tx
@@ -50,6 +66,10 @@ struct Inner {
     // eviction order: lowest feerate first, tie-break by txid (deterministic)
     // item: (feerate_ppm, txid)
     eviction: BTreeSet<(u64, Hash32)>,
+
+    // txid -> unix seconds first accepted (for the TTL sweep; a reorg re-add restarts the clock,
+    // which only ever EXTENDS a stuck tx's life; acceptable, and it keeps reorg.rs untouched)
+    seen_at: HashMap<Hash32, u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +109,22 @@ impl Mempool {
 
     pub fn contains(&self, id: &Hash32) -> bool {
         self.inner.read().unwrap().txs.contains_key(id)
+    }
+
+    pub fn get(&self, id: &Hash32) -> Option<Transaction> {
+        self.inner.read().unwrap().txs.get(id).cloned()
+    }
+
+    /// True when the pool holds the tx `id` and its consensus encoding is `tx_bytes`, script_sigs
+    /// included. `contains` matches any tx with that txid, and a txid leaves the script_sigs out
+    /// (`crypto::txid`).
+    pub fn holds_encoding(&self, id: &Hash32, tx_bytes: &[u8]) -> bool {
+        let r = self.inner.read().unwrap();
+        r.txs.get(id).is_some_and(|held| {
+            crate::codec::consensus_bincode()
+                .serialize(held)
+                .is_ok_and(|b| b == tx_bytes)
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -153,6 +189,22 @@ impl Mempool {
             .iter()
             .next_back()
             .map(|x| x.0)
+    }
+
+    /// (txid, age_secs) for up to `cap` mempool txs, oldest first: the stranded-tx monitor's source,
+    /// with the pool's tx count read under the same lock. Age derives from the TTL `seen_at`
+    /// stamp; `now` is unix seconds (0 age if a stamp is somehow missing). Read-only; the API
+    /// route that exposes it is loopback-gated.
+    pub fn txids_with_age(&self, now: u64, cap: usize) -> (Vec<(Hash32, u64)>, usize) {
+        let r = self.inner.read().unwrap();
+        let mut out: Vec<(Hash32, u64)> = r
+            .txs
+            .keys()
+            .map(|id| (*id, now.saturating_sub(r.seen_at.get(id).copied().unwrap_or(now))))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1)); // oldest (largest age) first
+        out.truncate(cap);
+        (out, r.txs.len())
     }
 
     pub fn stats(&self) -> MempoolStats {
@@ -247,50 +299,44 @@ impl Mempool {
             }
         }
 
-
-
-        let would_exceed_count = w.txs.len() >= self.max_txs;
-        let would_exceed_bytes = w.total_bytes.saturating_add(tx_bytes) > self.max_bytes;
-
-        if would_exceed_count || would_exceed_bytes {
-            if let Some(min_fr) = w.eviction.iter().next().map(|x| x.0) {
-                if feerate_ppm <= min_fr {
-                    bail!(
+        // Room is planned against all three caps before anything is removed, so a tx that cannot
+        // be admitted leaves the pool as it was.
+        let victims = match plan_admission(
+            &w,
+            Caps { txs: self.max_txs, bytes: self.max_bytes, spent: self.max_spent },
+            tx_bytes,
+            tx.inputs.len(),
+            feerate_ppm,
+        ) {
+            Ok(victims) => victims,
+            Err(short) => {
+                let min_fr = w.eviction.iter().next().map(|x| x.0);
+                match (short, min_fr) {
+                    (Shortfall::Spent, _) => bail!(
+                        "mempool spent index full (spent_len={} + new_inputs={} > max_spent={})",
+                        w.spent.len(),
+                        tx.inputs.len(),
+                        self.max_spent
+                    ),
+                    (_, None) => bail!("mempool state inconsistent: full but eviction set empty"),
+                    (_, Some(min_fr)) if feerate_ppm <= min_fr => bail!(
                         "mempool full; feerate {} not competitive (min={})",
                         feerate_ppm,
                         min_fr
-                    );
+                    ),
+                    (Shortfall::Count, _) => bail!(
+                        "mempool full; no lower-feerate tx available to evict (new_feerate={})",
+                        feerate_ppm
+                    ),
+                    (Shortfall::Bytes, _) => bail!(
+                        "mempool bytes full; no lower-feerate tx available to evict (new_feerate={})",
+                        feerate_ppm
+                    ),
                 }
-            } else {
-                bail!("mempool state inconsistent: full but eviction set empty");
             }
-        }
-
-while w.txs.len() >= self.max_txs {
-    if !evict_one_below_feerate(&mut w, feerate_ppm) {
-        bail!(
-            "mempool full; no lower-feerate tx available to evict (new_feerate={})",
-            feerate_ppm
-        );
-    }
-}
-
-while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
-    if !evict_one_below_feerate(&mut w, feerate_ppm) {
-        bail!(
-            "mempool bytes full; no lower-feerate tx available to evict (new_feerate={})",
-            feerate_ppm
-        );
-    }
-}
-
-        if w.spent.len().saturating_add(tx.inputs.len()) > self.max_spent {
-            bail!(
-                "mempool spent index full (spent_len={} + new_inputs={} > max_spent={})",
-                w.spent.len(),
-                tx.inputs.len(),
-                self.max_spent
-            );
+        };
+        for vid in &victims {
+            remove_locked(&mut w, vid);
         }
 
         for inp in &tx.inputs {
@@ -307,6 +353,7 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
         };
         w.feeinfo.insert(id, fi);
         w.eviction.insert((fi.feerate_ppm, id));
+        w.seen_at.insert(id, unix_now_secs());
 
         Ok(true)
     }
@@ -322,6 +369,26 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
     ///
     /// This walks the eviction index from high -> low, grouping equal-feerate txs
     /// and sorting only inside each feerate bucket.
+    /// TEST-ONLY seam: plant a tx WITHOUT the admission gate (insert_checked). The template
+    /// test uses this to simulate a poison that predates the gate (a tx held from before the gate
+    /// existed, or a refeed path), proving the TEMPLATE builder re-validates and excludes it.
+    #[cfg(test)]
+    pub(crate) fn force_insert_for_test(&self, tx: Transaction, feerate_ppm: u64) -> Hash32 {
+        let id = txid(&tx);
+        let bytes = crate::codec::consensus_bincode()
+            .serialized_size(&tx)
+            .unwrap() as usize;
+        let mut w = self.inner.write().unwrap();
+        for inp in &tx.inputs {
+            w.spent.insert(inp.prevout, id);
+        }
+        w.txs.insert(id, tx);
+        w.total_bytes += bytes;
+        w.feeinfo.insert(id, FeeInfo { fee: 1, bytes: bytes as u32, feerate_ppm });
+        w.eviction.insert((feerate_ppm, id));
+        id
+    }
+
     pub fn sample(&self, max_txs: usize) -> Vec<Transaction> {
         let r = self.inner.read().unwrap();
         let mut out = Vec::with_capacity(max_txs.min(r.txs.len()));
@@ -373,15 +440,19 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
 
     pub fn prune(&self, db: &crate::state::db::Stores) -> usize {
         let c = crate::codec::consensus_bincode();
+        let now = unix_now_secs();
 
-        let snapshot: Vec<(Hash32, Transaction)> = {
+        let snapshot: Vec<(Hash32, Transaction, Option<u64>)> = {
             let r = self.inner.read().unwrap();
-            r.txs.iter().map(|(id, tx)| (*id, tx.clone())).collect()
+            r.txs
+                .iter()
+                .map(|(id, tx)| (*id, tx.clone(), r.seen_at.get(id).copied()))
+                .collect()
         };
 
         let mut removed = 0usize;
 
-        for (id, tx) in snapshot {
+        for (id, tx, seen) in snapshot {
             let oversized = tx.inputs.is_empty()
                 || tx.inputs.len() > MAX_TX_INPUTS
                 || tx.outputs.len() > MAX_TX_OUTPUTS
@@ -396,9 +467,26 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
                 _ => true,
             };
 
-            if oversized || too_low_feerate || validate_tx_for_mempool(db, &tx).is_err() {
+            // TTL: an unmined tx past MEMPOOL_TX_TTL_SECS is expired; with no RBF it would hold
+            // its inputs hostage in this node's view forever otherwise (see the const's comment).
+            // The mempool is RAM-only, so every entry in THIS process was stamped by insert_checked;
+            // a None stamp cannot occur, and if it somehow did we must not expire blind.
+            let expired = match seen {
+                Some(t) => now.saturating_sub(t) > MEMPOOL_TX_TTL_SECS,
+                None => false,
+            };
+
+            if oversized || too_low_feerate || expired || still_admissible(db, &tx).is_err() {
                 if self.remove(&id) {
                     removed += 1;
+                    // log only after the removal actually happened (a racing remove could win)
+                    if expired {
+                        println!(
+                            "[mempool] TTL-expired unmined tx 0x{} after {}h; inputs released",
+                            hex::encode(id),
+                            now.saturating_sub(seen.unwrap_or(now)) / 3600
+                        );
+                    }
                 }
             }
         }
@@ -451,6 +539,24 @@ while w.total_bytes.saturating_add(tx_bytes) > self.max_bytes {
     }
 }
 
+/// What a block or a reorg can change for a held tx: whether the outputs it
+/// spends are still unspent, and the app state its payload is checked against (a proposal an
+/// Attest names, the epoch a Propose or an Attest expires by). Every other check of
+/// `validate_tx_for_mempool` reads only the tx's own bytes and the outputs it spends, which the
+/// txids in its inputs fix, and passed at admission (`insert_checked`; the pool's other writer,
+/// `force_insert_for_test`, is compiled in tests only), so prune does not repeat it: its signature
+/// checks were most of the prune's cost, at every block and before every template.
+fn still_admissible(db: &crate::state::db::Stores, tx: &Transaction) -> Result<()> {
+    // `prune` drops a tx with a spent or missing input first, through its feerate check
+    // (`compute_fee_and_feerate_ppm` fails on it); this loop keeps the rule here as well.
+    for inp in &tx.inputs {
+        if get_utxo(db, &inp.prevout)?.is_none() {
+            bail!("missing utxo");
+        }
+    }
+    validate_app_state_mempool(db, tx)
+}
+
 // ------------------------- fee computation -------------------------
 
 fn compute_fee_and_feerate_ppm(
@@ -497,32 +603,65 @@ fn compute_fee_and_feerate_ppm(
 
 // ------------------------- eviction helpers -------------------------
 
-fn evict_one_lowest_feerate(w: &mut Inner) -> bool {
-    let victim = w.eviction.iter().next().cloned();
-    let Some((_fr, id)) = victim else {
-        return false;
-    };
-    remove_locked(w, &id)
+#[derive(Clone, Copy)]
+struct Caps {
+    txs: usize,
+    bytes: usize,
+    spent: usize,
 }
 
-fn evict_one_below_feerate(w: &mut Inner, new_feerate_ppm: u64) -> bool {
-    let victim = w.eviction.iter().next().cloned();
+/// The cap a tx still overflows once every lower-feerate entry is counted out.
+#[derive(Clone, Copy)]
+enum Shortfall {
+    Spent,
+    Count,
+    Bytes,
+}
 
-    let Some((fr, id)) = victim else {
-        return false;
+/// The entries to evict to admit a tx of `bytes` bytes spending `inputs` outpoints at
+/// `feerate_ppm`: the shortest prefix of the eviction order (lowest feerate first, all below
+/// `feerate_ppm`) after which the count, byte and spent-input caps all hold. It only decides;
+/// `insert_checked` removes the victims once the tx is sure to go in.
+fn plan_admission(
+    w: &Inner,
+    caps: Caps,
+    bytes: usize,
+    inputs: usize,
+    feerate_ppm: u64,
+) -> std::result::Result<Vec<Hash32>, Shortfall> {
+    let (mut n, mut total, mut spent) = (w.txs.len(), w.total_bytes, w.spent.len());
+    let short = |n: usize, total: usize, spent: usize| {
+        if spent.saturating_add(inputs) > caps.spent {
+            Some(Shortfall::Spent)
+        } else if n >= caps.txs {
+            Some(Shortfall::Count)
+        } else if total.saturating_add(bytes) > caps.bytes {
+            Some(Shortfall::Bytes)
+        } else {
+            None
+        }
     };
-
-    if fr >= new_feerate_ppm {
-        return false;
+    let mut victims = Vec::new();
+    for &(fr, vid) in w.eviction.iter() {
+        if short(n, total, spent).is_none() || fr >= feerate_ppm {
+            break;
+        }
+        n -= 1;
+        total = total.saturating_sub(w.feeinfo.get(&vid).map_or(0, |f| f.bytes as usize));
+        spent = spent.saturating_sub(w.txs.get(&vid).map_or(0, |t| t.inputs.len()));
+        victims.push(vid);
     }
-
-    remove_locked(w, &id)
+    match short(n, total, spent) {
+        None => Ok(victims),
+        Some(s) => Err(s),
+    }
 }
 
 fn remove_locked(w: &mut Inner, id: &Hash32) -> bool {
     let Some(tx) = w.txs.remove(id) else {
         return false;
     };
+    w.seen_at.remove(id); // single removal chokepoint: every exit path clears the TTL stamp
 
     if let Some(fi) = w.feeinfo.remove(id) {
         let _ = fi.fee; // retained because useful for future RPC/stats

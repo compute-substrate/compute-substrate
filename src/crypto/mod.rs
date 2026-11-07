@@ -33,7 +33,9 @@ pub fn hash160(pubkey_bytes: &[u8]) -> Hash20 {
     out
 }
 
-fn is_coinbase_input(prevout: &crate::types::OutPoint) -> bool {
+/// Whether an input is a coinbase input. Every other input's script_sig is outside the txid, so
+/// a block hash does not commit to it (see `stripped_tx`).
+pub fn is_coinbase_input(prevout: &crate::types::OutPoint) -> bool {
     prevout.txid == [0u8; 32] && prevout.vout == u32::MAX
 }
 
@@ -104,12 +106,16 @@ pub fn sighash(tx: &Transaction) -> Hash32 {
 /// - signature must be compact 64-byte ECDSA
 /// - signature must be LOW-S canonical (reject high-S)
 pub fn verify_sig(tx: &Transaction, sig64: &[u8; 64], pub33: &[u8]) -> Result<()> {
-    if pub33.len() != 33 {
+    let Ok(pub33) = <&[u8; 33]>::try_from(pub33) else {
         bail!("pubkey must be 33 bytes compressed");
-    }
+    };
+    verify_sig_digest(&sighash(tx), sig64, pub33)
+}
 
-    let digest = sighash(tx);
-    let msg = Message::from_digest_slice(&digest)?;
+/// `verify_sig`'s checks, in its order, against `digest = sighash(tx)` computed by the caller.
+/// Only where the digest is computed moves, so what a signature check accepts is unchanged.
+pub fn verify_sig_digest(digest: &Hash32, sig64: &[u8; 64], pub33: &[u8; 33]) -> Result<()> {
+    let msg = Message::from_digest_slice(digest)?;
 
     let pk = PublicKey::from_slice(pub33)?;
 
@@ -126,6 +132,30 @@ pub fn verify_sig(tx: &Transaction, sig64: &[u8; 64], pub33: &[u8]) -> Result<()
 
     Secp256k1::verification_only().verify_ecdsa(&msg, &sig, &pk)?;
     Ok(())
+}
+
+/// The signature checks of one transaction's inputs, with the sighash
+/// computed once per tx. `sighash(tx)` is a function of the tx alone (it takes no input index), so
+/// all inputs of a tx sign the same digest; `verify_sig` per input recomputed it (a serialization
+/// and two hashes of the whole tx) for every input, quadratic in a wide tx.
+/// The digest is computed at the first `verify`, so a tx refused before any signature check
+/// costs no sighash, as with `verify_sig`. Accept and reject are those of `verify_sig` per
+/// input, so block validity is unchanged.
+pub struct TxSigChecker<'a> {
+    tx: &'a Transaction,
+    digest: Option<Hash32>,
+}
+
+impl<'a> TxSigChecker<'a> {
+    pub fn new(tx: &'a Transaction) -> Self {
+        Self { tx, digest: None }
+    }
+
+    pub fn verify(&mut self, sig64: &[u8; 64], pub33: &[u8; 33]) -> Result<()> {
+        let tx = self.tx;
+        let digest = *self.digest.get_or_insert_with(|| sighash(tx));
+        verify_sig_digest(&digest, sig64, pub33)
+    }
 }
 
 

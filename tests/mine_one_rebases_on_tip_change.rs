@@ -1,12 +1,15 @@
 // tests/mine_one_rebases_on_tip_change.rs
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use csd::chain::index::{get_hidx, header_hash, index_header};
-use csd::chain::mine::mine_one;
+use csd::chain::mine::{mine_one, MINER_CLOCK_SKEW_MARGIN_SECS, TEST_SOLVED_PARENTS};
+use csd::chain::time::now_secs;
+use csd::params::{MAX_FUTURE_DRIFT_SECS, MIN_BLOCK_SPACING_SECS};
 use csd::chain::reorg::maybe_reorg_to;
 use csd::crypto::txid;
 use csd::net::mempool::Mempool;
@@ -127,6 +130,34 @@ fn load_block(db: &Stores, bh: &Hash32) -> Result<Block> {
     Ok(csd::codec::consensus_bincode().deserialize::<Block>(&v)?)
 }
 
+/// Runs `mine_one` on its own thread; its result arrives on the returned channel.
+fn spawn_mine_one(
+    db: &Arc<Stores>,
+    mp: &Arc<Mempool>,
+    miner: Hash20,
+    chain_lock: &csd::chain::lock::ChainLock,
+) -> mpsc::Receiver<Result<Hash32>> {
+    let (tx, rx) = mpsc::channel();
+    let (db, mp, chain_lock) = (db.clone(), mp.clone(), chain_lock.clone());
+    thread::spawn(move || {
+        let _ = tx.send(mine_one(&db, &mp, miner, 100, &chain_lock).context("mine_one"));
+    });
+    rx
+}
+
+/// A block on `parent` stamped at `time` (index_header admits up to now + MAX_FUTURE_DRIFT_SECS).
+fn block_stamped_at(db: &Stores, parent: Hash32, height: u64, miner: Hash20, time: u64) -> Result<Block> {
+    let txs = vec![csd::chain::mine::coinbase(miner, csd::params::block_reward(height), height, None)];
+    let mut header = make_test_header(db, parent, &txs, height)?;
+    header.time = time;
+    Ok(Block { header, txs })
+}
+
+// The stale-template watcher (mine.rs, the thread that polls the tip) runs from before the block
+// time is chosen. Old tip A1 is stamped 7,000 s ahead, so the miner waits for its stamp to come
+// within MAX_FUTURE_DRIFT_SECS - MINER_CLOCK_SKEW_MARGIN_SECS of the clock (460 s) and grinds
+// nothing meanwhile; the reorg to B2 during that wait must end it with "stale template". The
+// refusal does not race a solve (with the watcher off it waits the 460 s).
 #[test]
 fn mine_one_rebases_on_tip_change_and_rebuilds_template() -> Result<()> {
     let tmp = TempDir::new().context("tmp")?;
@@ -147,16 +178,9 @@ fn mine_one_rebases_on_tip_change_and_rebuilds_template() -> Result<()> {
     let common_tip = shared[(shared_len - 1) as usize];
     assert_tip_eq(&db, common_tip)?;
 
-    // Build old canonical tip A1 from the shared ancestor.
+    // Build old canonical tip A1 from the shared ancestor, stamped 7,000 s ahead of the clock.
     let height_a1 = shared_len;
-    let a1_cb = csd::chain::mine::coinbase(miner_a, csd::params::block_reward(height_a1), height_a1, None);
-    let a1_txs = vec![a1_cb.clone()];
-    let a1_hdr = make_test_header(&db, common_tip, &a1_txs, height_a1)
-        .context("make_test_header a1")?;
-    let a1_blk = Block {
-        header: a1_hdr,
-        txs: a1_txs,
-    };
+    let a1_blk = block_stamped_at(&db, common_tip, height_a1, miner_a, now_secs() + 7_000)?;
     let tip_a1 = persist_index_apply_block(&db, &a1_blk, height_a1).context("apply a1")?;
     assert_tip_eq(&db, tip_a1)?;
 
@@ -199,39 +223,35 @@ fn mine_one_rebases_on_tip_change_and_rebuilds_template() -> Result<()> {
     };
     let tip_b2 = persist_index_block_only(&db, &b2_blk).context("persist b2")?;
 
-let db_miner = db.clone();
-let mp_miner = mp.clone();
-
-// Shared chain lock
 let chain_lock = new_chain_lock();
+let first = spawn_mine_one(&db, &mp, miner_final, &chain_lock);
 
-// Hold it so miner cannot finalize a block yet
-let held_guard = chain_lock.lock();
+// The miner has read A1 and waits for its stamp; it cannot have solved anything.
+thread::sleep(Duration::from_secs(2));
+assert!(first.try_recv().is_err(), "mine_one returned during its wait on a parent stamped ahead");
 
-let miner_thread = thread::spawn({
-    let db_miner = db_miner.clone();
-    let mp_miner = mp_miner.clone();
-    let chain_lock = chain_lock.clone();
-
-    move || -> Result<Hash32> {
-        mine_one(&db_miner, &mp_miner, miner_final, 100, &chain_lock)
-            .context("mine_one")
-    }
-});
-
-// Give miner time to start hashing
-thread::sleep(Duration::from_millis(25));
-
-// Switch canonical tip while miner is blocked
+// Switch the canonical tip while the miner waits.
 maybe_reorg_to(&db, &tip_b2, Some(&mp)).context("maybe_reorg_to b2")?;
 assert_tip_eq(&db, tip_b2)?;
 
-// Release lock so miner proceeds
-drop(held_guard);
+// CURRENT CONTRACT (src/chain/mine.rs): mine_one does NOT rebase internally. Its watcher
+// flags the template stale the moment the tip moves and returns Err("stale template");
+// the mining loop (src/cli/main.rs) treats that as a normal retry signal, rebuilds the
+// template on the new tip, and calls mine_one again. Pin both halves of that contract:
+let err = first
+    .recv_timeout(Duration::from_secs(60))
+    .expect("the watcher must end the wait once the tip moved")
+    .expect_err("mine_one must refuse to finalize a block on a stale template");
+assert!(
+    format!("{err:#}").contains("stale template"),
+    "expected the stale-template refusal, got: {err:#}"
+);
 
-let mined_hash = miner_thread
-    .join()
-    .expect("miner thread panicked")?;
+// The loop-level retry: fresh template on the rebased tip mines successfully, and the
+// old-tip spend (invalid on branch B) is gone: pruned by the reorg and excluded from
+// any template built on B2.
+let mined_hash = mine_one(&db, &mp, miner_final, 100, &chain_lock)
+    .context("mine_one retry on rebased tip")?;
 
 
     let mined_block = load_block(&db, &mined_hash).context("load mined block")?;
@@ -276,5 +296,89 @@ let mined_hash = miner_thread
         "mined block should sit exactly one height above rebased tip"
     );
 
+    Ok(())
+}
+
+// The chain lock (mine.rs, taken before the tip check that commits a solved block) keeps a solved
+// block from being committed while a reorg holds it. The test holds the lock, waits until mine_one
+// has received a solution on tip X (TEST_SOLVED_PARENTS), checks that nothing was stored, moves the
+// tip, and releases the lock: the solved block is refused as stale. Without
+// the lock the solved block is stored and becomes the tip while the test holds it.
+#[test]
+fn a_block_solved_while_the_chain_lock_is_held_is_not_committed_until_release() -> Result<()> {
+    let tmp = TempDir::new().context("tmp")?;
+    let db = Arc::new(open_db(&tmp).context("open db")?);
+    let mp = Arc::new(Mempool::new());
+    let shared = build_base_chain_with_miner(&db, 7, 1_700_950_000, h20(0x12)).context("build shared")?;
+    let tip_x = shared[6];
+    // A heavier side branch Y1, Y2 off shared[5], stored and indexed only.
+    let y1 = block_stamped_at(&db, shared[5], 6, h20(0x78), 1_700_950_000 + 6 * 60 + 7)?;
+    let tip_y1 = persist_index_block_only(&db, &y1)?;
+    let y2 = block_stamped_at(&db, tip_y1, 7, h20(0x78), 1_700_950_000 + 7 * 60 + 7)?;
+    let tip_y2 = persist_index_block_only(&db, &y2)?;
+    let y3 = block_stamped_at(&db, tip_y2, 8, h20(0x78), 1_700_950_000 + 8 * 60 + 7)?;
+    let tip_y3 = persist_index_block_only(&db, &y3)?;
+
+    let blocks = db.blocks.len();
+    let chain_lock = new_chain_lock();
+    let held = chain_lock.lock();
+    let result = spawn_mine_one(&db, &mp, h20(0x99), &chain_lock);
+
+    let deadline = Instant::now() + Duration::from_secs(600);
+    while !TEST_SOLVED_PARENTS.lock().unwrap().contains(&tip_x) {
+        assert!(Instant::now() < deadline, "mine_one found no solution on X in 600 s");
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(db.blocks.len(), blocks, "a block was stored while the chain lock was held");
+    assert_tip_eq(&db, tip_x)?;
+
+    maybe_reorg_to(&db, &tip_y3, Some(&mp)).context("maybe_reorg_to y3")?;
+    drop(held);
+    let err = result
+        .recv_timeout(Duration::from_secs(60))
+        .expect("mine_one returns once the lock is free")
+        .expect_err("a block solved on X must not be committed over Y3");
+    assert!(format!("{err:#}").contains("solved stale block"), "got: {err:#}");
+    assert_tip_eq(&db, tip_y3)?;
+    assert_eq!(db.blocks.len(), blocks, "the stale solution was stored");
+    Ok(())
+}
+
+// At the mine_one level: on a parent stamped 6,500 s ahead the child is
+// valid at once (index_header admits a stamp up to now + 7,200 s), and mine_one builds it at once,
+// stamped parent.time + 60. Upstream's miner waits until the wall clock passes that
+// stamp: about 6,560 s. The paired honest path: on a parent stamped in the past it stamps the clock.
+#[test]
+fn mine_one_builds_at_once_on_a_parent_stamped_hours_ahead() -> Result<()> {
+    let tmp = TempDir::new().context("tmp")?;
+    let db = Arc::new(open_db(&tmp).context("open db")?);
+    let mp = Arc::new(Mempool::new());
+    let shared = build_base_chain_with_miner(&db, 7, 1_700_960_000, h20(0x13)).context("build shared")?;
+    let chain_lock = new_chain_lock();
+
+    // Honest path first: a normal parent (stamped in 2023) gives a block stamped at the clock.
+    let before = now_secs();
+    let honest = spawn_mine_one(&db, &mp, h20(0x99), &chain_lock)
+        .recv_timeout(Duration::from_secs(600))
+        .expect("mine_one on a normal parent")?;
+    let honest_blk = load_block(&db, &honest)?;
+    assert_eq!(honest_blk.header.prev, shared[6]);
+    assert!(honest_blk.header.time >= before && honest_blk.header.time <= now_secs(), "stamped at the clock");
+
+    let ahead = now_secs() + 6_500;
+    let parent = block_stamped_at(&db, honest, 8, h20(0x14), ahead)?;
+    let parent_hash = persist_index_apply_block(&db, &parent, 8)?;
+    let mined = spawn_mine_one(&db, &mp, h20(0x99), &chain_lock)
+        .recv_timeout(Duration::from_secs(600))
+        .expect("mine_one must build at once on a parent stamped 6,500 s ahead, not wait for the clock")?;
+    let blk = load_block(&db, &mined)?;
+    assert_eq!(blk.header.prev, parent_hash);
+    assert_eq!(blk.header.time, ahead + MIN_BLOCK_SPACING_SECS, "stamped at the earliest valid time");
+    assert!(
+        blk.header.time <= now_secs() + MAX_FUTURE_DRIFT_SECS - MINER_CLOCK_SKEW_MARGIN_SECS,
+        "within the bound a receiver whose clock is the margin behind still accepts"
+    );
+    assert_tip_eq(&db, mined)?;
     Ok(())
 }

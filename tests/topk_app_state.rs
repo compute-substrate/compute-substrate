@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tempfile::TempDir;
 
-use csd::params::EPOCH_LEN;
+use csd::params::{EPOCH_LEN, TOP_K};
 use csd::state::app_state::{apply_app_tx, epoch_of, get_topk, rollback_app_undo};
 use csd::state::db::Stores;
 use csd::types::{AppPayload, OutPoint, Transaction, TxIn, TxOut};
@@ -311,6 +311,78 @@ fn topk_is_deterministic_across_two_dbs() -> Result<()> {
     let top1 = get_topk(&db1, epoch, domain)?;
     let top2 = get_topk(&db2, epoch, domain)?;
     assert_eq!(top1, top2, "TopK must be deterministic across identical history");
+
+    Ok(())
+}
+
+/// A proposal id whose byte order follows `n`, so ids sort as their numbers do.
+fn numbered_id(n: usize) -> H32 {
+    let mut id = [0u8; 32];
+    id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+    id
+}
+
+// The stored top-k of an (epoch, domain) is cut to TOP_K entries however many proposals are scored
+// there. The list is app-tree bytes that `csd fingerprint` hashes, so a node
+// that kept the whole list would differ from every other node's state.
+#[test]
+fn top_k_plus_one_proposals_leave_a_stored_list_of_top_k() -> Result<()> {
+    let (_tmp, db) = open_tmp_db()?;
+
+    let height = 3 * EPOCH_LEN;
+    let epoch = epoch_of(height);
+    let domain = "crowded";
+    let ids: Vec<H32> = (1..=TOP_K + 1).map(numbered_id).collect();
+
+    for (i, id) in ids.iter().enumerate() {
+        let tx = dummy_tx(
+            AppPayload::Propose {
+                domain: domain.to_string(),
+                payload_hash: h32(0xC0),
+                uri: format!("ipfs://p{i}"),
+                expires_epoch: epoch + 10,
+            },
+            i as u8,
+        );
+        apply_app_tx(&db, &tx, height, id, 1)?;
+    }
+
+    // Every score is 0, so the order is the ids' and the largest is the one left out.
+    let top = get_topk(&db, epoch, domain)?;
+    assert_eq!(
+        top.len(),
+        TOP_K,
+        "{} proposals in one epoch and domain left {} entries in the stored top-k",
+        ids.len(),
+        top.len()
+    );
+    let expected: Vec<(H32, u128)> = ids[..TOP_K].iter().map(|id| (*id, 0)).collect();
+    assert_eq!(top, expected);
+
+    // An Attest lifts the proposal left out to the top, and the last of the rest leaves.
+    let left_out = ids[TOP_K];
+    let tx_a = dummy_tx(
+        AppPayload::Attest {
+            proposal_id: left_out,
+            score: 0,
+            confidence: 0,
+        },
+        0xEE,
+    );
+    apply_app_tx(&db, &tx_a, height + 1, &h32(0xEE), 100)?;
+
+    let top = get_topk(&db, epoch, domain)?;
+    assert_eq!(
+        top.len(),
+        TOP_K,
+        "an Attest left {} entries in the stored top-k",
+        top.len()
+    );
+    assert_eq!(top[0], (left_out, 100u128));
+    assert!(
+        !top.iter().any(|(id, _)| *id == ids[TOP_K - 1]),
+        "the lowest-ranked proposal stayed in a full top-k"
+    );
 
     Ok(())
 }

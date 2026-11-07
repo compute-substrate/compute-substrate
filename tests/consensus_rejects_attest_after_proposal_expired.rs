@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -57,7 +58,6 @@ fn sign_tx(mut tx: Transaction) -> Transaction {
 
 #[test]
 fn rejects_attest_after_proposal_expired() -> Result<()> {
-    std::env::set_var("CSD_BYPASS_POW", "1");
 
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
@@ -65,7 +65,11 @@ fn rejects_attest_after_proposal_expired() -> Result<()> {
     let miner = signer_addr(SK);
 
     // Build enough history so current epoch is definitely > 0 and we can create an expired proposal.
-    let shared_len = 8u64; // heights 0..7
+    // EPOCH_LEN is 30: heights 0..31 put the tested block (height 32) in epoch 1, so
+    // expires_epoch = 0 is already expired. (A shorter prefix lands in epoch 0, where
+    // saturating_sub pins expires_epoch to 0 and nothing is expired; the fixture vacuously
+    // passes input auth and the block is ACCEPTED.)
+    let shared_len = 32u64; // heights 0..31
     let start_time = 1_701_800_000u64;
 
     let shared = build_base_chain_with_miner(&db, shared_len, start_time, miner)
@@ -85,6 +89,24 @@ fn rejects_attest_after_proposal_expired() -> Result<()> {
         vout: 0,
     };
     let input_value = parent_block.txs[0].outputs[0].value;
+
+    // The attest needs its OWN SK-owned input: the propose pays its change to an
+    // address SK does not control, so spending the propose's output would fail
+    // input auth ("pubkey hash mismatch") before the app-state check under test.
+    // Use the grandparent block's coinbase output (also mined to SK) instead.
+    let grandparent = shared[(shared_len - 2) as usize];
+    let grandparent_block: Block = csd::codec::consensus_bincode()
+        .deserialize(
+            &db.blocks
+                .get(k_block(&grandparent))?
+                .context("missing grandparent block bytes")?,
+        )
+        .context("deserialize grandparent block")?;
+    let attest_prevout = OutPoint {
+        txid: txid(&grandparent_block.txs[0]),
+        vout: 0,
+    };
+    let attest_input_value = grandparent_block.txs[0].outputs[0].value;
 
     let height = shared_len;
     let current_epoch = epoch_of(height);
@@ -118,16 +140,11 @@ fn rejects_attest_after_proposal_expired() -> Result<()> {
     let attest_tx = Transaction {
         version: 1,
         inputs: vec![TxIn {
-            prevout: OutPoint {
-                txid: proposal_id,
-                vout: 0,
-            },
+            prevout: attest_prevout,
             script_sig: vec![0u8; 99],
         }],
         outputs: vec![TxOut {
-            value: input_value
-                .saturating_sub(MIN_FEE_PROPOSE)
-                .saturating_sub(MIN_FEE_ATTEST),
+            value: attest_input_value.saturating_sub(MIN_FEE_ATTEST),
             script_pubkey: h20(0x42),
         }],
         locktime: 0,

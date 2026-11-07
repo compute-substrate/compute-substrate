@@ -7,3 +7,5 @@ pub mod reorg;
 pub mod reorg_journal;
 pub mod time;
 pub mod failpoints;
+pub mod body_fault;
+pub mod stored_chain;
