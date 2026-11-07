@@ -10,38 +10,12 @@ use crate::state::db::Stores;
     name = "csd",
     version = env!("CARGO_PKG_VERSION"),   // tracks Cargo.toml
     about = "Cairn-Node: Compute Substrate node, miner, and wallet CLI",
-    long_about = "Compute Substrate node and wallet CLI.\n\nUse `csd node` to run a node or miner.\nThe wallet commands (`csd wallet`, `csd spend`, `csd propose`, `csd attest`) are not supported; use the Cairn Wallet. Those that sign a transaction refuse unless `--unsafe` is given.",
+    long_about = "Compute Substrate node and wallet CLI.\n\nUse `csd node` to run a node or miner.\nUse `csd wallet` to create keys, inspect balances, build transactions, and submit proposals or attestations.",
     arg_required_else_help = true
 )]
 pub struct Cmd {
     #[command(subcommand)]
     pub cmd: Commands,
-
-    /// Run a wallet command that signs a transaction although the node CLI wallet is not
-    /// supported
-    #[arg(long = "unsafe", global = true)]
-    pub unsafe_wallet: bool,
-}
-
-/// The commands that sign a transaction, by the name a user types. The node CLI wallet is not
-/// supported: it takes the fee from input values it does not
-/// verify, has no fee cap, and can print a receipt for a submit that failed. Each of these
-/// refuses unless `--unsafe` is given.
-fn unsupported_wallet_command(cmd: &Commands) -> Option<&'static str> {
-    match cmd {
-        Commands::Spend { .. } => Some("spend"),
-        Commands::Propose { .. } => Some("propose"),
-        Commands::Attest { .. } => Some("attest"),
-        Commands::Wallet { w } => match w {
-            WalletCmd::Spend { .. } => Some("wallet spend"),
-            WalletCmd::ProposeBuild { .. } => Some("wallet propose-build"),
-            WalletCmd::AttestBuild { .. } => Some("wallet attest-build"),
-            WalletCmd::Propose { .. } => Some("wallet propose"),
-            WalletCmd::Attest { .. } => Some("wallet attest"),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 #[derive(Subcommand)]
@@ -959,16 +933,6 @@ async fn seal_and_exit(db: Arc<Stores>, chain_lock: crate::chain::lock::ChainLoc
 
 pub async fn run() -> Result<()> {
     let cmd = Cmd::parse();
-
-    if let Some(name) = unsupported_wallet_command(&cmd.cmd) {
-        if !cmd.unsafe_wallet {
-            anyhow::bail!(
-                "csd {name}: the node CLI wallet is not supported. It takes the fee from input values \
-                 it does not verify, has no fee cap, and can print a receipt for a submit that \
-                 failed. Use the Cairn Wallet. To run it anyway, add --unsafe."
-            );
-        }
-    }
 
     // Upstream runs `load_config()` here, before the
     // command match, so a present-but-malformed `~/.csd/config.json` refuses to start `csd node`,

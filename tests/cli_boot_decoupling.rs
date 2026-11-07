@@ -1,6 +1,6 @@
-// Boot decoupling of the node from the wallet config, and the signing gate of the CLI wallet,
-// driven through the real binary because the defect lives in the argument-dispatch order of
-// `cli::run()`, not in a library function.
+// Boot decoupling of the node from the wallet config, and the CLI wallet's key handling and
+// signing commands, driven through the real binary because the defect lives in the
+// argument-dispatch order of `cli::run()`, not in a library function.
 //
 // The defect: `load_config()` ran before `match cmd.cmd`, so a present-but-malformed
 // `~/.csd/config.json` refused to start `csd node` (and `csd chain`, `csd db`, `csd genesis`,
@@ -169,12 +169,11 @@ fn a_config_written_by_the_cli_is_created_0600() {
     }
 }
 
-// The node CLI wallet is not supported for signing: every command that signs
-// a transaction refuses without --unsafe, and runs past that gate with it. The unsafe runs end on a
-// missing or invalid key before any request, and name an unroutable RPC so nothing could reach a
-// live node anyway.
+// Every command that signs a transaction runs as upstream's does, with no flag gating it. Each
+// run here ends on the test's missing or invalid key before any request (the key error names its
+// own reason), and names an unroutable RPC, so nothing could reach a live node anyway.
 #[test]
-fn every_command_that_signs_a_transaction_refuses_without_unsafe() {
+fn every_command_that_signs_a_transaction_runs_without_a_gate() {
     let home = TempDir::new().unwrap();
     const RPC: &str = "http://127.0.0.1:9";
     let commands: [(&str, Vec<&str>); 8] = [
@@ -204,25 +203,22 @@ fn every_command_that_signs_a_transaction_refuses_without_unsafe() {
     ];
 
     for (name, args) in commands {
-        let refused = run(home.path(), &args);
-        let stderr = String::from_utf8_lossy(&refused.stderr).to_string();
-        assert!(!refused.status.success(), "csd {name} must refuse without --unsafe");
+        let out = run(home.path(), &args);
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!stderr.contains("not supported"), "csd {name} is gated: {stderr}");
+        assert!(!out.status.success(), "csd {name} ran with no usable key: {stderr}");
         assert!(
-            stderr.contains(&format!("csd {name}: the node CLI wallet is not supported"))
-                && stderr.contains("Use the Cairn Wallet"),
-            "csd {name}: {stderr}"
+            stderr.contains("no private key provided") || stderr.contains("hex decode failed"),
+            "csd {name} must stop on the test's key, for its own reason: {stderr}"
         );
-
-        // Honest path for whoever opts in: --unsafe passes the gate (the run then stops on the
-        // test's missing or invalid key, for its own reason).
-        let mut unsafe_args = args.clone();
-        unsafe_args.push("--unsafe");
-        let ran = run(home.path(), &unsafe_args);
-        let stderr = String::from_utf8_lossy(&ran.stderr).to_string();
-        assert!(!stderr.contains("not supported"), "csd {name} --unsafe must pass the gate: {stderr}");
     }
 
-    // A command that signs nothing needs no flag.
+    // The flag is gone: clap refuses it as an unknown argument.
+    let out = run(home.path(), &["spend", "--fee", "1", "--unsafe"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success() && stderr.contains("unexpected argument '--unsafe'"), "{stderr}");
+
+    // A command that signs nothing runs too.
     let out = run(home.path(), &["chain", "expected-supply", "--height", "0"]);
     assert!(out.status.success());
 }
