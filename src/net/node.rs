@@ -2520,7 +2520,7 @@ fn load_peer_quality(datadir: &str) -> HashMap<PeerId, PeerQuality> {
         Some(first) if first.trim() == PEER_QUALITY_FORMAT => {}
         _ => {
             println!(
-                "[p2p] peer quality file is in the pre-v0.1.8 (column-rotated) format; ignoring it and starting fresh"
+                "[p2p] peer quality file has no format tag (the untagged, column-rotated format); ignoring it and starting fresh"
             );
             return out;
         }
@@ -9316,7 +9316,7 @@ mod peer_state_tests {
     }
 
     #[test]
-    fn peer_quality_rejects_the_pre_v018_format() {
+    fn peer_quality_rejects_the_untagged_format() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().to_str().unwrap().to_string();
         // TWO records, deliberately. With a one-line fixture this test passes even with the
@@ -9470,8 +9470,8 @@ mod gossip_attribution_tests {
 
         const WHY: &str = "an unsigned TOPIC_TX message with from=<victim> and no signature must \
              not cost <victim> anything; protocol.rs:409-419 leaves `from` attacker-chosen, and \
-             five of these used to quarantine a named honest peer for 300s and 32 used to ban it \
-             for 600s fleet-wide";
+             if strikes were keyed on the claimed source, five of these would quarantine a named \
+             honest peer for 300s and 32 would ban it for 600s on every node that received them";
 
         assert!(bans.is_empty(), "{WHY}");
         assert!(buckets.is_empty(), "{WHY}");
@@ -9630,7 +9630,7 @@ mod gossip_attribution_tests {
         let entry = lock.split("[[package]]").find(|p| p.contains("name = \"libp2p-gossipsub\"")).unwrap();
         assert!(
             entry.contains("version = \"0.50.1\"") && entry.contains("registry+"),
-            "libp2p-gossipsub moved: re-read the lines RELEASING.md \"Dependency bumps\" cites, then update this check"
+            "libp2p-gossipsub moved: re-read the lines docs/behaviour.md \"Dependency internals the code relies on\" cites, then update this check"
         );
     }
 
@@ -10298,14 +10298,14 @@ mod gossip_wire_tests {
     async fn a_catch_up_burst_keeps_gossip_flowing_to_a_peer_outside_the_mesh() {
         let mut upstream_receiver = gossipsub::ConfigBuilder::from(gossipsub_config());
         upstream_receiver.max_control_message_size(16 * 1024);
-        let mut v0114_sender = gossipsub::ConfigBuilder::from(gossipsub_config());
-        v0114_sender.max_control_messages_sent(5000);
-        let (ours_to_upstream, v0114_to_ours) = tokio::join!(
+        let mut gossipsub048_sender = gossipsub::ConfigBuilder::from(gossipsub_config());
+        gossipsub048_sender.max_control_messages_sent(5000);
+        let (ours_to_upstream, gossipsub048_to_ours) = tokio::join!(
             probe_reaches_non_mesh_peer_after_burst(gossipsub_config(), upstream_receiver.build().unwrap()),
-            probe_reaches_non_mesh_peer_after_burst(v0114_sender.build().unwrap(), gossipsub_config()),
+            probe_reaches_non_mesh_peer_after_burst(gossipsub048_sender.build().unwrap(), gossipsub_config()),
         );
         assert!(ours_to_upstream, "a receiver on the 16 KiB default stopped taking our gossip after a burst");
-        assert!(v0114_to_ours, "this node stopped taking a 0.1.14 peer's gossip after its burst");
+        assert!(gossipsub048_to_ours, "this node stopped taking a gossipsub 0.48 peer's gossip after its burst");
     }
 
     // gossipsub 0.47 (upstream v1.1.2's) has an unbounded per-connection send queue, a memory leak

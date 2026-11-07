@@ -122,9 +122,9 @@ fn run(ours: f64) -> Result<Run> {
 #[test]
 fn building_at_once_on_a_future_parent_keeps_producing_and_bounds_the_difficulty_rise() -> Result<()> {
     let all = run(1.0)?;
-    let today = run(0.11)?;
+    let mixed = run(0.11)?;
     let before = run(0.0)?;
-    for (name, r) in [("all miners on 0.1.16", &all), ("11% on 0.1.16, 89% upstream", &today), ("all on the 0.1.15 rule", &before)] {
+    for (name, r) in [("all miners on this rule", &all), ("11% on this rule, 89% on upstream's", &mixed), ("all on upstream's rule", &before)] {
         println!(
             "[lwma] {name}: first child {} s after the attack block, stamps at the wall clock again from block {}, \
              max difficulty {:.2}x, final {:.2}x, {} s for {AFTER} blocks",
@@ -135,10 +135,10 @@ fn building_at_once_on_a_future_parent_keeps_producing_and_bounds_the_difficulty
     // block; with an 11% share, well before the stall of upstream's rule ends.
     assert!(all.first_child_after <= MINER_CLOCK_SKEW_MARGIN_SECS + 2 * TARGET_BLOCK_SECS, "{}", all.first_child_after);
     assert!(before.first_child_after >= ATTACK_LEAD_SECS, "{}", before.first_child_after);
-    assert!(today.first_child_after < before.first_child_after / 2, "{}", today.first_child_after);
+    assert!(mixed.first_child_after < before.first_child_after / 2, "{}", mixed.first_child_after);
     // The cost: compressed stamps raise the difficulty while the chain is ahead of the clock, by a
     // bounded factor, and it returns to the baseline once the stamps follow the clock again.
-    for (name, r) in [("all", &all), ("today", &today)] {
+    for (name, r) in [("all", &all), ("mixed", &mixed)] {
         assert!(r.max_difficulty < 3.5, "{name}: max difficulty {:.2}x", r.max_difficulty);
         assert!((r.final_difficulty - 1.0).abs() < 0.1, "{name}: final difficulty {:.2}x", r.final_difficulty);
         assert!(r.catch_up_blocks > 0, "{name}: the stamps never caught up with the wall clock");

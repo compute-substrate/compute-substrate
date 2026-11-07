@@ -1204,7 +1204,7 @@ mod template_tests {
         assert!(ids.contains(&good_id), "the valid tx is templated");
         assert!(
             !ids.contains(&poison_id),
-            "RT-N1: an app-state poison in the mempool is EXCLUDED at template build"
+            "an app-state poison in the mempool is excluded at template build"
         );
     }
 

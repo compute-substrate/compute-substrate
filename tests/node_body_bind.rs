@@ -143,7 +143,7 @@ fn store_refuses_substituted_body_and_still_stores_and_applies_the_honest_one() 
         store_block_bytes_checked(&db, &bh, &honest).unwrap(),
         BlockStoreOutcome::Stored,
         "the honest body must still store; a bind on the wrong struct field refuses EVERY block, \
-         which reads RED on the poison half and is a fleet-wide outage"
+         which reads red on the poison half and stops every node from accepting blocks"
     );
     let stored = db.blocks.get(k_block(&bh)).unwrap().expect("stored bytes");
     assert_eq!(

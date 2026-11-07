@@ -151,7 +151,7 @@ fn scan_beyond_old_horizon_is_found() -> Result<()> {
     let out = find_tx_in_chain(&db, &want, 8);
     assert!(
         !matches!(out, ScanOutcome::Absent { .. } | ScanOutcome::Horizon { .. }),
-        "#9: a deep but in-chain tx must be FOUND, not Horizon(503) and never a false Absent: {out:?}"
+        "a deep but in-chain tx must be FOUND, not Horizon(503) and never a false Absent: {out:?}"
     );
     assert_eq!(
         out,
@@ -425,7 +425,7 @@ fn fresh_index_miss_does_not_lie_when_tip_advances_midcall() -> Result<()> {
     assert_eq!(
         resolve_via_index(&db, &want, t1),
         None,
-        "G14: a fresh-index miss pinned to T1 emitted a proved-absence for a tx applied at a \
+        "a fresh-index miss pinned to T1 emitted a proved-absence for a tx applied at a \
          newer tip (the intra-call TOCTOU confident lie)"
     );
 

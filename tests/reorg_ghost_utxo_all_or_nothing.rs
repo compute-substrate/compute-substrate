@@ -569,13 +569,13 @@ fn reorg_undo_same_block_create_then_spend_leaves_no_phantom() -> Result<()> {
     undo_block(&db, &bh).expect("undo_block must succeed");
     assert!(
         get_utxo(&db, &x)?.is_none(),
-        "F3: same-block create-then-spend outpoint X resurrected as a phantom UTXO on undo"
+        "same-block create-then-spend outpoint X resurrected as a phantom UTXO on undo"
     );
-    assert!(get_utxo_meta(&db, &x)?.is_none(), "F3: phantom X meta resurrected on undo");
+    assert!(get_utxo_meta(&db, &x)?.is_none(), "phantom X meta resurrected on undo");
     assert_eq!(
         state_snapshot(&db),
         pristine,
-        "F3: undo did not converge to the from-genesis (pristine) UTXO set"
+        "undo did not converge to the from-genesis (pristine) UTXO set"
     );
     assert!(get_utxo(&db, &c)?.is_some(), "C must be restored after undo");
     assert!(db.undo.get(k_undo(&bh))?.is_none(), "undo log must be removed");
@@ -839,7 +839,7 @@ fn undo_restores_the_first_touch_value_when_a_block_spends_recreates_and_respend
 /// Exercised on an honest same-block create-then-spend, which is precisely the shape that lands
 /// in both lists in an older-layout log.
 #[test]
-fn a_v0112_undo_log_never_puts_an_outpoint_in_both_lists() -> Result<()> {
+fn a_first_touch_undo_log_never_puts_an_outpoint_in_both_lists() -> Result<()> {
     let tmp = TempDir::new()?;
     let db = open_db(&tmp);
     let height = 7u64;
@@ -872,8 +872,8 @@ fn a_v0112_undo_log_never_puts_an_outpoint_in_both_lists() -> Result<()> {
     assert!(undo.created.contains(&mid), "the same-block output must be in created");
     assert!(
         !undo.spent.iter().any(|(op, _, _)| *op == mid),
-        "a v0.1.12 log must NOT also record the same-block output as spent; that ambiguity is what \
-         the undo side used to have to guess its way out of"
+        "a first-touch log must NOT also record the same-block output as spent; an outpoint in \
+         both lists leaves the undo side to guess"
     );
 
     // And no outpoint at all appears in both lists.
@@ -931,7 +931,7 @@ fn a_legacy_shaped_undo_log_still_replays_without_resurrecting_a_phantom() -> Re
     assert!(
         get_utxo(&db, &mid)?.is_none(),
         "the same-block create-then-spend outpoint must NOT be resurrected; removing the retained \
-         F3 skip would reintroduce the h47114 phantom for every log written before v0.1.12"
+         created-set skip would resurrect the phantom for every older-layout undo log"
     );
     let restored = get_utxo(&db, &spent_op)?.expect("the ordinary pre-block spend must be restored");
     assert_eq!(restored.value, spent_out.value);
@@ -1032,8 +1032,8 @@ fn app_tx_partial_write_leaves_no_residue() -> Result<()> {
 // Paired honest path for the app-tx rollback: the same block without the unreadable score
 // applies, and the undo log it returns and persists and the app tree it leaves are pinned bytes,
 // recorded before apply_app_tx gained its own rollback.
-const NODE1_03_UNDO_HEX: &str = "0100000000000000d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d20000000000ca9a3b0000000087b5d4d1fb30ef8c0455c6ddee639051b35782c301000000000000000102000000000000000c4d05c974e4a6750574f1c7e59fb76542df472d9243b8d7ef3f8b102a7c49c9000000003fbc36117e5f21283a70099cad5f8495dd1a08973b1acabb665990fb0aa3daab000000000300000000000000000000002100000000000000500c4d05c974e4a6750574f1c7e59fb76542df472d9243b8d7ef3f8b102a7c49c900020000002e0000000000000053000000000000000000036476700c4d05c974e4a6750574f1c7e59fb76542df472d9243b8d7ef3f8b102a7c49c900030000000e000000000000004b0000000000000000000364767000";
-const NODE1_03_APP_ROOT_HEX: &str = "2bac1404103498552114a528a1a7303fa71d802b0b565ff662bed23b8c89ec44";
+const APP_TX_SUCCESS_UNDO_HEX: &str = "0100000000000000d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d20000000000ca9a3b0000000087b5d4d1fb30ef8c0455c6ddee639051b35782c301000000000000000102000000000000000c4d05c974e4a6750574f1c7e59fb76542df472d9243b8d7ef3f8b102a7c49c9000000003fbc36117e5f21283a70099cad5f8495dd1a08973b1acabb665990fb0aa3daab000000000300000000000000000000002100000000000000500c4d05c974e4a6750574f1c7e59fb76542df472d9243b8d7ef3f8b102a7c49c900020000002e0000000000000053000000000000000000036476700c4d05c974e4a6750574f1c7e59fb76542df472d9243b8d7ef3f8b102a7c49c900030000000e000000000000004b0000000000000000000364767000";
+const APP_TX_SUCCESS_APP_ROOT_HEX: &str = "2bac1404103498552114a528a1a7303fa71d802b0b565ff662bed23b8c89ec44";
 
 #[test]
 fn app_tx_success_path_undo_and_app_bytes_are_unchanged() -> Result<()> {
@@ -1060,10 +1060,10 @@ fn app_tx_success_path_undo_and_app_bytes_are_unchanged() -> Result<()> {
         Some(&undo_bytes[..]),
         "the persisted undo log must equal the returned one"
     );
-    assert_eq!(hex::encode(&undo_bytes), NODE1_03_UNDO_HEX, "undo bytes changed");
+    assert_eq!(hex::encode(&undo_bytes), APP_TX_SUCCESS_UNDO_HEX, "undo bytes changed");
     assert_eq!(
         hex::encode(fingerprint(&db)?.app_root),
-        NODE1_03_APP_ROOT_HEX,
+        APP_TX_SUCCESS_APP_ROOT_HEX,
         "app tree changed"
     );
     Ok(())

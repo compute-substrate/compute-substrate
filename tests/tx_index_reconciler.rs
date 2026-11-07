@@ -236,7 +236,7 @@ fn markers_live_in_the_index_tree_next_to_their_data() -> Result<()> {
 // They must be ignored (never read as a completeness claim) and the index rebuilt.
 // -----------------------------------------------------------------------------
 #[test]
-fn a_pre_v017_marker_in_meta_is_ignored_and_rebuilt() -> Result<()> {
+fn a_marker_in_the_meta_tree_is_ignored_and_rebuilt() -> Result<()> {
     let tmp = TempDir::new()?;
     let db = open_db(&tmp);
     let chain = build_chain(&db, 5, 0);
