@@ -178,7 +178,7 @@ pub fn pow_ok_strict(hash: &Hash32, bits: u32) -> bool {
 /// switch (`cargo test --features test-bypass`). Production/release builds never
 /// enable it, so the bypass is compiled out entirely. A runtime switch (an
 /// environment variable) would be honoured by deployed binaries, where one setting
-/// turns off PoW checks on a mainnet node; the compile-time gate rules that out.
+/// turns off PoW checks on a mainnet node; such a switch must not be added.
 #[inline]
 fn bypass_pow() -> bool {
     cfg!(feature = "test-bypass")

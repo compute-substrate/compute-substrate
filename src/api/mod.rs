@@ -3772,7 +3772,7 @@ mod display_gate_tests {
     // Paired happy path, through the real handler: a display client's burst (one /proposals/<d>/40
     // per domain, all at once; 32 domains on mainnet) is answered in full with the unloaded body.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_console_burst_of_32_proposal_reads_all_answer() {
+    async fn a_display_burst_of_32_proposal_reads_all_answer() {
         let _g = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let st = test_api_state(&dir);
@@ -3798,7 +3798,7 @@ mod display_gate_tests {
     // (380 ms, the slowest /proposals/<d>/40 measured) must fit the display pool's
     // permits and wait. With 2 permits and 250 ms, 30 of the 32 shed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_console_burst_at_live_scan_cost_fits_the_display_pool() {
+    async fn a_display_burst_at_live_scan_cost_fits_the_display_pool() {
         let _g = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let burst = (0..32).map(|_| {
             tokio::spawn(offload_display(|| {
@@ -3812,7 +3812,7 @@ mod display_gate_tests {
             .map(|r| r.unwrap().status().as_u16())
             .collect();
         let shed = codes.iter().filter(|c| **c != 200).count();
-        assert_eq!(shed, 0, "{shed} of 32 console reads were shed");
+        assert_eq!(shed, 0, "{shed} of 32 display reads were shed");
     }
 
     // Red-first: with the display pool saturated, every gated display read sheds with the shared

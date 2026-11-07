@@ -559,9 +559,9 @@ fn apply_undo(db: &Stores, undo: &UndoLog) -> Result<()> {
     //
     // The durable closure for the underlying hazard is still to make coinbase txids consensus-unique
     // by activating `validate_coinbase_scriptsig_height` at a coordinated height (one line, and
-    // measured to be a no-op for every miner currently on mainnet: a scan of 6,168 blocks across
-    // the chain found every coinbase committing its height in both script_sig and locktime, and zero
-    // duplicate coinbase txids). That would also let this whole skip be deleted.
+    // measured to be a no-op for the miners of a 6,168-block sample spread across the mainnet chain:
+    // every coinbase in it commits its height in both script_sig and locktime, and no two coinbase txids
+    // repeat). That would also let this whole skip be deleted.
     let created_set: HashSet<OutPoint> = undo.created.iter().copied().collect();
 
     // restore spent utxos (+meta)
@@ -884,8 +884,8 @@ mod mempool_appstate_tests {
     }
 
     // A past-expiry Propose must be refused at admission. Upstream's admission, which has no
-    // state check, admits it (this
-    // assertion fails there); consensus apply rejects it with or without the gate.
+    // state check, admits it (this assertion fails there); consensus apply rejects it with or
+    // without the gate.
     #[test]
     fn expired_propose_is_a_landmine_and_is_now_refused() {
         let (_tmp, db) = open_db();

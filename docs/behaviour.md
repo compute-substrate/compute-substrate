@@ -131,8 +131,8 @@ after the flood stopped; the map keeps its largest allocation (std's HashMap doe
 later entries reuse it. The admission caps bound connections at once, not their rate, so this grows
 with the attacker's reconnect rate; nothing the node decides reads the map.
 
-An operator who reads specific lines from the journal (an alert on `[tx_submit] ACCEPT`, say)
-needs the unit's journald burst above the sampler's 600 a minute plus the node's other lines: a
+An operator who runs the node under systemd and reads specific lines from the journal (an alert on
+`[tx_submit] ACCEPT`, say) needs the unit's journald burst above the sampler's 600 a minute plus the node's other lines: a
 burst of 5,400 a minute leaves room; one of 500 a minute does not, under a flood at the ceiling.
 
 Pinned by `tests/p2p_live_serve_log.rs` (one peer's minute of every request kind at most 60 lines,
