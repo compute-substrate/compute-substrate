@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "csd"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "axum",
