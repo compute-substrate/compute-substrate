@@ -218,3 +218,105 @@ fn mempool_equal_feerate_eviction_is_deterministic_by_txid() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn mempool_spent_cap_evicts_lower_feerate_instead_of_refusing_every_tx() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp)?;
+
+    let owner = signer_addr(SK);
+    let v = 1_000_000u64;
+
+    for tag in 1u8..=4u8 {
+        insert_utxo(&db, dummy_prev(tag), v, owner)?;
+    }
+
+    // Room for two spent inputs; the count and byte caps are far away.
+    let mp = Mempool::new_with_limits(100, 10_000_000, 2);
+
+    let t1 = make_tx(1, v, 1_000, h20(1));
+    let t2 = make_tx(2, v, 2_000, h20(2));
+    assert!(mp.insert_checked(&db, t1.clone())?);
+    assert!(mp.insert_checked(&db, t2.clone())?);
+    assert_eq!(mp.spent_len(), 2);
+
+    // A tx paying no more than the cheapest held one is refused and changes nothing.
+    let weak = make_tx(3, v, 1_000, h20(3));
+    let before = txids_in_sample_order(&mp);
+    assert!(mp.insert_checked(&db, weak).is_err());
+    assert_eq!(txids_in_sample_order(&mp), before, "a refused insert must not mutate the pool");
+
+    // A higher-feerate tx takes the cheapest one's place instead of being refused.
+    let t4 = make_tx(4, v, 4_000, h20(4));
+    assert!(
+        mp.insert_checked(&db, t4.clone())?,
+        "a full spent index must make room for a higher feerate, as the count and byte caps do"
+    );
+    assert_eq!(mp.spent_len(), 2);
+    assert_eq!(txids_in_sample_order(&mp), vec![txid(&t4), txid(&t2)]);
+    assert!(!mp.contains(&txid(&t1)));
+
+    Ok(())
+}
+
+/// One input, `n_out` outputs: a larger tx than `make_tx` from the same coin.
+fn make_wide_tx(prev_tag: u8, value: u64, fee: u64, n_out: u64) -> Transaction {
+    let each = (value - fee) / n_out; // the remainder of the split adds to the fee
+    let mut tx = make_tx(prev_tag, value, fee, h20(prev_tag));
+    tx.outputs = (0..n_out).map(|i| TxOut { value: each, script_pubkey: h20(i as u8) }).collect();
+    let (sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&tx, SK);
+    let mut ss = Vec::with_capacity(99);
+    ss.push(64);
+    ss.extend_from_slice(&sig64);
+    ss.push(33);
+    ss.extend_from_slice(&pub33);
+    tx.inputs[0].script_sig = ss;
+    tx
+}
+
+fn tx_bytes(tx: &Transaction) -> usize {
+    csd::codec::consensus_bincode().serialized_size(tx).unwrap() as usize
+}
+
+// A tx is admitted only with every cap satisfied, so eviction is planned against the count, byte
+// and spent-input caps together and committed only then. Evicting for one cap and then refusing on
+// another let a refused tx destroy an honest entry.
+#[test]
+fn mempool_a_refused_tx_evicts_nothing_and_an_admitted_one_evicts_for_every_cap() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let db = open_db(&tmp)?;
+
+    let owner = signer_addr(SK);
+    let v = 1_000_000u64;
+    for tag in 1u8..=4u8 {
+        insert_utxo(&db, dummy_prev(tag), v, owner)?;
+    }
+
+    let cheap = make_tx(1, v, 1_000, h20(1));
+    let rich = make_tx(2, v, 10_000, h20(2));
+    let wide = make_wide_tx(3, v, 3_000, 10);
+    let (small, big) = (tx_bytes(&cheap), tx_bytes(&wide));
+    assert_eq!(tx_bytes(&rich), small);
+    // Two spent inputs; the two small txs fit the byte cap, a small one and the wide one do not.
+    let mp = Mempool::new_with_limits(100, small + big - 1, 2);
+    assert!(small < big, "setup: the two small txs must fit the byte cap");
+
+    assert!(mp.insert_checked(&db, cheap.clone())?);
+    assert!(mp.insert_checked(&db, rich.clone())?);
+    let before = txids_in_sample_order(&mp);
+
+    // Its feerate is above the cheap tx's and below the rich one's: evicting the cheap tx frees
+    // the spent input, and the bytes would still need the rich one gone, which it cannot outbid.
+    assert!(mp.insert_checked(&db, wide.clone()).is_err());
+    assert_eq!(txids_in_sample_order(&mp), before, "a refused tx must leave the pool as it was");
+    assert_eq!((mp.len(), mp.spent_len(), mp.total_bytes()), (2, 2, 2 * small));
+
+    // Honest path: a wide tx that outbids both takes the place of both, one for the spent input
+    // and one for the bytes.
+    let wide_rich = make_wide_tx(4, v, 60_000, 10);
+    assert!(mp.insert_checked(&db, wide_rich.clone())?);
+    assert_eq!(txids_in_sample_order(&mp), vec![txid(&wide_rich)]);
+    assert_eq!((mp.len(), mp.spent_len(), mp.total_bytes()), (1, 1, tx_bytes(&wide_rich)));
+
+    Ok(())
+}

@@ -1,6 +1,7 @@
 // src/state/db.rs
 use crate::types::{Hash32, OutPoint, TxOut};
 use anyhow::{bail, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 
@@ -60,10 +61,20 @@ impl Stores {
         })
     }
 
-    /// Explicit flush boundary. Avoid calling flush on every tip write
-    /// IMPORTANT:
-    /// - Tree::flush() is not a cross-tree durability fence.
-    /// - Db::flush() is the single durability barrier for all trees.
+    /// Explicit flush boundary. Avoid calling flush on every tip write.
+    ///
+    /// Upstream's comment here said `Tree::flush()` is not a cross-tree durability fence while
+    /// `Db::flush()` is. In sled 0.34 that distinction does not exist: `Db` derefs to its default
+    /// `Tree` (sled-0.34.7 src/db.rs), and `Tree::flush()` calls `pagecache.flush()` on the one
+    /// shared write-ahead log, so `db.meta.flush()`, `db.idx.flush()` and `db.db.flush()` are the
+    /// same operation.
+    ///
+    /// What is missing is atomicity, not a fence: writes to different trees are separate
+    /// operations, so an unclean kill can persist some and not others. `apply_batch` is atomic
+    /// per tree, which is why the txid index writes each block's data and its completeness marker
+    /// in one batch on one tree. Block apply still spans utxo, utxo_meta, app, undo and meta
+    /// without a batch; the reorg journal plus the shutdown handler cover that, and a cross-tree
+    /// transaction there would change the consensus-governing apply code.
     pub fn flush_all(&self) -> Result<()> {
         self.db.flush()?;
         Ok(())
@@ -136,11 +147,42 @@ pub fn k_meta_tip() -> &'static [u8] {
     b"meta:tip"
 }
 
+pub fn k_bad_prefix() -> &'static [u8] {
+    b"bad:"
+}
+
 pub fn k_bad(hash: &Hash32) -> Vec<u8> {
     let mut k = Vec::with_capacity(4 + 32);
-    k.extend_from_slice(b"bad:");
+    k.extend_from_slice(k_bad_prefix());
     k.extend_from_slice(hash);
     k
+}
+
+/// Number of `bad:` marks (`/node/info` `bad_block_marks`, `csd fingerprint --long`).
+pub fn bad_mark_count(db: &Stores) -> Result<usize> {
+    let mut n = 0;
+    for k in db.meta.scan_prefix(k_bad_prefix()).keys() {
+        k?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// The block a `bad:` key marks (the inverse of `k_bad`).
+pub fn bad_mark_hash(key: &[u8]) -> Option<Hash32> {
+    Hash32::try_from(key.strip_prefix(k_bad_prefix())?).ok()
+}
+
+/// Stored block bodies removed since process start because they failed validation on bytes their
+/// header does not commit to (`/node/info` `dropped_block_bodies`).
+pub static DROPPED_BLOCK_BODIES: AtomicU64 = AtomicU64::new(0);
+
+/// Removes a stored block body so it is neither applied nor served again and can be fetched anew.
+pub fn drop_block_body(db: &Stores, hash: &Hash32) -> Result<()> {
+    if db.blocks.remove(k_block(hash))?.is_some() {
+        DROPPED_BLOCK_BODIES.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 // Legacy key (kept for compatibility)
@@ -183,9 +225,23 @@ pub fn get_tip(db: &Stores) -> Result<Option<Hash32>> {
     }
 }
 
+/// Test-only error seam: while `CSD_TEST_FAIL_SET_TIP` holds a hash in hex, `set_tip` to that hash
+/// fails before writing, with an untyped error like `get_tip`'s own. Compiled only under `test` or
+/// the `test-bypass` feature, so a release binary does not contain it.
+#[cfg(any(test, feature = "test-bypass"))]
+fn test_seam_fail_set_tip(tip: &Hash32) -> Result<()> {
+    if std::env::var("CSD_TEST_FAIL_SET_TIP").is_ok_and(|want| want == hex::encode(tip)) {
+        bail!("CSD_TEST_FAIL_SET_TIP: injected set_tip failure");
+    }
+    Ok(())
+}
+
 /// CONSENSUS-ONLY tip write.
 /// No explorer indexing, no extra tree mutations.
 pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
+    #[cfg(any(test, feature = "test-bypass"))]
+    test_seam_fail_set_tip(tip)?;
+
     let old = get_tip(db)?.unwrap_or([0u8; 32]);
 
     println!(
@@ -195,49 +251,21 @@ pub fn set_tip(db: &Stores, tip: &Hash32) -> Result<()> {
     );
 
     db.meta.insert(k_meta_tip(), tip)?;
+
+    // Wake the txid-index reconciler. This is the single chokepoint every tip change goes
+    // through (sync apply, miner apply, reorg, recovery), so one call here covers all of them and
+    // cannot be forgotten by a new apply path.
+    //
+    // Why it matters: almost every node runs at the tip, and a polled reconciler is stale for up
+    // to one idle period after every block (measured with polling alone: about 1.45 s per block),
+    // during which /tx/:id falls back to the bounded chain scan, which is exactly the moment a
+    // wallet polls for the transaction that just confirmed.
+    //
+    // notify_one is non-blocking, stores a permit if nobody is waiting, and is safe to call from
+    // any thread including the blocking pool, so this cannot stall an apply.
+    crate::state::tx_scan::notify_tip_changed();
+
     Ok(())
-}
-
-// -----------------------------------------------------------------------------
-// Explorer indexing helpers (NOT CONSENSUS)
-// -----------------------------------------------------------------------------
-// (explorer sync, background maintenance, RPC handlers), not from reorg/apply/undo.
-
-pub fn update_explorer_index_for_tip_transition(db: &Stores, old: &Hash32, new: &Hash32) {
-    // Determine old/new heights (best-effort)
-    let old_hi = crate::chain::index::get_hidx(db, old).ok().flatten();
-    let new_hi = crate::chain::index::get_hidx(db, new).ok().flatten();
-
-    // If moving backwards: unindex blocks from old down to new height+1.
-    if let (Some(ohi), Some(nhi)) = (old_hi.clone(), new_hi.clone()) {
-        if nhi.height < ohi.height {
-            let mut cur_hash = *old;
-            let mut cur_hi = ohi;
-
-            while cur_hi.height > nhi.height {
-                let _ = crate::state::tx_index::unindex_canonical_block(db, &cur_hash, cur_hi.height);
-
-                // step to parent
-                cur_hash = cur_hi.parent;
-                cur_hi = crate::chain::index::get_hidx(db, &cur_hash)
-                    .ok()
-                    .flatten()
-                    .unwrap_or(crate::chain::index::HeaderIndex {
-                        hash: cur_hash,
-                        parent: [0u8; 32],
-                        height: 0,
-                        chainwork: 0,
-                        bits: 0,
-                        time: 0,
-                    });
-            }
-        }
-    }
-
-    // If we know new height, index the canonical tip block.
-    if let Some(nhi) = new_hi {
-        let _ = crate::state::tx_index::index_canonical_block(db, new, nhi.height);
-    }
 }
 
 // -----------------------------------------------------------------------------

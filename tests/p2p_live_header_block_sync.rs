@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // live p2p lane: toy chains and the fault seam need the bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;

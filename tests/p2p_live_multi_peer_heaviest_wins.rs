@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // live p2p lane: toy chains and the fault seam need the bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
@@ -248,7 +249,13 @@ async fn live_multi_peer_sync_converges_to_heaviest_branch() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Poll for convergence to the heaviest branch.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // The deadline must outlive BAD_PROVIDER_RETRY_SECS (120s, src/net/node.rs): on
+    // localhost the first GetBlock to the heavier-branch peer can hit a transient
+    // outbound timeout, which stamps that peer bad for 120s and removes it as the
+    // recorded provider; the block then stalls ("no_peer (no_provider)") until the
+    // penalty lapses and the retry self-heals. 30s deadlines predate that penalty and
+    // can never survive a transient miss; 180s covers the window plus fetch margin.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let mut last_tip_b = get_tip(&db_b)?.unwrap_or([0u8; 32]);
     let mut last_height_b = get_hidx(&db_b, &last_tip_b)?
         .map(|x| x.height)

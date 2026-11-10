@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -115,8 +116,7 @@ fn make_signed_attest_tx(
 }
 
 #[test]
-fn rejects_attest_before_proposal_in_same_block() -> Result<()> {
-    std::env::set_var("CSD_BYPASS_POW", "1");
+fn accepts_attest_listed_before_proposal_phased_apply() -> Result<()> {
 
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
@@ -191,21 +191,27 @@ fn rejects_attest_before_proposal_in_same_block() -> Result<()> {
         None,
     );
 
-    // Intentionally wrong order: attest before its proposal appears in this block.
-    let txs = vec![cb, attest_tx, propose_tx];
+    // Attest listed before its proposal in the tx vector. This is NOT a rejection case:
+    // consensus applies app txs in phases (src/state/utxo.rs: Phase 1 proposals, Phase 2
+    // attestations, Phase 3 None), so tx-list order within a block is irrelevant to app
+    // state. The miner template builder mirrors this with the same propose<attest priority
+    // sort (src/chain/mine.rs). This test pins the phased-apply contract: the block is
+    // ACCEPTED and both app effects land. (Upstream's version of this test asserted
+    // rejection, which upstream's phased apply no longer does.)
+    let txs = vec![cb, attest_tx, propose_tx.clone()];
     let hdr = make_test_header(&db, parent, &txs, height).context("make_test_header")?;
     let blk = Block { header: hdr, txs };
 
-    let err = validate_and_apply_block(&db, &blk, epoch_of(height), height)
-        .expect_err("block should reject attest-before-proposal ordering");
+    validate_and_apply_block(&db, &blk, epoch_of(height), height)
+        .expect("phased apply must accept attest-listed-before-propose in the same block");
 
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("unknown proposal")
-            || msg.contains("proposal")
-            || msg.contains("missing"),
-        "unexpected error: {msg}"
-    );
+    // Both app effects landed: the proposal exists and the attest is recorded against it.
+    let pv = db
+        .app
+        .get(csd::state::app_state::k_proposal(&proposal_id))?
+        .expect("proposal must exist after phased apply");
+    let _prop: csd::state::app_state::Proposal =
+        csd::codec::consensus_bincode().deserialize(&pv)?;
 
     Ok(())
 }

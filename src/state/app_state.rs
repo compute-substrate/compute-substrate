@@ -173,6 +173,8 @@ fn enforce_domain_uri_limits(domain: &str, uri: &str) -> Result<()> {
 
 /// Apply one tx’s app payload (CONSENSUS CRITICAL).
 /// `fee` must be canonical (computed by UTXO validation).
+/// On error this call's app-tree writes are rolled back before the error is returned: the caller
+/// records the undo entries of a successful call only.
 pub fn apply_app_tx(
     db: &Stores,
     tx: &Transaction,
@@ -181,6 +183,29 @@ pub fn apply_app_tx(
     fee: u64,
 ) -> Result<Vec<AppUndo>> {
     let mut undos: Vec<AppUndo> = vec![];
+    if let Err(e) = apply_app_tx_writes(db, tx, height, txid, fee, &mut undos) {
+        if let Err(rollback_err) = rollback_app_undo(db, &undos) {
+            eprintln!(
+                "[state] CRITICAL: rollback of a rejected app payload failed: {rollback_err:#}. \
+                 The app tree may hold part of tx {}. Compare this datadir against a \
+                 from-genesis rebuild (`csd fingerprint --datadir <dir>`) before trusting it. \
+                 Original rejection: {e:#}",
+                hex::encode(txid)
+            );
+        }
+        return Err(e);
+    }
+    Ok(undos)
+}
+
+fn apply_app_tx_writes(
+    db: &Stores,
+    tx: &Transaction,
+    height: u64,
+    txid: &Hash32,
+    fee: u64,
+    undos: &mut Vec<AppUndo>,
+) -> Result<()> {
     let epoch = epoch_of(height);
     let who = sender_h160_from_tx(tx);
 
@@ -188,7 +213,7 @@ pub fn apply_app_tx(
     let c = crate::codec::consensus_bincode();
 
     match &tx.app {
-        AppPayload::None => return Ok(undos),
+        AppPayload::None => return Ok(()),
 
         AppPayload::Propose {
             domain,
@@ -226,7 +251,7 @@ pub fn apply_app_tx(
                 &db.app,
                 pkey.clone(),
                 bytes,
-                &mut undos,
+                undos,
                 AppUndo::PutProposal { key: pkey, prev },
             )?;
 
@@ -240,7 +265,7 @@ pub fn apply_app_tx(
                     &db.app,
                     skey.clone(),
                     zb,
-                    &mut undos,
+                    undos,
                     AppUndo::PutScore {
                         key: skey,
                         prev: prevs,
@@ -248,7 +273,7 @@ pub fn apply_app_tx(
                 )?;
             }
 
-            recompute_topk(db, epoch, domain.as_str(), &mut undos)?;
+            recompute_topk(db, epoch, domain.as_str(), undos)?;
         }
 
         AppPayload::Attest {
@@ -301,7 +326,7 @@ pub fn apply_app_tx(
                 &db.app,
                 akey.clone(),
                 bytes,
-                &mut undos,
+                undos,
                 AppUndo::PutAttest {
                     key: akey,
                     prev: preva,
@@ -322,18 +347,18 @@ pub fn apply_app_tx(
                 &db.app,
                 skey.clone(),
                 nb,
-                &mut undos,
+                undos,
                 AppUndo::PutScore {
                     key: skey,
                     prev: prevs,
                 },
             )?;
 
-            recompute_topk(db, epoch, prop.domain.as_str(), &mut undos)?;
+            recompute_topk(db, epoch, prop.domain.as_str(), undos)?;
         }
     }
 
-    Ok(undos)
+    Ok(())
 }
 
 /// Deterministically recompute TopK for (epoch, domain) by scanning scores prefix.

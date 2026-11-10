@@ -26,8 +26,10 @@ fn hex_bytes(b: &[u8]) -> String {
 }
 
 // --- PASTE THESE INTO tests/golden_vectors.rs ---
+// Re-frozen for POW_LIMIT_BITS = 0x1e00ffff (exponent 30 -> 3 leading zero bytes). The old value
+// 0x0000ffff... was for 0x1f00ffff and was never updated when mainnet tightened the pow limit.
 const EXPECT_POW_LIMIT_TARGET: &str =
-    "0x0000ffff00000000000000000000000000000000000000000000000000000000";
+    "0x000000ffff000000000000000000000000000000000000000000000000000000";
 const EXPECT_TXID: &str =
     "0x876f5cbd6770ce8679730b8ad565ba136fa30bd750ef4f3345b8f7289393dd6b";
 const EXPECT_SIGHASH: &str =
@@ -152,4 +154,44 @@ fn golden_vectors_print_constants() {
         hex_bytes(&tx_bytes)
     );
     println!("--- END ---\n");
+}
+
+/// n - s on the 256-bit big-endian S half of a compact signature, n the secp256k1 group order:
+/// the other valid S for the same signature, so a low-S signature turns into its high-S twin.
+fn high_s_twin(sig64: &[u8; 64]) -> [u8; 64] {
+    const N: [u8; 32] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+    ];
+    let mut out = *sig64;
+    let mut borrow = 0i16;
+    for i in (0..32).rev() {
+        let mut d = N[i] as i16 - sig64[32 + i] as i16 - borrow;
+        borrow = 0;
+        if d < 0 {
+            d += 256;
+            borrow = 1;
+        }
+        out[32 + i] = d as u8;
+    }
+    out
+}
+
+// The LOW-S rule of `crypto::verify_sig`: a signature is accepted only in its low-S form, so a
+// signed transaction has one valid signature encoding, not two.
+#[test]
+fn a_high_s_signature_is_refused_and_its_low_s_twin_verifies() {
+    let sk = [7u8; 32];
+    let tx = make_tx();
+    let (sig64, pub33) = csd::crypto::sign_tx_compact_secp256k1(&tx, sk);
+
+    csd::crypto::verify_sig(&tx, &sig64, &pub33).expect("the low-S signature verifies");
+
+    let high = high_s_twin(&sig64);
+    assert_ne!(high, sig64);
+    assert_eq!(high_s_twin(&high), sig64, "n - (n - s) = s");
+    assert!(
+        csd::crypto::verify_sig(&tx, &high, &pub33).is_err(),
+        "the high-S twin of a valid signature must be refused"
+    );
 }

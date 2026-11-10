@@ -171,7 +171,26 @@ pub fn pow_ok_strict(hash: &Hash32, bits: u32) -> bool {
     target.check(hash)
 }
 
+/// Test-only PoW bypass, COMPILE-TIME gated by the `test-bypass` cargo feature.
+///
+/// Integration tests (tests/) link the lib compiled WITHOUT cfg(test), so a
+/// `#[cfg(test)]` gate cannot reach them: the cargo feature is the only sound
+/// switch (`cargo test --features test-bypass`). Production/release builds never
+/// enable it, so the bypass is compiled out entirely. A runtime switch (an
+/// environment variable) would be honoured by deployed binaries, where one setting
+/// turns off PoW checks on a mainnet node; such a switch must not be added.
+#[inline]
+fn bypass_pow() -> bool {
+    cfg!(feature = "test-bypass")
+}
+
+/// PoW validity used by consensus code.
+/// Under the `test-bypass` feature (integration tests only), always true.
 pub fn pow_ok(hash: &Hash32, bits: u32) -> bool {
+    if bypass_pow() {
+        let _ = (hash, bits);
+        return true;
+    }
     pow_ok_strict(hash, bits)
 }
 
@@ -311,6 +330,18 @@ pub fn expected_bits_strict(db: &Stores, height: u64, parent: Option<&HeaderInde
     Ok(bits)
 }
 
+/// expected_bits used by consensus code.
+/// Under the `test-bypass` feature (integration tests only), keep it stable: parent.bits.
 pub fn expected_bits(db: &Stores, height: u64, parent: Option<&HeaderIndex>) -> Result<u32> {
+    if bypass_pow() {
+        let _ = db;
+        if height == 0 {
+            return Ok(INITIAL_BITS);
+        }
+        if let Some(p) = parent {
+            return Ok(p.bits);
+        }
+        bail!("expected_bits(test-bypass): missing parent for height>0");
+    }
     expected_bits_strict(db, height, parent)
 }

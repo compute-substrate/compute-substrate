@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -40,7 +41,6 @@ fn persist_index_apply_block(db: &Stores, blk: &Block, height: u64) -> Result<[u
 
 #[test]
 fn rejects_block_with_coinbase_app_payload() -> Result<()> {
-    std::env::set_var("CSD_BYPASS_POW", "1");
 
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;

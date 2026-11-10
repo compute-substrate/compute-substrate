@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
@@ -133,6 +134,10 @@ fn spam_many_propose_and_attest_matches_reference_model() -> Result<()> {
     let addr_user = signer;
 
     let mut proposals_by_domain: HashMap<String, Vec<Hash32>> = HashMap::new();
+    // Track each proposal's expiry so attests only target LIVE proposals: consensus
+    // rejects an attest when `epoch > expires_epoch` (app_state.rs), and the reference
+    // model must never plan an attest consensus would refuse.
+    let mut proposal_expiry: HashMap<Hash32, u64> = HashMap::new();
     let mut ref_scores: HashMap<(u64, String), HashMap<Hash32, u128>> = HashMap::new();
 
     let blocks_to_make = 40usize;
@@ -186,6 +191,7 @@ let parent_hi = get_hidx(&db, &cur_tip)?.expect("missing parent hidx");
 
             let pid = csd::crypto::txid(&tx);
             proposals_by_domain.entry(d.clone()).or_default().push(pid);
+            proposal_expiry.insert(pid, expires_epoch);
 
             ref_scores
                 .entry((epoch, d.clone()))
@@ -201,11 +207,14 @@ let parent_hi = get_hidx(&db, &cur_tip)?.expect("missing parent hidx");
                 break;
             }
 
-            let eligible: Vec<String> = proposals_by_domain
+            // HashMap iteration order is nondeterministic per process; sort so the
+            // seeded-RNG index pick below is stable across runs.
+            let mut eligible: Vec<String> = proposals_by_domain
                 .iter()
-                .filter(|(_, v)| !v.is_empty())
+                .filter(|(_, v)| v.iter().any(|pid| proposal_expiry[pid] >= epoch))
                 .map(|(k, _)| k.clone())
                 .collect();
+            eligible.sort_unstable();
 
             if eligible.is_empty() {
                 break;
@@ -213,7 +222,11 @@ let parent_hi = get_hidx(&db, &cur_tip)?.expect("missing parent hidx");
 
             let d = eligible[rng.gen_range(0..eligible.len())].clone();
             let props = proposals_by_domain.get(&d).unwrap();
-            let proposal_id = props[rng.gen_range(0..props.len())];
+            let live: Vec<&Hash32> = props
+                .iter()
+                .filter(|pid| proposal_expiry[*pid] >= epoch)
+                .collect();
+            let proposal_id = *live[rng.gen_range(0..live.len())];
 
             let (op, v) = fund_utxos[fund_i];
             fund_i += 1;

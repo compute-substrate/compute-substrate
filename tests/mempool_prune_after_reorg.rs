@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -156,6 +157,9 @@ fn mempool_prunes_txs_invalidated_by_reorg() -> Result<()> {
     // - one to remain unspent on A, so a mempool tx can be valid before reorg
     let spend_in_a_block_hash = shared[2];
     let mempool_utxo_block_hash = shared[3];
+    let attest_utxo_block = load_block(&db, &shared[4])?;
+    let attest_prev = OutPoint { txid: txid(&attest_utxo_block.txs[0]), vout: 0 };
+    let attest_prev_value = attest_utxo_block.txs[0].outputs[0].value;
 
     let spend_in_a_block = load_block(&db, &spend_in_a_block_hash)?;
     let mempool_utxo_block = load_block(&db, &mempool_utxo_block_hash)?;
@@ -248,6 +252,24 @@ fn mempool_prunes_txs_invalidated_by_reorg() -> Result<()> {
     assert!(mp.contains(&mempool_txid));
     assert_eq!(mp.len(), 1);
 
+    // An Attest to branch A's proposal, spending a coin both branches keep: on branch B its spent
+    // output is still there and its fee unchanged, and only the app-state recheck (the proposal is
+    // gone) can drop it.
+    let proposal_a = txid(&blk_a1.txs[1]);
+    let attest_fee = csd::params::MIN_FEE_ATTEST;
+    let attest_tx = make_spend_tx(
+        attest_prev,
+        attest_prev_value,
+        h20(0x56),
+        attest_prev_value - attest_fee,
+        attest_fee,
+        sk,
+        AppPayload::Attest { proposal_id: proposal_a, score: 70, confidence: 60 },
+    );
+    let attest_txid = txid(&attest_tx);
+    assert!(mp.insert_checked(&db, attest_tx)?, "the Attest is admitted while A's proposal exists");
+    assert_eq!(mp.len(), 2);
+
     // -----------------------------
     // Branch B: heavier fork that spends the mempool tx's prevout on-chain
     // -----------------------------
@@ -321,12 +343,13 @@ fn mempool_prunes_txs_invalidated_by_reorg() -> Result<()> {
     maybe_reorg_to(&db, &tip_b3, None).context("reorg A -> B")?;
     assert_tip_eq(&db, tip_b3)?;
 
-    // After reorg, the prevout for mempool_tx has been consumed on canonical chain.
-    // prune() should drop it.
+    // After reorg, the prevout for mempool_tx has been consumed on canonical chain, and the
+    // proposal the Attest names is gone. prune() should drop both.
     let removed = mp.prune(&db);
-    assert_eq!(removed, 1, "expected exactly one invalidated mempool tx to be pruned");
+    assert!(!mp.contains(&mempool_txid), "the tx whose spent output the reorg consumed must be pruned");
+    assert!(!mp.contains(&attest_txid), "the Attest to a proposal the reorg removed must be pruned");
+    assert_eq!(removed, 2, "expected exactly the two invalidated mempool txs to be pruned");
     assert_eq!(mp.len(), 0);
-    assert!(!mp.contains(&mempool_txid));
 
     Ok(())
 }

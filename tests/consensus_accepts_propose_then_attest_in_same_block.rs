@@ -1,3 +1,4 @@
+#![cfg(feature = "test-bypass")] // toy-chain fixture: needs the PoW/genesis bypass (cargo test --features test-bypass)
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
@@ -116,7 +117,6 @@ fn make_signed_attest_tx(
 
 #[test]
 fn accepts_propose_then_attest_in_same_block() -> Result<()> {
-    std::env::set_var("CSD_BYPASS_POW", "1");
 
     let tmp = TempDir::new().context("tmp")?;
     let db = open_db(&tmp).context("open db")?;
