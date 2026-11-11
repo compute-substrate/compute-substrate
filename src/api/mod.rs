@@ -482,6 +482,9 @@ last_tip_activity_unix,
             "/recent/attestations/:domain/:limit",
             get(most_attested_by_domain),
         )
+        // Every attestation ever made, not only recent ones:
+        .route("/attestations/:proposal_id", get(attestations_for_proposal))
+        .route("/attestations/domain/:domain", get(attestations_in_domain))
         // Computation window:
         .route("/window/:domain", get(window_domain))
         .route("/top/global", get(top_global))
@@ -2747,6 +2750,132 @@ fn most_attested_by_domain_blocking(
 }
 
 // ===========================
+// All-time attestations
+// ===========================
+//
+// The /recent/attestations routes walk back a fixed number of blocks, so an attestation older
+// than that drops out of them. These read the stored attestations themselves, which are kept for
+// good: one proposal's, or the totals for every proposal in a domain. Both scan the attestation
+// keyspace (one pass over the `A` keys), so they share the display gate with the other scans.
+
+const ATTESTATIONS_LIST_MAX: usize = 1_000;
+
+fn attestation_json(a: &Attestation) -> serde_json::Value {
+    serde_json::json!({
+        "txid": format!("0x{}", hex::encode(a.id)),
+        "attester": format!("0x{}", hex::encode(a.attester)),
+        "score": a.score,
+        "confidence": a.confidence,
+        "weight": a.weight,
+        "height": a.height,
+        "epoch": a.epoch,
+    })
+}
+
+/// GET /attestations/:proposal_id
+/// Every attestation on one proposal, with totals: count, score and confidence sums, and the
+/// economic weight (the fees). The list holds the newest 1,000; the totals count all of them.
+async fn attestations_for_proposal(Path(id): Path<String>, State(st): State<ApiState>) -> Response {
+    offload_display(move || attestations_for_proposal_blocking(id, st).into_response()).await
+}
+
+fn attestations_for_proposal_blocking(id: String, st: ApiState) -> Json<serde_json::Value> {
+    let pid = match parse_hash32(&id) {
+        Ok(x) => x,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "err": e })),
+    };
+    if get_proposal(&st.db, &pid).ok().flatten().is_none() {
+        return Json(serde_json::json!({ "ok": false, "err": "not found" }));
+    }
+
+    let mut all: Vec<Attestation> = vec![];
+    for item in st.db.app.scan_prefix([b'A']) {
+        let Ok((k, v)) = item else { continue };
+        if k.len() != 1 + 32 {
+            continue;
+        }
+        let Ok(att) = c().deserialize::<Attestation>(&v) else { continue };
+        if att.proposal_id == pid {
+            all.push(att);
+        }
+    }
+    all.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| a.id.cmp(&b.id)));
+
+    let weight: u128 = all.iter().map(|a| a.weight as u128).sum();
+    let score_sum: u64 = all.iter().map(|a| a.score as u64).sum();
+    let confidence_sum: u64 = all.iter().map(|a| a.confidence as u64).sum();
+    Json(serde_json::json!({
+        "ok": true,
+        "proposal_id": format!("0x{}", hex::encode(pid)),
+        "attest_count": all.len(),
+        "score_sum": score_sum,
+        "confidence_sum": confidence_sum,
+        "economic_weight": weight,
+        "truncated": all.len() > ATTESTATIONS_LIST_MAX,
+        "attestations": all.iter().take(ATTESTATIONS_LIST_MAX).map(attestation_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// GET /attestations/domain/:domain
+/// For every proposal in a domain that has been attested: count, score and confidence sums, and
+/// economic weight, over all attestations ever made. Proposals nobody attested are left out.
+async fn attestations_in_domain(Path(domain): Path<String>, State(st): State<ApiState>) -> Response {
+    offload_display(move || attestations_in_domain_blocking(domain, st).into_response()).await
+}
+
+fn attestations_in_domain_blocking(domain: String, st: ApiState) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Totals {
+        count: u64,
+        score_sum: u64,
+        confidence_sum: u64,
+        weight: u128,
+        last_height: u64,
+    }
+
+    // each proposal's domain, looked up once
+    let mut in_domain: HashMap<Hash32, bool> = HashMap::new();
+    let mut totals: HashMap<Hash32, Totals> = HashMap::new();
+    for item in st.db.app.scan_prefix([b'A']) {
+        let Ok((k, v)) = item else { continue };
+        if k.len() != 1 + 32 {
+            continue;
+        }
+        let Ok(att) = c().deserialize::<Attestation>(&v) else { continue };
+        let ours = *in_domain.entry(att.proposal_id).or_insert_with(|| {
+            get_proposal(&st.db, &att.proposal_id).ok().flatten().map(|p| p.domain == domain).unwrap_or(false)
+        });
+        if !ours {
+            continue;
+        }
+        let t = totals.entry(att.proposal_id).or_default();
+        t.count += 1;
+        t.score_sum = t.score_sum.saturating_add(att.score as u64);
+        t.confidence_sum = t.confidence_sum.saturating_add(att.confidence as u64);
+        t.weight = t.weight.saturating_add(att.weight as u128);
+        t.last_height = t.last_height.max(att.height);
+    }
+
+    let mut items: Vec<(Hash32, Totals)> = totals.into_iter().collect();
+    items.sort_by(|a, b| b.1.weight.cmp(&a.1.weight).then_with(|| a.0.cmp(&b.0)));
+    Json(serde_json::json!({
+        "ok": true,
+        "domain": domain,
+        "count": items.len(),
+        "items": items.iter().map(|(pid, t)| serde_json::json!({
+            "proposal_id": format!("0x{}", hex::encode(pid)),
+            "attest_count": t.count,
+            "score_sum": t.score_sum,
+            "confidence_sum": t.confidence_sum,
+            "economic_weight": t.weight,
+            "last_height": t.last_height,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+// ===========================
 // Computation window + canonical endpoints
 // ===========================
 
@@ -3736,6 +3865,64 @@ mod display_gate_tests {
         let (_, body) = status_and_body(node_info(State(st)).await.into_response()).await;
         let j: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!((j["outbound_peers"].as_u64(), j["inbound_peers"].as_u64()), (Some(4), Some(6)));
+    }
+
+    // The all-time attestation routes read the stored attestations, whatever their age.
+    #[tokio::test]
+    async fn all_time_attestations_for_a_proposal_and_a_domain() {
+        let _g = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let st = test_api_state(&dir);
+        seed(&st.db);
+        let p1 = "0x807a2f18cddbebe0c737fbbe97530191c38100d3244e5df301d041d242977ce2";
+
+        let (code, body) = status_and_body(attestations_for_proposal(Path(p1.into()), State(st.clone())).await.into_response()).await;
+        assert_eq!(code, 200);
+        let j: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["attest_count"], 1);
+        assert_eq!(j["score_sum"], 90);
+        assert_eq!(j["confidence_sum"], 80);
+        assert_eq!(j["economic_weight"], 5);
+        assert_eq!(j["attestations"][0]["attester"], format!("0x{}", "06".repeat(20)));
+        assert_eq!(j["attestations"][0]["score"], 90);
+
+        // an older attestation, far below any recent window, still counts
+        let old = Attestation { id: [9u8; 32], proposal_id: parse_hash32(p1).unwrap(), weight: 7, height: 0, epoch: 0, attester: [8u8; 20], score: 0, confidence: 100 };
+        st.db.app.insert(k_attest(&old.id), c().serialize(&old).unwrap()).unwrap();
+        let (_, body) = status_and_body(attestations_for_proposal(Path(p1.into()), State(st.clone())).await.into_response()).await;
+        let j: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(j["attest_count"], 2);
+        assert_eq!(j["score_sum"], 90);
+        assert_eq!(j["economic_weight"], 12);
+
+        let (_, body) = status_and_body(attestations_in_domain(Path("alpha".into()), State(st.clone())).await.into_response()).await;
+        let j: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(j["count"], 1, "only alpha's proposal: {body}");
+        assert_eq!(j["items"][0]["proposal_id"], p1);
+        assert_eq!(j["items"][0]["attest_count"], 2);
+        assert_eq!(j["items"][0]["score_sum"], 90);
+        let (_, body) = status_and_body(attestations_in_domain(Path("gamma".into()), State(st.clone())).await.into_response()).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 0);
+
+        let (_, body) = status_and_body(attestations_for_proposal(Path("0x12".into()), State(st.clone())).await.into_response()).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["ok"], false);
+        let (_, body) = status_and_body(attestations_for_proposal(Path(format!("0x{}", "ee".repeat(32))), State(st.clone())).await.into_response()).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["err"], "not found");
+    }
+
+    // They scan, so a full display pool sheds them like the other scans.
+    #[tokio::test]
+    async fn all_time_attestations_shed_when_the_display_pool_is_full() {
+        let _g = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _w = ShortDisplayWait::set(50);
+        let dir = tempfile::tempdir().unwrap();
+        let st = test_api_state(&dir);
+        seed(&st.db);
+        let held = display_scan_gate().clone().acquire_many_owned(DISPLAY_SCAN_PERMITS as u32).await.unwrap();
+        let (code, _) = status_and_body(attestations_in_domain(Path("alpha".into()), State(st.clone())).await.into_response()).await;
+        assert_eq!(code, 503);
+        drop(held);
     }
 
     // Honest path: an unloaded request answers byte-identically to the ungated handler.
