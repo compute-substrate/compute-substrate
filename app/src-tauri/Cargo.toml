@@ -2,7 +2,7 @@
 name = "csd-app"
 version = "0.1.0"
 edition = "2021"
-description = "Compute Substrate: a node on your own computer, with no terminal"
+description = "Compute Substrate Node: a node on your own computer, with no terminal"
 license = "MIT"
 publish = false
 

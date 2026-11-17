@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Compute Substrate",
+  "productName": "Compute Substrate Node",
   "version": "0.1.0",
   "identifier": "network.computesubstrate.node",
   "build": {
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Compute Substrate",
+        "title": "Compute Substrate Node",
         "width": 460,
         "height": 600,
         "minWidth": 380,

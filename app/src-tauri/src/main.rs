@@ -1,4 +1,4 @@
-// Compute Substrate, the app: runs the `csd` node that ships inside it, on this computer, with no
+// Compute Substrate Node, the app: runs the `csd` node that ships inside it, on this computer, with no
 // terminal. It keeps the node's data in the app's own folder, starts it when the app opens and stops
 // it cleanly when the app closes. The window shows how far the node has synced; apps on this
 // computer (and web pages in its browser) can use the node at http://127.0.0.1:8789.

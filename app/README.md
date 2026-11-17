@@ -1,4 +1,4 @@
-# The Compute Substrate app
+# Compute Substrate Node
 
 A Compute Substrate node on your own computer, with no terminal. Download it, open it, and leave it
 running. It keeps its own full copy of the network, checks every block itself before keeping it, and
@@ -10,9 +10,9 @@ While it runs, apps on the same computer can use your node instead of someone el
 
 ## Download
 
-- **macOS** (Apple Silicon and Intel): [Compute-Substrate-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.0/Compute-Substrate-macOS.dmg).
+- **macOS** (Apple Silicon and Intel): [Compute-Substrate-Node-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.0/Compute-Substrate-Node-macOS.dmg).
   Open it and drag the app to Applications.
-- **Windows**: [Compute-Substrate-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.0/Compute-Substrate-Windows-setup.exe).
+- **Windows**: [Compute-Substrate-Node-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.0/Compute-Substrate-Node-Windows-setup.exe).
 
 These are version 0.1.0. Newer versions, with their checksums, are on
 [Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
@@ -23,7 +23,7 @@ The app isn't signed by Apple or Microsoft (that costs money each year and ties 
 person or company), so your computer asks once whether you trust it:
 
 - **macOS:** open it; when macOS says it can't verify the app, click *Done*. Then open *System
-  Settings*, *Privacy & Security*, scroll down to the message about Compute Substrate and click
+  Settings*, *Privacy & Security*, scroll down to the message about Compute Substrate Node and click
   *Open Anyway*.
 - **Windows:** if *Windows protected your PC* appears, click *More info*, then *Run anyway*.
 
