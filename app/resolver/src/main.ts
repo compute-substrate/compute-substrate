@@ -17,7 +17,8 @@ import { ripemd160 } from "@noble/hashes/legacy";
 
 const NODE = "http://127.0.0.1:8789";
 const CAIRN = "https://cairn-substrate.com";
-const COMMONPLACE = "https://commonplace.place";
+// the copy of Commonplace this app carries, served from this computer (an example app on the network)
+const COMMONPLACE = "http://localhost:8790";
 const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 // sha256("compute-substrate-mainnet"), the node's CHAIN_ID_HASH
 const CHAIN_ID = hex("0x1b17c7b04d05394674ca2c8e24f7433e251a1973cac2000c7b60966546e0b875");

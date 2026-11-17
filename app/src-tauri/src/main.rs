@@ -210,6 +210,68 @@ fn stop(node: &Node) {
     node.set("stopped", "");
 }
 
+// ── Commonplace, from this computer ─────────────────────────────────────────
+// The app carries a release of Commonplace (app/commonplace.json pins which, by its IPFS address)
+// and serves it here, on this computer only, so it opens with no website in between. It's one
+// example of an app on the network; it reads through this computer's own node.
+pub const LOCAL_SITE: &str = "127.0.0.1:8790";
+
+fn mime(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "wasm" => "application/wasm",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn serve_site(root: PathBuf) {
+    let server = match tiny_http::Server::http(LOCAL_SITE) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[site] can't serve Commonplace on {LOCAL_SITE}: {e}");
+            return;
+        }
+    };
+    let Ok(root) = root.canonicalize() else { return };
+    for req in server.incoming_requests() {
+        let path = req.url().split(['?', '#']).next().unwrap_or("/").to_string();
+        let rel = path.trim_start_matches('/');
+        let mut file = root.join(if rel.is_empty() { "index.html" } else { rel });
+        if file.is_dir() {
+            file = file.join("index.html");
+        }
+        // only files inside the release, nothing else on this computer
+        let ok = file.canonicalize().map(|f| f.starts_with(&root)).unwrap_or(false);
+        let resp = if ok {
+            match fs::read(&file) {
+                Ok(bytes) => tiny_http::Response::from_data(bytes)
+                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], mime(&file.to_string_lossy()).as_bytes()).unwrap())
+                    .with_status_code(200),
+                Err(_) => tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404),
+            }
+        } else {
+            tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404)
+        };
+        let _ = req.respond(resp);
+    }
+}
+
+#[tauri::command]
+fn site_url() -> String {
+    // localhost rather than 127.0.0.1: browsers treat it as a secure origin, which wallets and
+    // passkeys need. Reading goes through this computer's own node.
+    format!("http://localhost:8790/?node={}", "http%3A%2F%2F127.0.0.1%3A8789")
+}
+
 #[tauri::command]
 fn node_state(node: tauri::State<'_, Arc<Node>>) -> State {
     node.state.lock().unwrap().clone()
@@ -246,7 +308,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url])
         .setup({
             let node = node.clone();
             move |app| {
@@ -258,6 +320,12 @@ fn main() {
                 }
                 if let Err(e) = start(app.handle(), &node) {
                     node.set("failed", e);
+                }
+                if let Ok(dir) = app.path().resource_dir() {
+                    let site = dir.join("commonplace");
+                    if site.join("index.html").exists() {
+                        std::thread::spawn(move || serve_site(site));
+                    }
                 }
                 Ok(())
             }

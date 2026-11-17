@@ -41,6 +41,18 @@ After that it opens normally.
 
   `node.log` there is the node's log. Deleting the folder starts over with a fresh sync.
 
+It carries Commonplace, and opens it from your own computer: *Commonplace, from this computer* in the
+window, at `http://localhost:8790`. Commonplace is one example of an app built on the network, with
+no special place there; anyone can build others over the same records.
+
+- **Which copy:** `app/commonplace.json` pins the release by its commit and IPFS address. The build
+  makes it from that commit and refuses to continue unless it comes out with exactly that address,
+  so what ships is the published release, byte for byte.
+- **What it reads:** your own node.
+- **Signing in:** with a wallet, you get the same writing key as on commonplace.place. A passkey is
+  tied to the address a page is served from, so a passkey made on `localhost` is a different key from
+  one made on commonplace.place.
+
 It also opens `.csd` names, from Cairn's name service (CNS, by InverseAltruism), through your own
 node. Type a name into the window, or click a `web+csd:<name>` link anywhere on the computer; the app
 registers itself for those links.

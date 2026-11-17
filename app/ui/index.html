@@ -74,7 +74,7 @@
     <button id="copy">Copy</button>
   </div>
   <div class="row">
-    <div>Read Commonplace through your own node<small>Opens in your browser</small></div>
+    <div>Commonplace, from this computer<small>An example app on the network, opened with no website in between. Anyone can build others.</small></div>
     <button id="commonplace">Open</button>
   </div>
   <div class="row">
@@ -144,7 +144,7 @@
   $("copy").onclick = async () => {
     try { await navigator.clipboard.writeText(rpc); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1500); } catch {}
   };
-  $("commonplace").onclick = () => invoke("plugin:opener|open_url", { url: "https://commonplace.place/?node=" + encodeURIComponent(rpc) });
+  $("commonplace").onclick = async () => invoke("plugin:opener|open_url", { url: await invoke("site_url") });
   $("folder").onclick = $("log").onclick = () => invoke("open_data_folder");
   $("retry").onclick = async () => { show("busy", "Starting…", ""); $("failActions").hidden = true; try { await invoke("restart"); } catch {} tick(); };
 

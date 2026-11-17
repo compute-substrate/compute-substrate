@@ -15,7 +15,41 @@ permissions:
   contents: write
 
 jobs:
+  # The release of Commonplace the app carries (app/commonplace.json): built from its pinned commit,
+  # and used only if it comes out with exactly the pinned IPFS address
+  commonplace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the pinned release
+        id: pin
+        run: |
+          echo "repo=$(jq -r .repository app/commonplace.json)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(jq -r .commit app/commonplace.json)" >> "$GITHUB_OUTPUT"
+          echo "cid=$(jq -r .cid app/commonplace.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pin.outputs.repo }}
+          ref: ${{ steps.pin.outputs.commit }}
+          path: commonplace
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build it, and check it is the published release
+        working-directory: commonplace
+        run: |
+          npm ci
+          npm run release:ipfs | tee ../release.log
+          got=$(grep -o 'bafy[a-z0-9]*' ../release.log | head -1)
+          echo "built $got, pinned ${{ steps.pin.outputs.cid }}"
+          test "$got" = "${{ steps.pin.outputs.cid }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commonplace-site
+          path: commonplace/out
+
   build:
+    needs: commonplace
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +94,11 @@ jobs:
       - name: Build the name resolver
         working-directory: app/resolver
         run: npm ci && npm run build
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: commonplace-site
+          path: app/src-tauri/commonplace
 
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked

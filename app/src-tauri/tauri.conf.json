@@ -50,6 +50,9 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    },
+    "resources": {
+      "commonplace/": "commonplace/"
     }
   },
   "plugins": {
