@@ -1,0 +1,16 @@
+{
+  "name": "csd-app-resolver",
+  "private": true,
+  "description": "Opens .csd names (web+csd: links) through the app's own node; bundled into app/ui/resolver.js",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js"
+  },
+  "dependencies": {
+    "@inversealtruism/cairnx-core": "0.2.4",
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

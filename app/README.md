@@ -41,6 +41,19 @@ After that it opens normally.
 
   `node.log` there is the node's log. Deleting the folder starts over with a fresh sync.
 
+It also opens `.csd` names, from Cairn's name service (CNS, by InverseAltruism), through your own
+node. Type a name into the window, or click a `web+csd:<name>` link anywhere on the computer; the app
+registers itself for those links.
+
+- **Reading:** it asks Cairn's server for the transactions in the name's history. It reads each one
+  from your own node, which has checked every block itself, and checks it against its id and
+  signature.
+- **Resolving:** it replays them through Cairn's own resolver (`@inversealtruism/cairnx-core`).
+- **Opening:** it goes where the name points. That's the site in its profile's `ipfs`, the link in
+  its `url`, or else its holder's page on Commonplace, read through your node.
+
+Names are registered and managed on Cairn; the app only reads them.
+
 It makes the genesis block itself (`csd genesis`, which always gives the same block), so there is
 nothing to download besides the app.
 
@@ -78,6 +91,7 @@ adds nothing a node needs.
 ### Building the app yourself
 
 ```
+(cd app/resolver && npm ci && npm run build)
 cargo build --release --locked --bin csd
 mkdir -p app/src-tauri/binaries
 cp target/release/csd app/src-tauri/binaries/csd-$(rustc -vV | sed -n 's/host: //p')

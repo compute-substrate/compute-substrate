@@ -12,14 +12,14 @@
       {
         "title": "Compute Substrate Node",
         "width": 460,
-        "height": 600,
+        "height": 680,
         "minWidth": 380,
         "minHeight": 480,
         "resizable": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 https://cairn-substrate.com ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
@@ -49,6 +49,15 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "web+csd"
+        ]
       }
     }
   }

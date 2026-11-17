@@ -53,6 +53,14 @@ jobs:
           mkdir -p app/src-tauri/binaries
           cp target/x86_64-pc-windows-msvc/release/csd.exe app/src-tauri/binaries/csd-x86_64-pc-windows-msvc.exe
 
+      # the .csd name resolver the window uses (app/resolver), bundled into app/ui/resolver.js
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the name resolver
+        working-directory: app/resolver
+        run: npm ci && npm run build
+
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 

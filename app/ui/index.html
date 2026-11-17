@@ -85,9 +85,15 @@
     <div>Its data<small>A full copy of the network, checked block by block</small></div>
     <button id="folder">Show</button>
   </div>
+  <form class="row" id="nameForm">
+    <div style="flex:1">Open a .csd name<small id="nameStatus">web+csd: links open here too, through your own node</small></div>
+    <input id="nameInput" placeholder="alice" spellcheck="false" autocomplete="off" style="width:110px;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)">
+    <button>Open</button>
+  </form>
 
   <footer>Your node checks every block itself and passes them on to others. Closing this window stops it cleanly.</footer>
 
+<script src="resolver.js"></script>
 <script>
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
@@ -149,6 +155,24 @@
       catch { e.target.checked = !e.target.checked; }
     };
   })();
+
+  // .csd names (Cairn's name service): looked up through this computer's own node, then opened
+  async function openName(input) {
+    const st = $("nameStatus");
+    st.textContent = `Looking up ${input.replace(/^web\+csd:(\/\/)?/, "")}…`;
+    try {
+      const r = await CsdResolver.lookup(input);
+      if (!r.open) { st.textContent = r.why; return; }
+      st.textContent = `Opening ${r.name}.csd`;
+      await invoke("plugin:opener|open_url", { url: r.open });
+    } catch (e) { st.textContent = String(e && e.message || e); }
+  }
+  $("nameForm").onsubmit = e => { e.preventDefault(); const v = $("nameInput").value.trim(); if (v) openName(v); };
+  const dl = window.__TAURI__.deepLink;
+  if (dl) {
+    dl.getCurrent().then(urls => { if (urls && urls[0]) openName(urls[0]); }).catch(() => {});
+    dl.onOpenUrl(urls => { if (urls && urls[0]) openName(urls[0]); });
+  }
 
   listen("node-changed", tick);
   tick();

@@ -233,6 +233,16 @@ fn restart(app: tauri::AppHandle, node: tauri::State<'_, Arc<Node>>) -> Result<(
 fn main() {
     let node = Arc::new(Node::default());
     let app = tauri::Builder::default()
+        // one copy of the app: a second launch (on Windows, how a clicked web+csd: link arrives)
+        // hands its link to the running one and quits. It must come first.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
+        // web+csd:<name> links, registered with the OS: the window looks the name up and opens it
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
@@ -240,6 +250,12 @@ fn main() {
         .setup({
             let node = node.clone();
             move |app| {
+                // on Linux and Windows the scheme is registered at run time; macOS reads it from the bundle
+                #[cfg(any(target_os = "linux", windows))]
+                {
+                    use tauri_plugin_deep_link::DeepLinkExt;
+                    let _ = app.deep_link().register_all();
+                }
                 if let Err(e) = start(app.handle(), &node) {
                     node.set("failed", e);
                 }
