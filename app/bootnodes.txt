@@ -1,3 +1,8 @@
 # Nodes the app asks for peers when it starts. One multiaddr per line; # starts a comment.
 # Once connected, the node learns more peers from these, so a short list is enough.
-/ip4/77.42.82.161/tcp/17999/p2p/12D3KooWR7xJWh6mfVsm8FoxzXtCXe6HdmmzPL4fU72TFsvYSSfW
+/ip4/158.69.116.36/tcp/17999/p2p/12D3KooWHKcjL8M5snr3GniC8xRtGJGbGhPSdGiqtZNRz6UFj1t3
+/ip4/145.239.0.111/tcp/17999/p2p/12D3KooWFsHa5ifqK45Fjd8cYnDkVDN8R8MfjfiETNpEqnbGAEez
+/ip4/151.240.121.186/tcp/17999/p2p/12D3KooWBYmcJxnc9J8uSYodQ6fwT98XAt53HGwRjzcdBEKekAJE
+/ip4/151.240.121.220/tcp/17999/p2p/12D3KooWJZjqSJQLPpzYYJNH33hNuH6nXceimkyFyDMYfP74vpFY
+/ip4/151.240.121.187/tcp/17999/p2p/12D3KooWFBvRyoiKj2gdeJeXvbv9UBL22vnkFsBvWvzj77dCyZGy
+/ip4/151.240.121.189/tcp/17999/p2p/12D3KooWFuG5jV73jXXpZhHfKy3ssywyzdXgZfDEZZcj8wpifYUC
