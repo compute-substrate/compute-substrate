@@ -1,0 +1,26 @@
+[package]
+name = "csd-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Lets browsers reach a Compute Substrate node directly over WebRTC, with no web server, domain or certificate authority in between"
+license = "MIT"
+publish = false
+
+# A program of its own, beside the node, with its own Cargo.lock: the WebRTC stack it needs never
+# enters the node's build or changes any of the node's dependencies.
+
+[dependencies]
+libp2p = { version = "=0.57.0", features = ["request-response", "json", "macros", "tokio"] }
+libp2p-webrtc = { version = "=0.10.0-alpha", features = ["tokio", "pem"] }
+rand = "0.10"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "sync", "signal"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+ureq = "2"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
