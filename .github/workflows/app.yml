@@ -1,0 +1,99 @@
+# Builds the Compute Substrate app (the node with a window, for people who don't use a terminal)
+# in public, from the tagged source, for macOS (one app for Apple Silicon and Intel) and Windows.
+# Every step and its output is in this run's log; the release lists the SHA-256 of each file.
+#
+# A release: push a tag named app-v<version>, e.g. app-v0.1.0. A manual run (Actions, "Run
+# workflow") builds the same files and keeps them as the run's artifacts, without a release.
+name: app
+
+on:
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macos
+          - os: windows-latest
+            name: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
+
+      # The node, exactly as an operator builds it (`cargo build --release --locked`), once per CPU
+      - name: Build the node (macOS, both CPUs)
+        if: matrix.name == 'macos'
+        run: |
+          cargo build --release --locked --bin csd --target aarch64-apple-darwin
+          cargo build --release --locked --bin csd --target x86_64-apple-darwin
+          mkdir -p app/src-tauri/binaries
+          lipo -create -output app/src-tauri/binaries/csd-universal-apple-darwin \
+            target/aarch64-apple-darwin/release/csd target/x86_64-apple-darwin/release/csd
+          # the app looks for it under each CPU's name too while it builds
+          cp app/src-tauri/binaries/csd-universal-apple-darwin app/src-tauri/binaries/csd-aarch64-apple-darwin
+          cp app/src-tauri/binaries/csd-universal-apple-darwin app/src-tauri/binaries/csd-x86_64-apple-darwin
+
+      - name: Build the node (Windows)
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          cargo build --release --locked --bin csd --target x86_64-pc-windows-msvc
+          mkdir -p app/src-tauri/binaries
+          cp target/x86_64-pc-windows-msvc/release/csd.exe app/src-tauri/binaries/csd-x86_64-pc-windows-msvc.exe
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build the app (macOS)
+        if: matrix.name == 'macos'
+        working-directory: app/src-tauri
+        run: cargo tauri build --target universal-apple-darwin --bundles dmg
+
+      - name: Build the app (Windows)
+        if: matrix.name == 'windows'
+        working-directory: app/src-tauri
+        run: cargo tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Collect the files and their checksums
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "${{ matrix.name }}" = macos ]; then
+            cp app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "out/Compute-Substrate-macOS.dmg"
+            cp app/src-tauri/binaries/csd-universal-apple-darwin out/csd-macos
+          else
+            cp app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe "out/Compute-Substrate-Windows-setup.exe"
+            cp app/src-tauri/binaries/csd-x86_64-pc-windows-msvc.exe out/csd-windows.exe
+          fi
+          cd out
+          if command -v sha256sum >/dev/null; then sha256sum * > SHA256SUMS-${{ matrix.name }}.txt; else shasum -a 256 * > SHA256SUMS-${{ matrix.name }}.txt; fi
+          cat SHA256SUMS-${{ matrix.name }}.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.name }}
+          path: out/*
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          body: |
+            The Compute Substrate app: a node on your own computer, with no terminal.
+
+            Built by GitHub Actions from this tag's source; the run's log shows every step. `csd-macos` and `csd-windows.exe` are the node programs inside the apps, as built; their SHA-256 are in the SHA256SUMS files.
+
+            The apps are not signed by Apple or Microsoft, so the first launch asks for a confirmation. See app/README.md.

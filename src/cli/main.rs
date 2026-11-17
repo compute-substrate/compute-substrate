@@ -217,6 +217,17 @@ pub enum Commands {
         #[arg(long)]
         bootnode: bool,
 
+        /// Let web pages on any site use this node's RPC from a visitor's browser (CORS headers).
+        /// For a node on your own computer that sites like Commonplace should be able to read.
+        #[arg(long)]
+        rpc_allow_any_origin: bool,
+
+        /// Shut down cleanly when standard input closes. For an app that runs the node as its
+        /// child: closing the pipe stops the node the same way on every OS, Windows included,
+        /// where there is no SIGTERM.
+        #[arg(long)]
+        stop_on_stdin_close: bool,
+
     },
 
     /// Wallet and transaction tools
@@ -1488,6 +1499,8 @@ Commands::Node {
     p2p_listen,
     bootnodes,
     bootnode,
+    rpc_allow_any_origin,
+    stop_on_stdin_close,
 } => {
 
             
@@ -1510,7 +1523,23 @@ Commands::Node {
             // honoured, because a rebuild cannot be safely interrupted halfway; it is acted on as
             // soon as recovery returns, still far inside the 90 s.
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            // `--stop-on-stdin-close`: a thread reads stdin until it closes, then asks for the same
+            // shutdown a signal would. Without the flag the sender is dropped at once, and that
+            // branch below never fires.
+            let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            if stop_on_stdin_close {
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut buf = [0u8; 256];
+                    let mut stdin = std::io::stdin();
+                    while matches!(stdin.read(&mut buf), Ok(n) if n > 0) {}
+                    let _ = stdin_tx.send(());
+                });
+            } else {
+                drop(stdin_tx);
+            }
             tokio::spawn(async move {
+                #[cfg(unix)]
                 let mut sigterm =
                     match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                     {
@@ -1520,6 +1549,9 @@ Commands::Node {
                             None
                         }
                     };
+                // no SIGTERM off Unix: Ctrl-C (or a closed stdin) only
+                #[cfg(not(unix))]
+                let mut sigterm: Option<NoSignal> = None;
                 // Stay alive after the first signal. Selecting once and
                 // returning would drop the Signal handle; tokio does not deregister the
                 // process-wide handler, so every later SIGTERM would be silently swallowed and an
@@ -1532,10 +1564,14 @@ Commands::Node {
                             tokio::select! {
                                 _ = sig.recv() => {}
                                 _ = tokio::signal::ctrl_c() => {}
+                                Some(()) = stdin_rx.recv() => { println!("[node] stdin closed"); }
                             }
                         }
                         None => {
-                            let _ = tokio::signal::ctrl_c().await;
+                            tokio::select! {
+                                _ = tokio::signal::ctrl_c() => {}
+                                Some(()) = stdin_rx.recv() => { println!("[node] stdin closed"); }
+                            }
                         }
                     }
                     count += 1;
@@ -1635,6 +1671,8 @@ println!("[p2p] bootnode mode: {}", is_bootnode);
                 net.best_peer_height_gauge(),
                 net.tip_activity_gauge(),
             );
+
+            let app = if rpc_allow_any_origin { crate::api::allow_any_origin(app) } else { app };
 
             let listener = tokio::net::TcpListener::bind(&rpc).await?;
             println!("RPC on http://{}", rpc);
@@ -1886,5 +1924,16 @@ eprintln!(
 
             seal_and_exit(db.clone(), chain_lock.clone()).await
         }
+    }
+}
+
+/// Stands in for tokio's Unix signal stream where there is none, so the shutdown loop reads the same
+/// on every OS. It never fires.
+#[cfg(not(unix))]
+struct NoSignal;
+#[cfg(not(unix))]
+impl NoSignal {
+    async fn recv(&mut self) -> Option<()> {
+        std::future::pending().await
     }
 }

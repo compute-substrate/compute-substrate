@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compute Substrate</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #ffffff; --ink: #1b1d22; --muted: #6b6f78; --line: #e3e1da;
+    --accent: #2f6f5e; --accent-soft: #dcebe5; --warn: #9a3b2a; --warn-soft: #f6e3de;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171b; --card: #1d2026; --ink: #ecebe6; --muted: #9a9ea8; --line: #2c3038;
+      --accent: #6cc3a6; --accent-soft: #1f3a32; --warn: #f0a08f; --warn-soft: #3b231e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 28px 24px 20px; -webkit-user-select: none; user-select: none; }
+  h1 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 18px; }
+  .status { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+  .big { font-size: 22px; font-weight: 600; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .dot.busy { background: #d4a13a; animation: pulse 1.4s ease-in-out infinite; }
+  .dot.bad { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .sub { color: var(--muted); margin: 0; white-space: pre-wrap; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin: 14px 0 2px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .6s ease; }
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin: 14px 0; }
+  .facts > div { background: var(--card); padding: 12px 16px; }
+  .facts b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+  .facts span { color: var(--muted); font-size: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 2px; border-bottom: 1px solid var(--line); }
+  .row:last-of-type { border-bottom: 0; }
+  .row small { color: var(--muted); display: block; }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-user-select: text; user-select: text; }
+  button { font: inherit; font-size: 13px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  .switch { position: relative; width: 38px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch i { position: absolute; inset: 0; background: var(--line); border-radius: 11px; cursor: pointer; transition: background .2s; }
+  .switch i::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--card); transition: transform .2s; }
+  .switch input:checked + i { background: var(--accent); }
+  .switch input:checked + i::after { transform: translateX(16px); }
+  .actions { display: flex; gap: 8px; margin-top: 14px; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>Compute Substrate</h1>
+
+  <section class="status">
+    <p class="big"><span class="dot" id="dot"></span><span id="headline">Starting…</span></p>
+    <p class="sub" id="detail"></p>
+    <div class="bar" id="bar" hidden><div id="fill"></div></div>
+    <div class="actions" id="failActions" hidden>
+      <button class="primary" id="retry">Try again</button>
+      <button id="log">Show the log</button>
+    </div>
+  </section>
+
+  <div class="facts">
+    <div><b id="height">–</b><span>blocks checked</span></div>
+    <div><b id="peers">–</b><span>connected nodes</span></div>
+  </div>
+
+  <div class="row">
+    <div>Apps on this computer can use it at<small><code id="rpc">http://127.0.0.1:8789</code></small></div>
+    <button id="copy">Copy</button>
+  </div>
+  <div class="row">
+    <div>Read Commonplace through your own node<small>Opens in your browser</small></div>
+    <button id="commonplace">Open</button>
+  </div>
+  <div class="row">
+    <div>Start when I log in<small>Keeps your node running in the background</small></div>
+    <label class="switch"><input type="checkbox" id="autostart"><i></i></label>
+  </div>
+  <div class="row">
+    <div>Its data<small>A full copy of the network, checked block by block</small></div>
+    <button id="folder">Show</button>
+  </div>
+
+  <footer>Your node checks every block itself and passes them on to others. Closing this window stops it cleanly.</footer>
+
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const $ = id => document.getElementById(id);
+  const fmt = n => Number(n).toLocaleString();
+  let rpc = "http://127.0.0.1:8789";
+
+  function show(dot, headline, detail, progress) {
+    $("dot").className = "dot " + dot;
+    $("headline").textContent = headline;
+    $("detail").textContent = detail || "";
+    $("bar").hidden = progress == null;
+    if (progress != null) $("fill").style.width = Math.max(1, Math.min(100, progress * 100)) + "%";
+  }
+
+  async function health() {
+    try {
+      const r = await fetch(rpc + "/health", { signal: AbortSignal.timeout(4000) });
+      return r.ok ? await r.json() : null;
+    } catch { return null; }
+  }
+
+  async function tick() {
+    let s;
+    try { s = await invoke("node_state"); } catch (e) { return; }
+    if (s.rpc) { rpc = s.rpc; $("rpc").textContent = rpc; }
+    $("failActions").hidden = s.phase !== "failed";
+
+    if (s.phase === "failed") return show("bad", "The node isn't running", s.message);
+    if (s.phase === "stopping") return show("busy", "Stopping…", "Saving everything before it closes. This can take a moment.");
+    if (s.phase === "stopped") return show("", "Stopped", "");
+    if (s.phase === "starting") return show("busy", "Starting…", "Checking its copy of the network. The first start takes a few seconds.");
+
+    const h = await health();
+    if (!h) return show("busy", "Starting…", "Waiting for the node to answer.");
+    $("height").textContent = fmt(h.height);
+    $("peers").textContent = fmt(h.peer_count);
+    const best = h.best_peer_height;
+    const note = s.phase === "elsewhere" ? "\n" + s.message : "";
+    if (!h.peer_count) return show("busy", "Looking for other nodes…", "It needs at least one to sync with. Check that this computer is online." + note);
+    if (best == null) return show("busy", "Connected", "Asking the other nodes how far the network is." + note);
+    if (best > h.height + 1) {
+      return show("busy", "Syncing", `Block ${fmt(h.height)} of ${fmt(best)}. Each one is checked here before it's kept.` + note, h.height / best);
+    }
+    show("ok", "Up to date", `Following the network with ${h.peer_count === 1 ? "1 other node" : fmt(h.peer_count) + " other nodes"}.` + note);
+  }
+
+  $("copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(rpc); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1500); } catch {}
+  };
+  $("commonplace").onclick = () => invoke("plugin:opener|open_url", { url: "https://commonplace.place/?node=" + encodeURIComponent(rpc) });
+  $("folder").onclick = $("log").onclick = () => invoke("open_data_folder");
+  $("retry").onclick = async () => { show("busy", "Starting…", ""); $("failActions").hidden = true; try { await invoke("restart"); } catch {} tick(); };
+
+  (async () => {
+    try { $("autostart").checked = await invoke("plugin:autostart|is_enabled"); } catch {}
+    $("autostart").onchange = async e => {
+      try { await invoke(e.target.checked ? "plugin:autostart|enable" : "plugin:autostart|disable"); }
+      catch { e.target.checked = !e.target.checked; }
+    };
+  })();
+
+  listen("node-changed", tick);
+  tick();
+  setInterval(tick, 3000);
+</script>
+</body>
+</html>

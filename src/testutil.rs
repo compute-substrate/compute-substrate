@@ -184,10 +184,20 @@ pub fn build_fork(
 
 /// CPU time of the calling thread. The cost tests measure work that runs on the test thread, and
 /// unlike wall time this does not grow while the thread waits for a core on a loaded host.
+#[cfg(unix)]
 pub fn thread_cpu() -> std::time::Duration {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) }, 0);
     std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// Off Unix there is no per-thread CPU clock in `libc`; wall time since an arbitrary start, which
+/// the cost tests only ever subtract.
+#[cfg(not(unix))]
+pub fn thread_cpu() -> std::time::Duration {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
 }
 
 /// The least thread CPU time `f` took over `runs` runs.

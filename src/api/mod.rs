@@ -506,6 +506,28 @@ last_tip_activity_unix,
 
 }
 
+/// `--rpc-allow-any-origin`: lets web pages on any site read this node and submit transactions to it
+/// from a visitor's browser (CORS), including a page on a public site talking to a node on the
+/// visitor's own computer (`Access-Control-Allow-Private-Network`). Everything the RPC serves is
+/// public, and a submitted transaction is only accepted if its owner signed it, so no origin gains
+/// anything it couldn't get from any other node. Off by default; a public node usually sets these
+/// headers in the web server in front of it instead.
+pub fn allow_any_origin(r: Router) -> Router {
+    async fn cors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+        let preflight = req.method() == axum::http::Method::OPTIONS;
+        let mut res = if preflight { StatusCode::NO_CONTENT.into_response() } else { next.run(req).await };
+        let h = res.headers_mut();
+        use axum::http::HeaderValue;
+        h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+        h.insert("access-control-allow-methods", HeaderValue::from_static("GET, POST, OPTIONS"));
+        h.insert("access-control-allow-headers", HeaderValue::from_static("content-type"));
+        h.insert("access-control-allow-private-network", HeaderValue::from_static("true"));
+        h.insert("access-control-max-age", HeaderValue::from_static("600"));
+        res
+    }
+    r.layer(axum::middleware::from_fn(cors))
+}
+
 async fn health(State(st): State<ApiState>) -> Json<HealthResp> {
     Json(health_resp(&st, &crate::state::subsystem::SUBSYSTEMS))
 }
