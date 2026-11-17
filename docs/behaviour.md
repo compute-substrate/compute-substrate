@@ -1360,6 +1360,30 @@ The outcome classification is pinned by `tests/tx_scan_horizon.rs`
 `tx_scan::tests::absent_tx_is_proved_absent_not_horizon_past_max_back`. No test asserts the HTTP
 status, header or body mapping.
 
+## `/headers/:from/:count` for light clients
+
+`GET /headers/:from/:count` returns main-chain headers by height, at most 2000 per request:
+`{"ok":true,"from":F,"tip_height":T,"headers":["<168 hex chars>", ...]}`. Each entry is the 84
+bytes `header_hash` hashes (`chain::index::header_bytes`: version, prev, merkle, time, bits, nonce,
+little-endian), so a client computes each block hash itself. With `/proof/tx/:txid` this lets a
+browser check that a transaction is in a block with valid proof-of-work, on a chain that links back
+to blocks it already trusts, without trusting the node. Fewer headers than asked come back near
+the tip, and none past it. While the height index is catching up the route answers `503` with
+`Retry-After` (codes `INDEX_CATCHING_UP`, `HEADER_UNAVAILABLE`, `NO_TIP`); a client must still
+check that consecutive headers link, since the chain can reorganise between requests. The route
+is read-only and changes nothing about consensus. `header_bytes_tests` holds `header_bytes` and
+`header_hash` together.
+
+## `--rpc-allow-any-origin` and `--stop-on-stdin-close`
+
+Both are off by default and neither changes consensus. `--rpc-allow-any-origin` adds CORS headers
+(`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Private-Network: true`) and answers
+preflight `OPTIONS` requests, so a web page can use the node from a visitor's browser, including a
+node on the visitor's own computer. Everything the RPC serves is public and a submitted
+transaction is only accepted when signed, so no origin gains anything. `--stop-on-stdin-close`
+asks for the same clean shutdown as SIGTERM when standard input closes; it is how the desktop app
+stops its node on every OS, and a crashed app's node stops cleanly too.
+
 ## Dependency internals the code relies on
 
 This version pins `libp2p =0.57.0` (upstream main: `0.54`, which resolves libp2p-gossipsub 0.47.0),

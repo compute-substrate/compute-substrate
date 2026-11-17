@@ -7471,7 +7471,7 @@ Event::InboundFailure { peer, error, .. } => {
 /// The header of a block for a GetHeaders answer: from `hdr_raw` when its bytes decode to a header
 /// that hashes to `hash`, else from the stored body, after which its header goes into `hdr_raw`,
 /// so each served header is decoded from its body once. None when neither holds it.
-fn served_header(db: &Stores, hash: &Hash32) -> Result<Option<BlockHeader>> {
+pub(crate) fn served_header(db: &Stores, hash: &Hash32) -> Result<Option<BlockHeader>> {
     if let Some(raw) = crate::state::db::get_hdr_raw(db, hash)? {
         if let Ok(header) = crate::codec::consensus_bincode().deserialize::<BlockHeader>(&raw) {
             if header_hash(&header) == *hash {

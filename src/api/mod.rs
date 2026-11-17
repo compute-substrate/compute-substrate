@@ -453,6 +453,7 @@ last_tip_activity_unix,
         .route("/metrics", get(metrics))
         .route("/oracle", get(oracle))
         .route("/tip", get(tip))
+        .route("/headers/:from/:count", get(headers_get))
         .route("/mempool", get(mempool_info))
         .route("/mempool/txids", get(mempool_txids))
         // Explorer-grade read endpoints:
@@ -1835,6 +1836,42 @@ fn tx_json(tx: &Transaction, id: Hash32) -> serde_json::Value {
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+/// GET /headers/:from/:count
+///
+/// Main-chain block headers by height, `count` of them from `from` (at most 2000), each as the 84
+/// canonical bytes whose sha256d is the block hash. For light clients: with these and
+/// `/proof/tx/:txid`, a page can check that a transaction is in a block with valid proof-of-work on
+/// the heaviest chain without trusting the node that answered. Read-only and not consensus.
+/// `503` while the height index is catching up (retry); fewer headers than asked near the tip.
+async fn headers_get(State(st): State<ApiState>, Path((from, count)): Path<(u64, u64)>) -> Response {
+    offload_o_chain(move || headers_get_blocking(st, from, count)).await
+}
+
+const MAX_HEADERS_PER_REQUEST: u64 = 2000;
+
+fn headers_get_blocking(st: ApiState, from: u64, count: u64) -> Response {
+    let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);
+    let Some(tip_height) = get_hidx(&st.db, &tip).ok().flatten().map(|hi| hi.height) else {
+        return scan_unavailable_busy("NO_TIP", "the node has no chain tip yet");
+    };
+    let count = count.min(MAX_HEADERS_PER_REQUEST);
+    let mut headers: Vec<String> = Vec::new();
+    if count > 0 && from <= tip_height {
+        let end = from.saturating_add(count - 1).min(tip_height);
+        headers.reserve((end - from + 1) as usize);
+        for h in from..=end {
+            let Some(hash) = crate::state::tx_scan::canonical_hash_at_height(&st.db, h) else {
+                return scan_unavailable_busy("INDEX_CATCHING_UP", "the height index is catching up; retry");
+            };
+            match crate::net::node::served_header(&st.db, &hash) {
+                Ok(Some(hdr)) => headers.push(hex::encode(crate::chain::index::header_bytes(&hdr))),
+                _ => return scan_unavailable_busy("HEADER_UNAVAILABLE", "a header could not be read; retry"),
+            }
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "from": from, "tip_height": tip_height, "headers": headers })).into_response()
 }
 
 async fn tx_proof_get(State(st): State<ApiState>, Path(id): Path<String>) -> Response {

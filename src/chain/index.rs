@@ -49,6 +49,30 @@ pub fn header_hash(h: &BlockHeader) -> Hash32 {
     sha256d(&buf)
 }
 
+/// The same 84 bytes `header_hash` hashes, for serving headers to light clients (which check
+/// sha256d of these bytes against the block hash, then the proof-of-work). Kept apart from
+/// `header_hash` so the consensus function stays untouched; a test holds the two together.
+pub fn header_bytes(h: &BlockHeader) -> [u8; 84] {
+    let mut buf = [0u8; 84];
+    buf[0..4].copy_from_slice(&h.version.to_le_bytes());
+    buf[4..36].copy_from_slice(&h.prev);
+    buf[36..68].copy_from_slice(&h.merkle);
+    buf[68..76].copy_from_slice(&h.time.to_le_bytes());
+    buf[76..80].copy_from_slice(&h.bits.to_le_bytes());
+    buf[80..84].copy_from_slice(&h.nonce.to_le_bytes());
+    buf
+}
+
+#[cfg(test)]
+mod header_bytes_tests {
+    use super::*;
+    #[test]
+    fn header_bytes_hash_to_the_header_hash() {
+        let h = BlockHeader { version: 1, prev: [7u8; 32], merkle: [9u8; 32], time: 1_777_474_800, bits: 0x1e00ffff, nonce: 123_456 };
+        assert_eq!(crate::crypto::sha256d(&header_bytes(&h)), header_hash(&h));
+    }
+}
+
 pub fn get_hidx(db: &Stores, hash: &Hash32) -> Result<Option<HeaderIndex>> {
     if let Some(v) = db.hdr.get(k_hdr(hash))? {
         Ok(Some(
