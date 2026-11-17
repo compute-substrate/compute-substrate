@@ -454,6 +454,7 @@ last_tip_activity_unix,
         .route("/oracle", get(oracle))
         .route("/tip", get(tip))
         .route("/headers/:from/:count", get(headers_get))
+        .route("/events/:domain/:from/:count", get(domain_events_get))
         .route("/mempool", get(mempool_info))
         .route("/mempool/txids", get(mempool_txids))
         // Explorer-grade read endpoints:
@@ -1850,6 +1851,66 @@ async fn headers_get(State(st): State<ApiState>, Path((from, count)): Path<(u64,
 }
 
 const MAX_HEADERS_PER_REQUEST: u64 = 2000;
+
+/// GET /events/:domain/:from/:count
+///
+/// Everything an app wrote under one topic (domain), in full and in order: the proposals in it and
+/// the attestations of those proposals, in main-chain blocks `from` to `from + count - 1` (at most
+/// 2000 blocks per request). Each comes with its block height, its position in the block and its
+/// raw transaction, so a client can replay an app's records itself (CairnX names and tokens, say)
+/// instead of trusting a service that indexes them, and prove any of them with `/proof/tx`. Unlike
+/// `/proposals/:domain/:limit`, nothing is capped by count: page through by height. Read-only,
+/// not consensus.
+async fn domain_events_get(State(st): State<ApiState>, Path((domain, from, count)): Path<(String, u64, u64)>) -> Response {
+    offload_o_chain(move || domain_events_blocking(st, domain, from, count)).await
+}
+
+fn domain_events_blocking(st: ApiState, domain: String, from: u64, count: u64) -> Response {
+    use std::collections::HashMap;
+    let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);
+    let Some(tip_height) = get_hidx(&st.db, &tip).ok().flatten().map(|hi| hi.height) else {
+        return scan_unavailable_busy("NO_TIP", "the node has no chain tip yet");
+    };
+    let count = count.min(MAX_HEADERS_PER_REQUEST);
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut in_domain: HashMap<Hash32, bool> = HashMap::new();
+    let mut to = from.saturating_sub(1);
+    if count > 0 && from <= tip_height {
+        let end = from.saturating_add(count - 1).min(tip_height);
+        for h in from..=end {
+            let Some(hash) = crate::state::tx_scan::canonical_hash_at_height(&st.db, h) else {
+                return scan_unavailable_busy("INDEX_CATCHING_UP", "the height index is catching up; retry");
+            };
+            let Some(v) = st.db.blocks.get(k_block(&hash)).ok().flatten() else {
+                return scan_unavailable_busy("BLOCK_UNAVAILABLE", "a block could not be read; retry");
+            };
+            let Ok(blk) = c().deserialize::<Block>(&v) else {
+                return scan_unavailable_busy("BLOCK_UNAVAILABLE", "a block could not be read; retry");
+            };
+            for (pos, tx) in blk.txs.iter().enumerate().skip(1) {
+                let ours = match &tx.app {
+                    AppPayload::Propose { domain: d, .. } => *d == domain,
+                    AppPayload::Attest { proposal_id, .. } => *in_domain.entry(*proposal_id).or_insert_with(|| {
+                        get_proposal(&st.db, proposal_id).ok().flatten().map(|p| p.domain == domain).unwrap_or(false)
+                    }),
+                    _ => false,
+                };
+                if !ours {
+                    continue;
+                }
+                let Ok(raw) = c().serialize(tx) else { continue };
+                events.push(serde_json::json!({
+                    "txid": format!("0x{}", hex::encode(txid(tx))),
+                    "height": h,
+                    "pos": pos,
+                    "tx_raw": format!("0x{}", hex::encode(raw)),
+                }));
+            }
+            to = h;
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "domain": domain, "from": from, "to": to, "tip_height": tip_height, "events": events })).into_response()
+}
 
 fn headers_get_blocking(st: ApiState, from: u64, count: u64) -> Response {
     let tip = get_tip(&st.db).ok().flatten().unwrap_or([0u8; 32]);

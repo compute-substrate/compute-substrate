@@ -66,7 +66,7 @@ fn public_route(method: &str, path: &str) -> bool {
             const EXACT: &[&str] = &["/health", "/tip", "/domains", "/oracle"];
             const PREFIX: &[&str] = &[
                 "/headers/", "/proof/tx/", "/tx/", "/block/", "/utxos/", "/address/", "/recent/",
-                "/proposals/", "/proposal/", "/attestations/", "/window/", "/top/", "/topk/",
+                "/proposals/", "/proposal/", "/attestations/", "/window/", "/top/", "/topk/", "/events/",
             ];
             EXACT.contains(&p) || PREFIX.iter().any(|x| p.starts_with(x) && !p.starts_with("/tx/template"))
         }

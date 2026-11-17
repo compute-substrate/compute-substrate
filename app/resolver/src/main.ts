@@ -3,12 +3,14 @@
 //
 // The names are Cairn's (CNS, by InverseAltruism): an on-chain convention on Compute Substrate whose
 // rules and reference resolver are @inversealtruism/cairnx-core. This only reads them:
-//   1. Cairn's server lists the transactions in the name's history (hints, not trusted).
+//   1. Cairn's server lists the transactions in the name's history (hints, not trusted). When it
+//      doesn't answer, the app reads the network's whole CairnX history from its own node instead
+//      (`/events/cairnx:v1/...`), so names keep working without Cairn's server.
 //   2. Each one is read from THIS computer's own node, which has checked every block itself, and
 //      must hash to its txid; its signer is the key whose signature is on it.
 //   3. The events are replayed through cairnx-core's own resolver.
 // What a name points to: its profile's `ipfs` (a site), `url` (a link), else its address's page.
-import { resolve, paidToFromOutputs, RESERVED_NAMES } from "@inversealtruism/cairnx-core";
+import { resolve, paidToFromOutputs, RESERVED_NAMES, ACTIVATION_HEIGHT } from "@inversealtruism/cairnx-core";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha2";
 import { ripemd160 } from "@noble/hashes/legacy";
@@ -78,25 +80,51 @@ async function getJson(url: string) {
   return r.status === 404 ? null : r.json();
 }
 
+// a transaction as the resolver's event; it must hash to its id
+function eventOf(id: string, tx: Tx, height: number, pos: number) {
+  if (toHex(sha256d(tx.stripped)) !== id.toLowerCase()) throw new Error("A record didn't match its id.");
+  const who = signer(tx) ?? "0x" + "0".repeat(40);
+  const paidTo = paidToFromOutputs(tx.outputs.map(o => ({ addr: o.addr, value: Number(o.value) })));
+  if (tx.app.kind === "propose") return { kind: "propose", id: id.toLowerCase(), proposer: who, uri: tx.app.uri, payloadHash: tx.app.payloadHash, expiresEpoch: tx.app.expiresEpoch, height, pos, paidTo };
+  if (tx.app.kind === "attest") return { kind: "attest", txid: id.toLowerCase(), proposalId: tx.app.proposalId, attester: who, score: tx.app.score, confidence: tx.app.confidence, height, pos, paidTo };
+  return null;
+}
+
+// The network's whole CairnX history, from this computer's node, kept while the app runs
+let history: { to: number; events: any[] } = { to: ACTIVATION_HEIGHT - 1, events: [] };
+async function allEvents(tip: number): Promise<any[]> {
+  for (let from = history.to + 1; from <= tip; from += 2000) {
+    const j = await getJson(`${NODE}/events/${encodeURIComponent("cairnx:v1")}/${from}/2000`);
+    if (!j?.ok) throw new Error("Cairn's server didn't answer, and your node can't list the names' history (it needs a newer node).");
+    for (const e of j.events) { const ev = eventOf(e.txid, parseTx(hex(e.tx_raw)), e.height, e.pos); if (ev) history.events.push(ev); }
+    history.to = Math.min(tip, from + 1999);
+  }
+  return history.events;
+}
+
 export type Opened = { name: string; open?: string; why?: string; owner?: string };
 
 export async function lookup(input: string): Promise<Opened> {
   const name = input.trim().toLowerCase().replace(/^web\+csd:(\/\/)?/, "").replace(/\.csd$/, "").replace(/\/+$/, "");
   if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name." };
-  const h = await getJson(`${CAIRN}/trade/api/cairnx/name-history/${encodeURIComponent(name)}`).catch(() => { throw new Error("Cairn's server, which lists a name's records, didn't answer."); });
-  if (!h || !Array.isArray(h.events)) return { name, why: `Nobody holds ${name}.csd.` };
-  const events: any[] = [];
-  for (const e of h.events) {
-    const p = await getJson(`${NODE}/proof/tx/${String(e.txid).replace(/^0x/, "")}`);
-    if (!p?.ok) throw new Error("Your node doesn't have one of this name's records. Is it synced?");
-    const tx = parseTx(hex(p.tx_raw));
-    if (toHex(sha256d(tx.stripped)) !== String(e.txid).toLowerCase()) throw new Error("A record didn't match its id.");
-    const who = signer(tx) ?? "0x" + "0".repeat(40);
-    const paidTo = paidToFromOutputs(tx.outputs.map(o => ({ addr: o.addr, value: Number(o.value) })));
-    if (tx.app.kind === "propose") events.push({ kind: "propose", id: String(e.txid).toLowerCase(), proposer: who, uri: tx.app.uri, payloadHash: tx.app.payloadHash, expiresEpoch: tx.app.expiresEpoch, height: p.height, pos: p.tx_index, paidTo });
-    else if (tx.app.kind === "attest") events.push({ kind: "attest", txid: String(e.txid).toLowerCase(), proposalId: tx.app.proposalId, attester: who, score: tx.app.score, confidence: tx.app.confidence, height: p.height, pos: p.tx_index, paidTo });
-  }
   const tip = (await getJson(`${NODE}/tip`))?.height ?? 0;
+  let events: any[];
+  const h = await getJson(`${CAIRN}/trade/api/cairnx/name-history/${encodeURIComponent(name)}`).catch(() => undefined);
+  if (h && Array.isArray(h.events) && h.scopedReplaySufficient) {
+    events = [];
+    for (const e of h.events) {
+      const p = await getJson(`${NODE}/proof/tx/${String(e.txid).replace(/^0x/, "")}`);
+      if (!p?.ok) throw new Error("Your node doesn't have one of this name's records. Is it synced?");
+      const ev = eventOf(String(e.txid), parseTx(hex(p.tx_raw)), p.height, p.tx_index);
+      if (ev) events.push(ev);
+    }
+  } else if (h === null) {
+    return { name, why: `Nobody holds ${name}.csd.` };
+  } else {
+    // Cairn's server didn't answer (or its list can't decide this name alone): the whole history,
+    // from this computer's own node
+    events = await allEvents(tip);
+  }
   const st = resolve(events, tip).names[name];
   if (!st || st.expired || st.pending) return { name, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
   const p = st.profile ?? {};

@@ -1374,6 +1374,26 @@ check that consecutive headers link, since the chain can reorganise between requ
 is read-only and changes nothing about consensus. `header_bytes_tests` holds `header_bytes` and
 `header_hash` together.
 
+## `/events/:domain/:from/:count`: an app's whole history
+
+`GET /events/:domain/:from/:count` returns everything an app wrote under one topic in main-chain
+blocks `from` to `from + count - 1`, at most 2000 blocks per request:
+
+- every proposal in the domain;
+- every attestation of a proposal in the domain.
+
+The answer is `{"ok":true,"domain","from","to","tip_height","events":[{"txid","height","pos","tx_raw"}]}`,
+in chain order. `pos` is the transaction's index in its block, coinbase included, as in `/proof/tx`.
+
+Unlike `/proposals/:domain/:limit`, which returns the newest 500, nothing is capped by count: a
+client pages through by height. So an overlay protocol's state (CairnX tokens and `.csd` names, say)
+can be replayed from any node, instead of from a service that indexes it. Any event can be proven
+with `/proof/tx`.
+
+The route scans the blocks in the range, so it costs about as much as reading them. While the height
+index is catching up it answers `503` with `Retry-After` (`INDEX_CATCHING_UP`, `BLOCK_UNAVAILABLE`,
+`NO_TIP`). It is read-only and changes nothing about consensus.
+
 ## `--rpc-allow-any-origin` and `--stop-on-stdin-close`
 
 Both are off by default and neither changes consensus. `--rpc-allow-any-origin` adds CORS headers
