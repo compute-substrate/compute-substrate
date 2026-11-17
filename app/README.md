@@ -10,12 +10,12 @@ While it runs, apps on the same computer can use your node instead of someone el
 
 ## Download
 
-From [Releases](https://github.com/compute-substrate/compute-substrate/releases), the newest
-`app-v…`:
+- **macOS** (Apple Silicon and Intel): [Compute-Substrate-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.0/Compute-Substrate-macOS.dmg).
+  Open it and drag the app to Applications.
+- **Windows**: [Compute-Substrate-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.0/Compute-Substrate-Windows-setup.exe).
 
-- **macOS** (Apple Silicon and Intel): `Compute-Substrate-macOS.dmg`. Open it and drag the app to
-  Applications.
-- **Windows**: `Compute-Substrate-Windows-setup.exe`.
+These are version 0.1.0. Newer versions, with their checksums, are on
+[Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
 
 ### The first time you open it
 
@@ -88,4 +88,5 @@ cd app/src-tauri && cargo tauri build
 On Windows, copy `csd.exe` to `csd-x86_64-pc-windows-msvc.exe` instead.
 
 To release: push a tag named `app-v<version>` (for example `app-v0.1.0`), and the workflow attaches
-the files to that release.
+the files to that release. The download links above, and the ones on Commonplace, name the
+version, so update them with each release.

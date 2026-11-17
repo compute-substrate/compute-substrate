@@ -91,6 +91,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: out/*
+          # the node's own releases stay "latest" on the repo; the app's are found by their tag
+          make_latest: false
           body: |
             The Compute Substrate app: a node on your own computer, with no terminal.
 
