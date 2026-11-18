@@ -69,6 +69,13 @@ Names are registered and managed on Cairn; the app only reads them.
 It makes the genesis block itself (`csd genesis`, which always gives the same block), so there is
 nothing to download besides the app.
 
+It finds other nodes from the list it ships with (`app/bootnodes.txt`): a few long-running nodes,
+and a snapshot of others that accepted connections when the release was made. After the first
+start it keeps every peer it meets in its own `peers.txt`, so it doesn't depend on that list
+again. If an old copy of the app ever can't find anyone, paste a node's address into *Add a
+peer* (it looks like `/ip4/1.2.3.4/tcp/17999/p2p/12D3Koo…`); it's kept in `added-peers.txt` and dialed
+at every start. Anyone who runs a node can give you theirs.
+
 To reach other nodes it connects out on port 17999. Other nodes can only connect to yours if your
 router forwards that port to this computer; without that, your node still syncs, checks and relays
 everything through the connections it makes itself.

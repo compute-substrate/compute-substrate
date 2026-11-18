@@ -129,13 +129,43 @@ impl Node {
     }
 }
 
-fn bootnodes() -> String {
-    BOOTNODES
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+// The peers a node starts from: the list shipped with the app (bootnodes.txt), and any added in the
+// window (added-peers.txt in the data folder). The node is given them all as bootnodes, so it dials
+// them at start and again whenever it's short of peers, and never drops them from its book. Once
+// connected it learns more and keeps those in its own peers.txt, so these matter mostly for a first
+// start, or a start long after the shipped list has gone stale.
+const ADDED_PEERS: &str = "added-peers.txt";
+
+fn peer_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'))
+}
+
+fn bootnodes(dir: &Path) -> String {
+    let added = fs::read_to_string(dir.join(ADDED_PEERS)).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    peer_lines(BOOTNODES)
+        .chain(peer_lines(&added))
+        .filter(|l| valid_peer(l))
+        .filter(|l| seen.insert(l.to_string()))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+// A peer's full address as the node takes it: /ip4, /ip6 or /dns… with a TCP port, ending in its
+// /p2p/ id. Only the characters an address has, so nothing else reaches the node's arguments.
+fn valid_peer(a: &str) -> bool {
+    let parts: Vec<&str> = a.split('/').collect();
+    parts.len() == 7
+        && parts[0].is_empty()
+        && matches!(parts[1], "ip4" | "ip6" | "dns" | "dns4" | "dns6")
+        && !parts[2].is_empty()
+        && parts[2].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'))
+        && parts[3] == "tcp"
+        && parts[4].parse::<u16>().map_or(false, |p| p > 0)
+        && parts[5] == "p2p"
+        && parts[6].len() >= 46
+        && parts[6].len() <= 64
+        && parts[6].chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 // The node program, next to the app's own executable (that's where the installer puts it)
@@ -226,7 +256,7 @@ fn start(app: &tauri::AppHandle, node: &Arc<Node>) -> Result<(), String> {
         .arg("--p2p-listen").arg(P2P)
         .arg("--rpc-allow-any-origin")
         .arg("--stop-on-stdin-close");
-    let boot = bootnodes();
+    let boot = bootnodes(&dir);
     if !boot.is_empty() {
         c.arg("--bootnodes").arg(boot);
     }
@@ -386,12 +416,43 @@ fn open_data_folder(app: tauri::AppHandle, node: tauri::State<'_, Arc<Node>>) ->
     app.opener().open_path(dir, None::<&str>).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// off the main thread: a clean stop can take a while, and the window keeps updating meanwhile
+#[tauri::command(async)]
 fn restart(app: tauri::AppHandle, node: tauri::State<'_, Arc<Node>>) -> Result<(), String> {
     let node = node.inner().clone();
     stop(&node);
     *node.stopping.lock().unwrap() = false;
     start(&app, &node).map_err(|e| { node.set("failed", e.clone()); e })
+}
+
+// Adds a peer from the window: kept in added-peers.txt, then the node restarts to dial it
+// off the main thread: a clean stop can take a while, and the window keeps updating meanwhile
+#[tauri::command(async)]
+fn add_peer(app: tauri::AppHandle, node: tauri::State<'_, Arc<Node>>, addr: String) -> Result<String, String> {
+    let addr = addr.trim().to_string();
+    if !valid_peer(&addr) {
+        return Err("That isn't a peer's address. It looks like /ip4/1.2.3.4/tcp/17999/p2p/12D3Koo…".into());
+    }
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("node");
+    let path = dir.join(ADDED_PEERS);
+    let mut text = fs::read_to_string(&path).unwrap_or_default();
+    if peer_lines(&text).any(|l| l == addr) || peer_lines(BOOTNODES).any(|l| l == addr) {
+        return Ok("Your node already knows that peer.".into());
+    }
+    if text.is_empty() {
+        text.push_str("# Peers added in the app's window, one per line. The node dials these at every start.\n");
+    }
+    text.push_str(&addr);
+    text.push('\n');
+    fs::write(&path, text).map_err(|e| format!("Can't save it: {e}"))?;
+    let node = node.inner().clone();
+    if node.state.lock().unwrap().phase == "elsewhere" {
+        return Ok("Saved. The app's own node will use it when it runs.".into());
+    }
+    stop(&node);
+    *node.stopping.lock().unwrap() = false;
+    start(&app, &node).map_err(|e| { node.set("failed", e.clone()); e })?;
+    Ok("Added. Your node restarted and is connecting to it.".into())
 }
 
 fn main() {
@@ -410,7 +471,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer])
         .setup({
             let node = node.clone();
             move |app| {
@@ -496,6 +557,12 @@ mod tests {
         assert_eq!(w.replayed, 4);
         assert!(!w.rebuilding());
         assert_eq!(group(143962), "143,962");
+        assert!(peer_lines(BOOTNODES).all(valid_peer));
+        assert!(valid_peer("/ip4/1.2.3.4/tcp/17999/p2p/12D3KooWHKcjL8M5snr3GniC8xRtGJGbGhPSdGiqtZNRz6UFj1t3"));
+        assert!(valid_peer("/dns4/node.example.org/tcp/17999/p2p/12D3KooWHKcjL8M5snr3GniC8xRtGJGbGhPSdGiqtZNRz6UFj1t3"));
+        assert!(!valid_peer("/ip4/1.2.3.4/tcp/17999/p2p/12D3KooWHKcjL8M5snr3GniC8xRtGJGbGhPSdGiqtZNRz6UFj1t3,/ip4/5.6.7.8"));
+        assert!(!valid_peer("/ip4/1.2.3.4/tcp/17999"));
+        assert!(!valid_peer("--rpc 0.0.0.0:8789"));
         fs::remove_dir_all(&dir).ok();
     }
 }

@@ -85,6 +85,11 @@
     <div>Its data<small>A full copy of the network, checked block by block</small></div>
     <button id="folder">Show</button>
   </div>
+  <form class="row" id="peerForm">
+    <div style="flex:1">Add a peer<small id="peerStatus">If it can't find other nodes, paste one's address</small></div>
+    <input id="peerInput" placeholder="/ip4/…/tcp/17999/p2p/…" spellcheck="false" autocomplete="off" style="width:110px;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)">
+    <button>Add</button>
+  </form>
   <form class="row" id="nameForm">
     <div style="flex:1">Open a .csd name<small id="nameStatus">web+csd: links open here too, through your own node</small></div>
     <input id="nameInput" placeholder="alice" spellcheck="false" autocomplete="off" style="width:110px;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)">
@@ -136,7 +141,7 @@
     $("peers").textContent = fmt(h.peer_count);
     const best = h.best_peer_height;
     const note = s.phase === "elsewhere" ? "\n" + s.message : "";
-    if (!h.peer_count) return show("busy", "Looking for other nodes…", "It needs at least one to sync with. Check that this computer is online." + note);
+    if (!h.peer_count) return show("busy", "Looking for other nodes…", "It needs at least one to sync with. Check that this computer is online. If it stays like this, ask someone who runs a node for its address and add it below." + note);
     if (best == null) return show("busy", "Connected", "Asking the other nodes how far the network is." + note);
     if (best > h.height + 1) {
       return show("busy", "Syncing", `Block ${fmt(h.height)} of ${fmt(best)}. Each one is checked here before it's kept.` + note, h.height / best);
@@ -170,6 +175,15 @@
       await invoke("plugin:opener|open_url", { url: r.open });
     } catch (e) { st.textContent = String(e && e.message || e); }
   }
+  $("peerForm").onsubmit = async e => {
+    e.preventDefault();
+    const v = $("peerInput").value.trim();
+    if (!v) return;
+    $("peerStatus").textContent = "Adding…";
+    try { $("peerStatus").textContent = await invoke("add_peer", { addr: v }); $("peerInput").value = ""; }
+    catch (err) { $("peerStatus").textContent = String(err); }
+    tick();
+  };
   $("nameForm").onsubmit = e => { e.preventDefault(); const v = $("nameInput").value.trim(); if (v) openName(v); };
   const dl = window.__TAURI__.deepLink;
   if (dl) {
