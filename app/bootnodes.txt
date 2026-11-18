@@ -1,8 +1,22 @@
 # Nodes the app asks for peers when it starts. One multiaddr per line; # starts a comment.
-# Once connected, the node learns more peers from these, so a short list is enough.
+# Once connected, the node learns more peers from these and keeps them in its own peers.txt.
 /ip4/158.69.116.36/tcp/17999/p2p/12D3KooWHKcjL8M5snr3GniC8xRtGJGbGhPSdGiqtZNRz6UFj1t3
 /ip4/145.239.0.111/tcp/17999/p2p/12D3KooWFsHa5ifqK45Fjd8cYnDkVDN8R8MfjfiETNpEqnbGAEez
 /ip4/151.240.121.186/tcp/17999/p2p/12D3KooWBYmcJxnc9J8uSYodQ6fwT98XAt53HGwRjzcdBEKekAJE
 /ip4/151.240.121.220/tcp/17999/p2p/12D3KooWJZjqSJQLPpzYYJNH33hNuH6nXceimkyFyDMYfP74vpFY
 /ip4/151.240.121.187/tcp/17999/p2p/12D3KooWFBvRyoiKj2gdeJeXvbv9UBL22vnkFsBvWvzj77dCyZGy
 /ip4/151.240.121.189/tcp/17999/p2p/12D3KooWFuG5jV73jXXpZhHfKy3ssywyzdXgZfDEZZcj8wpifYUC
+
+# Other nodes that accepted connections from outside when this list was made (2026-11-18), from a
+# running node's own peers.txt. Some will be gone in a few years; any one that still answers is enough.
+/ip4/144.31.226.214/tcp/27999/p2p/12D3KooWCRnAkqiJ5w3xfTMM2MJ1mDLNgd8fU8Ncn8JA6pf9EjQG
+/ip4/148.251.85.178/tcp/17999/p2p/12D3KooWJvMBL9rXcWwbrduDMk6Kh7MJEuKkyKhNDwwNPiN673vr
+/ip4/151.240.121.186/tcp/17999/p2p/12D3KooWSLjU1M6FcHgZfDoCmUBJsAJ1FmqySJueTKJwcp1dWHpH
+/ip4/151.240.121.187/tcp/17999/p2p/12D3KooWRzabtiYtLAHew2eaaTHEuoHMPmk9n9Jfhxcvx4EiwQYT
+/ip4/162.55.132.151/tcp/17999/p2p/12D3KooWQCaekTAJbDkJ1EB9WSn1bMzof6i2XZqX2DnotBBejGHv
+/ip4/194.163.131.213/tcp/18000/p2p/12D3KooWBinCtd9tc8F11RFS2GD3oJeKqzSMTdJ1A6eVi4nh3AnH
+/ip4/5.180.172.16/tcp/17999/p2p/12D3KooWGcWAc8ps2C9AdCre1atgzJG4sdMJMYRuRgw9mz7UF2Uj
+/ip4/60.26.171.119/tcp/18008/p2p/12D3KooWSXt78dM2icJKMU4rHrpszojF6dAYhAdLHi5YtX4ChUZ3
+/ip4/66.94.105.148/tcp/17999/p2p/12D3KooWCJ8tanRz5GmDjJBtnh7VQHSGSMjtwTsxQbqhJ48vJVXp
+/ip4/76.13.60.171/tcp/18000/p2p/12D3KooWBGDM5uFJbp2SSSHx6mnVdUB8iLz1bNbttRozSu4H2ysR
+/ip4/95.216.221.246/tcp/17999/p2p/12D3KooWCQ1BJBNeSpSH8ruL713HyqURKaKgHRsQTPSfWD1o2oQi
