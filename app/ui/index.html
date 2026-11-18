@@ -171,8 +171,21 @@
     try {
       const r = await CsdResolver.lookup(input);
       if (!r.open) { st.textContent = r.why; return; }
+      let url = r.open;
+      const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(r.open)?.[1];
+      if (ipfs) {
+        // its site: downloaded from IPFS and checked here (once), then served from this computer
+        if (!(await invoke("site_kept", { cid: ipfs }))) {
+          st.textContent = `Getting ${r.name}.csd's site from IPFS and checking it…`;
+          const files = await CsdResolver.fetchSite(ipfs);
+          for (const [path, bytes] of files) {
+            await invoke("site_put", bytes, { headers: { "x-cid": ipfs, "x-path": encodeURIComponent(path) } });
+          }
+        }
+        url = await invoke("site_open", { name: r.name, cid: ipfs });
+      }
       st.textContent = `Opening ${r.name}.csd`;
-      await invoke("plugin:opener|open_url", { url: r.open });
+      await invoke("plugin:opener|open_url", { url });
     } catch (e) { st.textContent = String(e && e.message || e); }
   }
   $("peerForm").onsubmit = async e => {

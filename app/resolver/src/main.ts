@@ -136,3 +136,5 @@ export async function lookup(input: string): Promise<Opened> {
   const addr = (st.addr ?? st.owner).toLowerCase();
   return { name, owner: st.owner, open: `${COMMONPLACE}/?node=${encodeURIComponent(NODE)}#/p/${addr}` };
 }
+
+export { fetchSite } from "./site";

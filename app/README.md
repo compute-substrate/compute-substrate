@@ -61,8 +61,16 @@ registers itself for those links.
   from your own node, which has checked every block itself, and checks it against its id and
   signature.
 - **Resolving:** it replays them through Cairn's own resolver (`@inversealtruism/cairnx-core`).
-- **Opening:** it goes where the name points. That's the site in its profile's `contenthash` (`ipfs://…`), the link in
-  its `url`, or else its holder's page on Commonplace, read through your node.
+- **Opening:** it goes where the name points: the link in its profile's `url`, or else its holder's
+  page on Commonplace, read through your node. When the profile points to a site (`contenthash`,
+  `ipfs://…`), the app opens it from this computer:
+  - It downloads the site from an IPFS gateway and checks every block against the address the name
+    points to, so a gateway can refuse to send it but can't change it. It keeps the checked copy in
+    `sites/` in its folder, so later visits don't download it again.
+  - It serves each name at an address of its own on this computer (`http://localhost:8801`, the next
+    name `8802`, and so on), and opens that in your normal browser. Each name keeps its address, its
+    storage and its logins, even when it points to a newer site.
+  - The site must be pinned somewhere on IPFS for a first visit; whoever runs it keeps it pinned.
 
 Names are registered and managed on Cairn; the app only reads them.
 

@@ -365,35 +365,185 @@ fn mime(path: &str) -> &'static str {
     }
 }
 
-fn serve_site(root: PathBuf) {
-    let server = match tiny_http::Server::http(LOCAL_SITE) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[site] can't serve Commonplace on {LOCAL_SITE}: {e}");
-            return;
-        }
-    };
-    let Ok(root) = root.canonicalize() else { return };
+// Serves a folder at `addr`, on this computer only. `root` can change while it runs (a name that
+// points to a newer site keeps its address). Only files inside the folder, nothing else.
+fn serve_dir(server: tiny_http::Server, root: Arc<Mutex<PathBuf>>) {
     for req in server.incoming_requests() {
         let path = req.url().split(['?', '#']).next().unwrap_or("/").to_string();
+        let Ok(root) = root.lock().unwrap().canonicalize() else {
+            let _ = req.respond(tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404));
+            continue;
+        };
         let rel = path.trim_start_matches('/');
-        let mut file = root.join(if rel.is_empty() { "index.html" } else { rel });
+        let rel = percent_decode(rel);
+        let mut file = root.join(if rel.is_empty() { "index.html".to_string() } else { rel.clone() });
         if file.is_dir() {
             file = file.join("index.html");
+        } else if !file.exists() && !rel.is_empty() && !rel.rsplit('/').next().unwrap_or("").contains('.') {
+            // /about served from about.html, as static sites are usually built
+            file = root.join(format!("{rel}.html"));
         }
-        // only files inside the release, nothing else on this computer
-        let ok = file.canonicalize().map(|f| f.starts_with(&root)).unwrap_or(false);
-        let resp = if ok {
-            match fs::read(&file) {
-                Ok(bytes) => tiny_http::Response::from_data(bytes)
-                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], mime(&file.to_string_lossy()).as_bytes()).unwrap())
-                    .with_status_code(200),
-                Err(_) => tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404),
-            }
+        let inside = |f: &Path| f.canonicalize().map(|f| f.starts_with(&root) && f.is_file()).unwrap_or(false);
+        let (file, status) = if inside(&file) {
+            (Some(file), 200)
+        } else if inside(&root.join("404.html")) {
+            (Some(root.join("404.html")), 404)
         } else {
-            tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404)
+            (None, 404)
+        };
+        let resp = match file.and_then(|f| fs::read(&f).ok().map(|b| (f, b))) {
+            Some((f, bytes)) => tiny_http::Response::from_data(bytes)
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], mime(&f.to_string_lossy()).as_bytes()).unwrap())
+                .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap())
+                .with_status_code(status),
+            None => tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404),
         };
         let _ = req.respond(resp);
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && s.is_char_boundary(i + 1) && s.is_char_boundary(i + 3) {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn serve_site(root: PathBuf) {
+    match tiny_http::Server::http(LOCAL_SITE) {
+        Ok(server) => serve_dir(server, Arc::new(Mutex::new(root))),
+        Err(e) => eprintln!("[site] can't serve Commonplace on {LOCAL_SITE}: {e}"),
+    }
+}
+
+// ── Sites of .csd names ─────────────────────────────────────────────────────
+// A name whose profile points to a site (contenthash ipfs://<CIDv1>) opens from this computer too.
+// The window downloads the site from IPFS and checks every block against the address the name
+// points to (resolver/src/site.ts); the app keeps the checked files (sites/<cid>/) and serves each
+// name on a port of its own, from http://localhost:8801 up. A port per name keeps sites apart: each
+// is its own origin, with its own storage and logins, and keeps it when the name points to a
+// newer site. Your normal browser opens it, so wallets and everything else work as on any website.
+const FIRST_SITE_PORT: u16 = 8801;
+
+#[derive(Default)]
+struct Sites {
+    // name -> (port, folder being served)
+    served: Mutex<std::collections::HashMap<String, (u16, Arc<Mutex<PathBuf>>)>>,
+}
+
+#[derive(serde::Deserialize, Serialize)]
+struct SiteEntry {
+    port: u16,
+    cid: String,
+}
+
+fn sites_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("sites"))
+}
+
+fn valid_cid(c: &str) -> bool {
+    c.len() >= 50 && c.len() <= 100 && c.starts_with('b') && c.chars().all(|c| c.is_ascii_lowercase() || ('2'..='7').contains(&c))
+}
+
+fn load_site_map(dir: &Path) -> std::collections::BTreeMap<String, SiteEntry> {
+    fs::read_to_string(dir.join("sites.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+// Serve `name` from sites/<cid>/ at its own port (the one it had before, if it can)
+fn serve_name(dir: &Path, sites: &Sites, name: &str, cid: &str) -> Result<u16, String> {
+    let folder = dir.join(cid);
+    let mut served = sites.served.lock().unwrap();
+    if let Some((port, root)) = served.get(name) {
+        *root.lock().unwrap() = folder;
+        return Ok(*port);
+    }
+    let mut map = load_site_map(dir);
+    let used: std::collections::HashSet<u16> = served.values().map(|(p, _)| *p).chain(map.iter().filter(|(n, _)| n.as_str() != name).map(|(_, e)| e.port)).collect();
+    let mut port = map.get(name).map(|e| e.port).unwrap_or(0);
+    let mut server = None;
+    if port != 0 {
+        server = tiny_http::Server::http(("127.0.0.1", port)).ok();
+    }
+    if server.is_none() {
+        port = (FIRST_SITE_PORT..FIRST_SITE_PORT + 1000)
+            .filter(|p| !used.contains(p))
+            .find(|&p| { server = tiny_http::Server::http(("127.0.0.1", p)).ok(); server.is_some() })
+            .ok_or("No free port for the site.")?;
+    }
+    let root = Arc::new(Mutex::new(folder));
+    let r = root.clone();
+    let server = server.unwrap();
+    std::thread::spawn(move || serve_dir(server, r));
+    served.insert(name.to_string(), (port, root));
+    map.insert(name.to_string(), SiteEntry { port, cid: cid.to_string() });
+    let _ = fs::write(dir.join("sites.json"), serde_json::to_string_pretty(&map).unwrap());
+    Ok(port)
+}
+
+#[tauri::command]
+fn site_kept(app: tauri::AppHandle, cid: String) -> bool {
+    valid_cid(&cid) && sites_dir(&app).map(|d| d.join(&cid).join("index.html").is_file()).unwrap_or(false)
+}
+
+// One checked file of a site, as raw bytes; headers x-cid and x-path (percent-encoded) say which.
+// Files go into sites/<cid>.part/ until site_open moves the whole site into place.
+#[tauri::command]
+fn site_put(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("expected the file's bytes".into()) };
+    let h = |k: &str| request.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string).ok_or(format!("missing {k}"));
+    let cid = h("x-cid")?;
+    let path = percent_decode(&h("x-path")?);
+    if !valid_cid(&cid) {
+        return Err("bad site address".into());
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if path.is_empty() || parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.contains('\\') || p.contains(':')) {
+        return Err("bad file name".into());
+    }
+    let file = sites_dir(&app)?.join(format!("{cid}.part")).join(&path);
+    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::write(&file, bytes).map_err(|e| e.to_string())
+}
+
+// Puts a downloaded site in place (if one was just sent) and serves `name` from it; returns its address
+#[tauri::command]
+fn site_open(app: tauri::AppHandle, sites: tauri::State<'_, Sites>, name: String, cid: String) -> Result<String, String> {
+    if !valid_cid(&cid) || name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("bad name or site address".into());
+    }
+    let dir = sites_dir(&app)?;
+    let part = dir.join(format!("{cid}.part"));
+    let done = dir.join(&cid);
+    if part.is_dir() {
+        let _ = fs::remove_dir_all(&done);
+        fs::rename(&part, &done).map_err(|e| e.to_string())?;
+    }
+    if !done.join("index.html").is_file() {
+        return Err("The site isn't here yet.".into());
+    }
+    let port = serve_name(&dir, &sites, &name, &cid)?;
+    // localhost rather than 127.0.0.1: browsers treat it as a secure origin, which wallets and passkeys need
+    Ok(format!("http://localhost:{port}/"))
+}
+
+// At start: serve every name opened before, so its address keeps working
+fn serve_known_sites(app: &tauri::AppHandle, sites: &Sites) {
+    let Ok(dir) = sites_dir(app) else { return };
+    for (name, e) in load_site_map(&dir) {
+        if dir.join(&e.cid).join("index.html").is_file() {
+            let _ = serve_name(&dir, sites, &name, &e.cid);
+        }
     }
 }
 
@@ -471,7 +621,8 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer])
+        .manage(Sites::default())
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open])
         .setup({
             let node = node.clone();
             move |app| {
@@ -490,6 +641,7 @@ fn main() {
                         std::thread::spawn(move || serve_site(site));
                     }
                 }
+                serve_known_sites(app.handle(), &app.state::<Sites>());
                 Ok(())
             }
         })
@@ -563,6 +715,51 @@ mod tests {
         assert!(!valid_peer("/ip4/1.2.3.4/tcp/17999/p2p/12D3KooWHKcjL8M5snr3GniC8xRtGJGbGhPSdGiqtZNRz6UFj1t3,/ip4/5.6.7.8"));
         assert!(!valid_peer("/ip4/1.2.3.4/tcp/17999"));
         assert!(!valid_peer("--rpc 0.0.0.0:8789"));
+    }
+
+    fn get(port: u16, path: &str) -> (u16, String) {
+        use std::io::{Read, Write};
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(c, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        let status = out[9..12].parse().unwrap();
+        (status, out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn serves_a_site_and_nothing_outside_it() {
+        let dir = std::env::temp_dir().join(format!("csd-site-test-{}", std::process::id()));
+        let site = dir.join("site");
+        fs::create_dir_all(site.join("docs")).unwrap();
+        fs::write(site.join("index.html"), "home").unwrap();
+        fs::write(site.join("about.html"), "about").unwrap();
+        fs::write(site.join("docs/index.html"), "docs").unwrap();
+        fs::write(site.join("a b.txt"), "spaced").unwrap();
+        fs::write(dir.join("secret.txt"), "secret").unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let root = Arc::new(Mutex::new(site.clone()));
+        let r = root.clone();
+        std::thread::spawn(move || serve_dir(server, r));
+        assert_eq!(get(port, "/"), (200, "home".into()));
+        assert_eq!(get(port, "/about"), (200, "about".into()));
+        assert_eq!(get(port, "/docs/"), (200, "docs".into()));
+        assert_eq!(get(port, "/a%20b.txt"), (200, "spaced".into()));
+        assert_eq!(get(port, "/../secret.txt").0, 404);
+        assert_eq!(get(port, "/%2e%2e/secret.txt").0, 404);
+        assert_eq!(get(port, "/nope").0, 404);
+        fs::write(site.join("404.html"), "custom").unwrap();
+        assert_eq!(get(port, "/nope"), (404, "custom".into()));
+        // a newer site for the same name, same address
+        let newer = dir.join("newer");
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(newer.join("index.html"), "v2").unwrap();
+        *root.lock().unwrap() = newer;
+        assert_eq!(get(port, "/"), (200, "v2".into()));
+        assert!(valid_cid("bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs44"));
+        assert!(!valid_cid("../bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs"));
+        fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&dir).ok();
     }
 }
