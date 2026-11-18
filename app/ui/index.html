@@ -74,7 +74,7 @@
     <button id="copy">Copy</button>
   </div>
   <div class="row">
-    <div>Commonplace, from this computer<small>An example app on the network, opened with no website in between. Anyone can build others.</small></div>
+    <div>Commonplace<small>Runs on this computer, on your own node. No website needed.<br>One example of an app on the network; anyone can build others.</small></div>
     <button id="commonplace">Open</button>
   </div>
   <div class="row">
@@ -123,9 +123,12 @@
     $("failActions").hidden = s.phase !== "failed";
 
     if (s.phase === "failed") return show("bad", "The node isn't running", s.message);
-    if (s.phase === "stopping") return show("busy", "Stopping…", "Saving everything before it closes. This can take a moment.");
+    if (s.phase === "stopping") return show("busy", "Stopping…", s.message && !s.message.endsWith("…") ? s.message : "Saving everything before it closes. This can take a moment.", s.progress);
     if (s.phase === "stopped") return show("", "Stopped", "");
-    if (s.phase === "starting") return show("busy", "Starting…", "Checking its copy of the network. The first start takes a few seconds.");
+    // the node says what it's doing while it starts (a rebuild after an unclean stop, with how far)
+    if (s.phase === "starting") return s.message
+      ? show("busy", "Rebuilding its copy…", s.message, s.progress)
+      : show("busy", "Starting…", "Checking its copy of the network. This usually takes a few seconds.");
 
     const h = await health();
     if (!h) return show("busy", "Starting…", "Waiting for the node to answer.");

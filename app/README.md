@@ -41,7 +41,7 @@ After that it opens normally.
 
   `node.log` there is the node's log. Deleting the folder starts over with a fresh sync.
 
-It carries Commonplace, and opens it from your own computer: *Commonplace, from this computer* in the
+It carries Commonplace, and opens it from your own computer: *Commonplace* in the
 window, at `http://localhost:8790`. Commonplace is one example of an app built on the network, with
 no special place there; anyone can build others over the same records.
 

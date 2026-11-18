@@ -692,6 +692,8 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 
     let chain = chain_to_tip_safe(db, target_tip)
         .with_context(|| format!("rebuild chain_to_tip_safe {}", hex32(target_tip)))?;
+    // for anyone watching the log (the app shows it): how many blocks the rebuild will replay
+    println!("[reorg] rebuild: replaying {} blocks", chain.len());
 
     db.utxo.clear().context("rebuild utxo.clear")?;
     db.utxo_meta.clear().context("rebuild utxo_meta.clear")?;
