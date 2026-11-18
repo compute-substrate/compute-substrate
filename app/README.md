@@ -33,6 +33,8 @@ After that it opens normally.
 
 - Starts the node when it opens, and stops it cleanly when you close it (it saves everything first,
   which can take a moment).
+- Each time it starts, the node rebuilds its copy of the network's state from the blocks it already
+  has, so nothing half-written carries over; the window shows how far it's got. Then it catches up.
 - Shows how far it has synced, and how many other nodes it's connected to.
 - *Start when I log in* keeps your node running in the background after a restart.
 - The node's data lives in the app's own folder (*Show* opens it):

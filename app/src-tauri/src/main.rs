@@ -21,8 +21,8 @@ const RPC: &str = "127.0.0.1:8789";
 const P2P: &str = "/ip4/0.0.0.0/tcp/17999";
 const BOOTNODES: &str = include_str!("../../bootnodes.txt");
 // How long a clean stop may take before the node is killed. The node flushes its database on the
-// way out. A stop during a rebuild (below) is never cut short: the node finishes the rebuild first,
-// and killing it then would only make the next start rebuild again from the beginning.
+// way out. A stop during its startup rebuild (below) doesn't wait: the node would finish the
+// rebuild before stopping, and every start rebuilds from scratch anyway, so nothing is lost.
 const STOP_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Serialize, Default)]
@@ -44,11 +44,10 @@ struct Node {
     log: Mutex<LogWatch>,
 }
 
-// What the node is doing while it starts, read from its log as the log grows. After a stop that
-// wasn't clean (the computer lost power, the app was force-quit), the node rebuilds its copy of the
-// network's state from the blocks it already has, before it answers anyone: one `[tip] set_tip`
-// line per block, after a `[reorg] recovery fallback` line (and, from newer nodes, a line with the
-// number of blocks).
+// What the node is doing while it starts, read from its log as the log grows. Each time it starts,
+// the node rebuilds its copy of the network's state from the blocks it already has, before it
+// answers anyone, so nothing half-written can carry over: one `[tip] set_tip` line per block, after
+// a `[reorg] recovery fallback` line (and, from newer nodes, a line with the number of blocks).
 #[derive(Default)]
 struct LogWatch {
     path: PathBuf,
@@ -300,7 +299,7 @@ fn start(app: &tauri::AppHandle, node: &Arc<Node>) -> Result<(), String> {
                         w.update();
                         if w.rebuilding() {
                             n.set_rebuild("starting", format!(
-                                "It wasn't stopped cleanly last time, so it's rebuilding its copy from the blocks it already has. This can take a while; leave the app open until it's done.\n\n{}",
+                                "Each time it starts, your node rebuilds its copy of the network from the blocks it already has, so nothing half-written carries over. Leave the app open until it's done.\n\n{}",
                                 w.progress()
                             ), &w);
                             let _ = handle.emit("node-changed", ());
@@ -329,9 +328,7 @@ fn stop(node: &Node) {
         }
         let mut w = node.log.lock().unwrap();
         w.update();
-        if w.rebuilding() {
-            node.set_rebuild("stopping", format!("Finishing its rebuild first, so the next start doesn't have to begin it again.\n\n{}", w.progress()), &w);
-        } else if t.elapsed() >= STOP_WAIT {
+        if w.rebuilding() || t.elapsed() >= STOP_WAIT {
             break;
         }
         drop(w);

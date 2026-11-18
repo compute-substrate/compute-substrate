@@ -721,13 +721,22 @@ fn rebuild_state_to_tip(db: &Stores, target_tip: &Hash32, mempool: Option<&Mempo
 
         mempool_remove_mined(mempool, &blk);
 
-        // No journal during rebuild: commit each step with a flush.
+        // No journal during rebuild. A rebuild starts by clearing the state, so a crash part-way
+        // through is undone by the next start's rebuild whatever was written: flushing every block
+        // buys nothing, and costs a disk sync per block (minutes on a server, much longer on
+        // macOS, where a sync is a full flush to the drive). Flush every REBUILD_FLUSH_EVERY blocks,
+        // and once at the end, before the node goes on.
         set_tip_checked(db, bh, "rebuild")?;
-        flush_state_step(db).context("rebuild flush_state_step")?;
+        if (i + 1) % REBUILD_FLUSH_EVERY == 0 {
+            flush_state_step(db).context("rebuild flush_state_step")?;
+        }
     }
+    flush_state_step(db).context("rebuild final flush")?;
 
     Ok(())
 }
+
+const REBUILD_FLUSH_EVERY: usize = 1000;
 
 fn consider_best_tip(
     best: &mut Option<(Hash32, u64, u128, &'static str)>,
