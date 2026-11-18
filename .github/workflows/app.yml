@@ -34,7 +34,7 @@ jobs:
           path: commonplace
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Build it, and check it is the published release
         working-directory: commonplace
         run: |
@@ -46,6 +46,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: commonplace-site
+          path: commonplace/out
+      # when the build doesn't come out as the published release, its files, to see why
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: commonplace-site-mismatch
           path: commonplace/out
 
   build:
@@ -90,7 +96,7 @@ jobs:
       # the .csd name resolver the window uses (app/resolver), bundled into app/ui/resolver.js
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Build the name resolver
         working-directory: app/resolver
         run: npm ci && npm run build
