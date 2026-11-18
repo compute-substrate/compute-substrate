@@ -9,7 +9,8 @@
 //   2. Each one is read from THIS computer's own node, which has checked every block itself, and
 //      must hash to its txid; its signer is the key whose signature is on it.
 //   3. The events are replayed through cairnx-core's own resolver.
-// What a name points to: its profile's `ipfs` (a site), `url` (a link), else its address's page.
+// What a name points to: its profile's `contenthash` (ipfs://<CIDv1>, a site), `url` (a link), else
+// its address's page.
 import { resolve, paidToFromOutputs, RESERVED_NAMES, ACTIVATION_HEIGHT } from "@inversealtruism/cairnx-core";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha2";
@@ -129,8 +130,8 @@ export async function lookup(input: string): Promise<Opened> {
   const st = resolve(events, tip).names[name];
   if (!st || st.expired || st.pending) return { name, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
   const p = st.profile ?? {};
-  const ipfs = (p["ipfs"] ?? "").replace(/^ipfs:\/\//, "");
-  if (/^[a-z0-9]{20,100}$/i.test(ipfs)) return { name, owner: st.owner, open: `ipfs://${ipfs}` };
+  const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(p["contenthash"] ?? "")?.[1];
+  if (ipfs) return { name, owner: st.owner, open: `ipfs://${ipfs}` };
   if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, owner: st.owner, open: p["url"] };
   const addr = (st.addr ?? st.owner).toLowerCase();
   return { name, owner: st.owner, open: `${COMMONPLACE}/?node=${encodeURIComponent(NODE)}#/p/${addr}` };

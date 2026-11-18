@@ -61,7 +61,7 @@ registers itself for those links.
   from your own node, which has checked every block itself, and checks it against its id and
   signature.
 - **Resolving:** it replays them through Cairn's own resolver (`@inversealtruism/cairnx-core`).
-- **Opening:** it goes where the name points. That's the site in its profile's `ipfs`, the link in
+- **Opening:** it goes where the name points. That's the site in its profile's `contenthash` (`ipfs://…`), the link in
   its `url`, or else its holder's page on Commonplace, read through your node.
 
 Names are registered and managed on Cairn; the app only reads them.
