@@ -54,7 +54,7 @@ no special place there; anyone can build others over the same records.
   one made on commonplace.place.
 
 It also opens `.csd` names, from Cairn's name service (CNS, by InverseAltruism), through your own
-node. Type a name into the window, or click a `web+csd:<name>` link anywhere on the computer; the app
+node. Type a name into *Go to a name* in the window (just `commonplace`, say), or click a `web+csd:<name>` link anywhere on the computer; the app
 registers itself for those links.
 
 - **Reading:** it asks Cairn's server for the transactions in the name's history. It reads each one
