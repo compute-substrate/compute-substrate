@@ -48,6 +48,24 @@ the rest. It's only as safe as the browser's storage (clearing site data loses i
 amounts on it and offer `backup()` and `restore()`, as the template does. For more than that, or one
 identity across apps, sign with a wallet instead (`cairnSigner()`).
 
+## A welcome, so writing just works
+
+Writing costs a little CSD, but the person writing needn't be the one who pays, any more than a
+website's visitors pay for its hosting. `makeInvites()` splits some CSD into small invites and lists
+them under a topic of your app's. `welcome()` gives each new writing key one of them the first time
+it opens your page. For a newcomer, writing just works.
+
+```js
+// you, once in a while (from any key holding CSD):
+await makeInvites(net, myKey, { topic: "guestbook.example.invites", count: 10, each: 1 });
+// every visitor's page:
+await welcome(net, me, "guestbook.example.invites");   // takes one when this key has never held CSD
+```
+
+There's no server deciding who gets one. The codes are public and first come, first served, so keep
+each one small: the most anyone can take is what you listed. The template does both, with a button
+for anyone to leave invites for the next person.
+
 ## The API
 
 | | |
@@ -60,6 +78,9 @@ identity across apps, sign with a wallet instead (`cairnSigner()`).
 | `net.balance(address)` | CSD at an address |
 | `browserKey(app?)` | the writing key this browser keeps for your app: `address`, `signer(net)`, `backup()`, `restore(hex)`, `forget()`, and `kept` (false in a private window) |
 | `claimInvite(net, link, address)` | move an invite link's CSD onto an address; a link like `…/#/invite/<code>`, as Commonplace makes, or the bare code |
+| `makeInvites(net, key, { topic, count, each })` | split `each` CSD into `count` invites (up to 10) off a key you hold, and list them under `topic` in the same transaction |
+| `openInvites(net, topic)` | the invites listed under `topic` that still hold CSD (Commonplace's `cp.invites` too) |
+| `welcome(net, me, topic)` | once per browser: if this writing key has never held CSD, take one of those invites onto it |
 | `newKey()` | a fresh private key (hex) |
 | `keySigner(net, privateKey)` | sign with a key you hold |
 | `cairnSigner()` | sign with [Cairn Wallet](https://cairn-substrate.com), approving each record in its window |

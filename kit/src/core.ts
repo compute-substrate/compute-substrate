@@ -192,7 +192,8 @@ export function buildSendTx(utxos: Utxo[], key: CsdKey, to: Hex, amount: bigint 
 }
 
 // One payment to each of several addresses, in one transaction
-export function buildSplitTx(utxos: Utxo[], key: CsdKey, pays: { to: Hex; value: bigint }[], fee = SEND_FEE): Tx {
+// (with `app`, the same transaction also carries a record, and its fee is then the record's)
+export function buildSplitTx(utxos: Utxo[], key: CsdKey, pays: { to: Hex; value: bigint }[], fee = SEND_FEE, app: AppPayload = { kind: "none" }): Tx {
   for (const p of pays) {
     if (!/^0x[0-9a-f]{40}$/i.test(p.to)) throw new Error("BAD_ADDRESS");
     if (p.value < MIN_SEND) throw new Error("SEND_TOO_SMALL");
@@ -204,7 +205,7 @@ export function buildSplitTx(utxos: Utxo[], key: CsdKey, pays: { to: Hex; value:
   if (total < need) throw new Error("NOT_ENOUGH_CSD");
   const outputs: TxOut[] = pays.map(p => ({ value: p.value, addr20: p.to.toLowerCase() as Hex }));
   if (total > need) outputs.push({ value: total - need, addr20: key.addr20 });
-  const unsigned: Tx = { version: 1, inputs: picked.map(u => ({ txid: u.txid, vout: u.vout, scriptSig: new Uint8Array(0) })), outputs, locktime: 0, app: { kind: "none" } };
+  const unsigned: Tx = { version: 1, inputs: picked.map(u => ({ txid: u.txid, vout: u.vout, scriptSig: new Uint8Array(0) })), outputs, locktime: 0, app };
   return signTx(unsigned, key);
 }
 

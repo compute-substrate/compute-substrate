@@ -55,6 +55,11 @@
     <div class="row"><code id="addr"></code><button id="copy">Copy</button></div>
     <div class="row"><input id="invite" placeholder="Or paste an invite link" style="flex:1;min-width:200px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)"><button id="claim">Use invite</button></div>
     <details class="muted">
+      <summary>Welcome the next person</summary>
+      <p style="margin-top:8px">Leave a few invites from your writing key. Someone opening this page for the first time with nothing on their key takes one, and can write right away. <span id="waiting"></span></p>
+      <div class="row" style="margin-top:8px"><button id="give">Leave 5 invites of 1 CSD</button></div>
+    </details>
+    <details class="muted">
       <summary>Back up or restore this key</summary>
       <p style="margin-top:8px">It lives only in this browser. Clearing site data loses it, and the CSD on it. Keep small amounts here, and a copy of the key somewhere safe: whoever has it can write as you and spend its CSD.</p>
       <div class="row" style="margin-top:8px"><button id="backup">Copy key</button><input id="restoreText" placeholder="Paste a key to restore" style="flex:1;min-width:200px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)"><button id="restore">Restore</button></div>
@@ -66,10 +71,13 @@
 </main>
 
 <script type="module">
-  import { connect, browserKey, claimInvite } from "./compute-substrate.js";
+  import { connect, browserKey, claimInvite, makeInvites, openInvites, welcome } from "./compute-substrate.js";
 
   // Your app's topic: records in it are your app's data. Pick a name no one else uses.
   const TOPIC = "guestbook.example";
+  // Where invites for newcomers are listed. Fill it yourself (the "Welcome the next person" button,
+  // or makeInvites) and anyone new starts with a little CSD, so writing just works for them.
+  const INVITES = TOPIC + ".invites";
 
   const $ = id => document.getElementById(id);
   const say = t => { $("status").textContent = t; };
@@ -117,13 +125,26 @@
   };
   $("claim").onclick = () => { const v = $("invite").value.trim(); if (v) { useInvite(v); $("invite").value = ""; } };
   // an invite link to this page (…/#/invite/<code>) is taken as it opens
-  if (/#\/invite\//.test(location.hash)) { useInvite(location.hash); history.replaceState(null, "", location.pathname + location.search); }
+  const invited = /#\/invite\//.test(location.hash);
+  if (invited) { useInvite(location.hash); history.replaceState(null, "", location.pathname + location.search); }
   $("copy").onclick = () => navigator.clipboard?.writeText(me.address).then(() => say("Address copied."));
   $("backup").onclick = () => navigator.clipboard?.writeText(me.backup()).then(() => say("Key copied. Keep it somewhere safe."));
   $("restore").onclick = () => { try { me.restore($("restoreText").value); $("restoreText").value = ""; say("Restored."); showKey(); } catch (e) { say(String(e.message ?? e)); } };
 
+  const showWaiting = async () => {
+    try { const n = (await openInvites(net, INVITES)).length; $("waiting").textContent = n ? `${n} waiting now.` : "None waiting now."; } catch {}
+  };
+  $("give").onclick = async () => {
+    say("Leaving invites…");
+    try { await makeInvites(net, me, { topic: INVITES, count: 5, each: 1 }); say("Left 5 invites. They're open from the next block, in about two minutes."); setTimeout(() => { showKey(); showWaiting(); }, 130_000); }
+    catch (e) { say(/NOT_ENOUGH/.test(String(e.message)) ? "Your writing key needs a little over 5.25 CSD for that." : String(e.message ?? e)); }
+  };
+
   if (!me.kept) say("This browser won't keep the key (a private window?), so it lasts this visit only.");
+  // someone new, with nothing on their key: take one of the invites left for newcomers
+  else if (!invited) welcome(net, me, INVITES).then(r => { if (r) { say(`Welcome! Someone left you ${r.csd} CSD to write with. It's ready in about two minutes.`); setTimeout(showKey, 130_000); } }).catch(() => {});
   showKey();
+  showWaiting();
   load();
   setInterval(load, 120_000);
 </script>

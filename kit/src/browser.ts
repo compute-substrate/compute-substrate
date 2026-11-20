@@ -9,9 +9,9 @@
 // amounts on it, and offer `backup()` and `restore()`. A wallet (cairnSigner) is the upgrade for
 // anyone with more to protect, and one identity across apps.
 
-import { buildSendTx, bytesToHex, hexToBytes, keyFromPrivate, type CsdKey, type Hex } from "./core";
+import { EPOCH_LEN, MIN_FEE_PROPOSE, SEND_FEE, buildAppTx, buildSendTx, buildSplitTx, bytesToHex, hexToBytes, keyFromPrivate, sha256d, utf8, type CsdKey, type Hex } from "./core";
 
-type Net = { api: { utxos: (a: Hex) => Promise<{ txid: Hex; vout: number; value: bigint }[]>; submit: (tx: any) => Promise<Hex> } };
+type Net = { api: { utxos: (a: Hex) => Promise<{ txid: Hex; vout: number; value: bigint }[]>; submit: (tx: any) => Promise<Hex>; tip: () => Promise<{ height: number }>; proposalsIn: (d: string, limit?: number) => Promise<{ uri?: string; height: number | bigint }[]> } };
 type Signer = { address: Hex; send: (app: any, fee: bigint) => Promise<Hex> };
 
 const store = {
@@ -23,6 +23,8 @@ const fresh = (): Hex => bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
 const valid = (h: string | null): h is Hex => !!h && /^(0x)?[0-9a-f]{64}$/i.test(h.trim());
 
 export type BrowserKey = {
+  // the private key's place in this browser's storage, for keeping app state next to it
+  slot: string;
   address: Hex;
   // false when the browser wouldn't keep it (a private window, storage blocked): it lasts this visit only
   kept: boolean;
@@ -45,12 +47,12 @@ export function browserKey(app = "csd"): BrowserKey {
   let kept = store.get(slot)?.trim().toLowerCase().replace(/^(0x)?/, "0x") === priv || store.set(slot, priv);
   let key: CsdKey = keyFromPrivate(hexToBytes(priv));
   const me: BrowserKey = {
+    slot,
     address: key.addr20,
     kept,
     signer: (net) => ({
       address: key.addr20,
       async send(app, fee) {
-        const { buildAppTx } = await import("./core");
         const utxos = await net.api.utxos(key.addr20);
         if (utxos.reduce((s, u) => s + u.value, 0n) < fee) throw new Error(`Not enough CSD at ${key.addr20}: writing this costs ${Number(fee) / 1e8} CSD.`);
         return (await net.api.submit(buildAppTx(utxos, key, app, fee))).toLowerCase() as Hex;
@@ -95,4 +97,60 @@ export async function claimInvite(net: Net, linkOrCode: string, to: Hex): Promis
   const tx = buildSendTx(utxos, k, to, "all");
   const txid = (await net.api.submit(tx)).toLowerCase() as Hex;
   return { csd: Number(tx.outputs.reduce((s, o) => s + o.value, 0n)) / 1e8, txid };
+}
+
+// ── open invites: a welcome for newcomers, paid for by whoever wants them in ─────────────────────
+// Anyone with CSD (an app's owner, a regular, a friend) splits some into small invites and lists
+// their codes under a topic, in the same transaction that funds them. A newcomer's page takes one of
+// those onto its writing key the first time it opens, so writing just works. Nobody runs a server:
+// the codes are public, first come first served, so keep each one small. The most anyone can take is
+// what was listed.
+
+const toCode = (k: Uint8Array) => btoa(String.fromCharCode(...k)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+export const INVITES_MAX = 10; // codes per listing: they share one record's 512 bytes
+
+// Split `each` CSD per invite, `count` times, off a key you hold, and list them under `topic`. Each
+// invite also carries the fee for moving it on, so it arrives whole. Returns the invite links' codes.
+export async function makeInvites(net: Net, privateKey: Hex | BrowserKey, o: { topic: string; count: number; each: number }): Promise<string[]> {
+  const n = Math.floor(o.count);
+  if (n < 1 || n > INVITES_MAX) throw new Error(`From 1 to ${INVITES_MAX} invites at a time.`);
+  const maker = keyFromPrivate(hexToBytes(typeof privateKey === "string" ? privateKey : privateKey.backup()));
+  const keys = Array.from({ length: n }, () => crypto.getRandomValues(new Uint8Array(32)));
+  const codes = keys.map(toCode);
+  const value = BigInt(Math.round(o.each * 1e8)) + SEND_FEE;
+  const uri = `invites:${codes.join(",")}`;
+  const t = await net.api.tip();
+  const app = { kind: "propose" as const, domain: o.topic, payloadHash: sha256d(utf8(uri)), uri, expiresEpoch: BigInt(Math.floor(t.height / EPOCH_LEN)) + 10_000_000n };
+  const tx = buildSplitTx(await net.api.utxos(maker.addr20), maker, keys.map(k => ({ to: keyFromPrivate(k).addr20, value })), MIN_FEE_PROPOSE, app);
+  await net.api.submit(tx);
+  return codes;
+}
+
+// The invites listed under `topic` that still hold CSD, newest first. (Commonplace's own listings,
+// `cp:invites:…`, read the same way.)
+export async function openInvites(net: Net, topic: string): Promise<{ code: string; csd: number }[]> {
+  const ps = [...(await net.api.proposalsIn(topic, 200))].sort((a, b) => Number(b.height) - Number(a.height));
+  const codes = [...new Set(ps.flatMap(p => /^(?:[a-z0-9.]+:)?invites:([A-Za-z0-9_,-]+)$/.exec(p.uri ?? "")?.[1].split(",").slice(0, INVITES_MAX) ?? []))].slice(0, 100);
+  const held = await Promise.all(codes.map(async code => {
+    const k = inviteKeyFrom(code);
+    const us = k ? await net.api.utxos(k.addr20).catch(() => []) : [];
+    return { code, csd: Number(us.reduce((s, u) => s + u.value, 0n) - SEND_FEE) / 1e8 };
+  }));
+  return held.filter(x => x.csd > 0);
+}
+
+// A newcomer's welcome: when this writing key has never held anything, take one of the open invites
+// under `topic` onto it (a random one, so newcomers arriving together don't all reach for the same).
+// Once per browser. Returns what's on its way, or null when there was nothing to do or take.
+export async function welcome(net: Net, me: BrowserKey, topic: string): Promise<{ csd: number; txid: Hex } | null> {
+  const done = `${me.slot}.welcomed`;
+  if (store.get(done) === me.address) return null;
+  if ((await net.api.utxos(me.address)).length) { store.set(done, me.address); return null; }
+  const open = await openInvites(net, topic);
+  while (open.length) {
+    const [pick] = open.splice(Math.floor(Math.random() * open.length), 1);
+    try { const r = await claimInvite(net, pick.code, me.address); store.set(done, me.address); return r; }
+    catch { /* someone took it a moment ago: try another */ }
+  }
+  return null;
 }
