@@ -10,6 +10,36 @@ false record. The more doors there are, run by more people, the less any app dep
 A door serves only what every node already makes public: blocks, records, balances, proofs, and
 `POST /tx/submit` for transactions their owners signed. It never holds anyone's key.
 
+A door also keeps the sites `.csd` names point to (below), which home computers can't: behind a home
+or mobile connection, nobody outside can reach them.
+
+## In one command
+
+On any Debian or Ubuntu server, x86-64 or ARM (the cheapest you can rent is plenty), as root:
+
+```bash
+curl -fsSL https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.6/door.sh | bash
+```
+
+It installs the node, the site store and Caddy, and serves them over HTTPS. With no domain of your
+own, it uses one made from the server's address (`1-2-3-4.sslip.io`), which Caddy gets a
+certificate for by itself. It prints the door's address, and a key's address: send that key 0.3 CSD,
+and within 10 minutes the door announces itself on the network (a record under `csd.doors` whose
+text is its address). The Compute Substrate Node app reads those, tries each door, and uses the ones
+that answer, so nobody keeps a list and nobody has to approve yours.
+
+- `--domain example.org`: a domain of yours, already pointing to the server
+- `--invite <link>`: pay for the announcement with an invite link
+- `--node http://127.0.0.1:8789`: use a node already running there
+
+Pass them after `bash -s --`, as in `... | bash -s -- --domain example.org`. Running it again updates
+the programs and keeps everything else. Open TCP ports 80, 443 and 17999 in your provider's firewall
+if it has one.
+
+The rest of this page is the same thing by hand, piece by piece.
+
+## By hand
+
 There are two ways to open one. Do either or both.
 
 - **Over HTTPS**, behind a web server with a domain name. Works everywhere, including pages served
@@ -158,8 +188,8 @@ curl https://csd.example.org/sites
 ```
 
 It lists what it keeps, and how far it has read the names (`names_read_to`, which reaches the tip
-within a minute or so). To have the Node app use your door, add its address to `app/doors.txt` in a
-pull request.
+within a minute or so). To have the Node app use your door, announce it: see *In one command* above for what the
+announcement is, or run `scripts/door.sh` with `--node` on a door you set up by hand.
 
 ## Letting people use it
 

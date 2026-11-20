@@ -163,3 +163,55 @@ jobs:
             Built by GitHub Actions from this tag's source; the run's log shows every step. `csd-macos` and `csd-windows.exe` are the node programs inside the apps, as built; their SHA-256 are in the SHA256SUMS files.
 
             The apps are not signed by Apple or Microsoft, so the first launch asks for a confirmation. See app/README.md.
+
+  # A door's programs for Linux servers (scripts/door.sh installs them): the node and the site
+  # store, built for x86-64 and ARM on the oldest supported Ubuntu, so they run on newer ones too
+  door-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the node and the site store
+        run: |
+          cargo build --release --locked --bin csd
+          (cd sites && cargo build --release --locked)
+          mkdir -p out
+          cp target/release/csd out/csd-linux-${{ matrix.arch }}
+          cp sites/target/release/csd-sites out/csd-sites-linux-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: door-${{ matrix.arch }}
+          path: out/*
+
+  door-release:
+    needs: door-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: door-*
+          merge-multiple: true
+          path: out
+      - name: The installer, for this release, and the checksums
+        run: |
+          sed "s/__TAG__/${GITHUB_REF_NAME}/" scripts/door.sh > out/door.sh
+          cd out && sha256sum csd-linux-* csd-sites-linux-* > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: door-linux
+          path: out/*
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          make_latest: false

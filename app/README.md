@@ -94,7 +94,8 @@ Whoever downloads a site checks every block against the address its name points 
 trusted with nothing. A door keeps a site only while a name points to it, and its operator can
 refuse any site.
 
-The doors it knows are in `app/doors.txt`. Anyone can run one: see the
+The doors it uses: the ones in `app/doors.txt`, and every door that announced itself on the network
+(a record under `csd.doors`), each tried before it's used. Anyone can run one: see the
 [door guide](../docs/public-node.md).
 
 It makes the genesis block itself (`csd genesis`, which always gives the same block), so there is

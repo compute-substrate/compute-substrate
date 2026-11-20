@@ -237,8 +237,32 @@
   // Helping keep sites up: every site this app has goes to any door that doesn't have it yet, over
   // connections this computer makes itself, so it works from behind any router. A door keeps a site
   // only while a .csd name points to it.
-  let doorsCache = null;
-  const doorList = async () => doorsCache ??= await invoke("doors").catch(() => []);
+  // The doors: the ones this app ships with, and every door that announced itself on the network
+  // (a record under csd.doors whose text is its address), read through this computer's own node.
+  // Each is tried before it's used; one that doesn't answer is skipped. Since every site is checked
+  // byte for byte, a door is trusted with nothing, so nobody has to vouch for the list.
+  const DOOR_TOPIC = "csd.doors";
+  const privateHost = h => /^(localhost|.*\.local|.*\.internal|127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|\[)/i.test(h);
+  let doorsCache = null, doorsAt = 0;
+  async function doorList() {
+    if (doorsCache && Date.now() - doorsAt < 3_600_000) return doorsCache;
+    const shipped = await invoke("doors").catch(() => []);
+    let announced = [];
+    try {
+      const r = await fetch(`${rpc}/proposals/${encodeURIComponent(DOOR_TOPIC)}/200`, { signal: AbortSignal.timeout(10_000) });
+      const j = await r.json();
+      announced = (j.proposals ?? []).sort((a, b) => Number(b.height) - Number(a.height)).map(p => String(p.uri ?? "").trim().replace(/\/+$/, ""))
+        .filter(u => { try { const x = new URL(u); return x.protocol === "https:" && !x.username && !x.search && !x.hash && x.pathname === "/" && !privateHost(x.hostname); } catch { return false; } });
+    } catch {}
+    const all = [...new Set([...shipped, ...announced])].slice(0, 40);
+    const answering = await Promise.all(all.map(async d => {
+      try { const r = await fetch(`${d}/sites`, { signal: AbortSignal.timeout(6_000) }); return r.ok && (await r.json()).ok ? d : null; } catch { return null; }
+    }));
+    doorsCache = answering.filter(Boolean);
+    doorsAt = Date.now();
+    if (!doorsCache.length) doorsCache = shipped; // nothing answered: keep trying the shipped ones
+    return doorsCache;
+  }
   const onDoors = new Map(); // cid -> how many doors have it
   async function seed(cid) {
     let n = 0, car = null;
