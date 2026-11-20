@@ -77,11 +77,11 @@ registers itself for those links.
 
 Names are registered and managed on Cairn; the app only reads them.
 
-**Sharing the sites you open.** With *Share the sites you open* on (the default), the app also runs
-[Kubo](https://github.com/ipfs/kubo), the standard IPFS program, and shares every site it has
-opened, and the release of Commonplace it carries, with anyone who asks over IPFS. So a site stays
-up for as long as some of the people who use it have the app open: no server, and no one person
-keeping it pinned. Gateways such as ipfs.io find it there too.
+**Helping keep sites up.** With *Help keep sites up* on (the default), the app also runs
+[Kubo](https://github.com/ipfs/kubo), the standard IPFS program, and helps host the sites it has,
+and the release of Commonplace it carries, for anyone who asks over IPFS, the way seeding works in
+BitTorrent. So a site stays up for as long as some of the people who use it have the app open: no
+server, and no one person keeping it pinned. Gateways such as ipfs.io find it there too.
 
 - **Nothing to trust:** whoever downloads a site checks every block against the address its name
   points to, so a copy from a stranger's computer is as good as the author's.
@@ -89,8 +89,11 @@ keeping it pinned. Gateways such as ipfs.io find it there too.
   only what the app pinned. It uses ports of its own (5101, 8091 and 4011), so a Kubo you already
   run isn't disturbed.
 - **Its data** is in `ipfs/` in the app's folder, up to 2 GB.
+- **What others can see:** helping host a site means announcing on IPFS that this computer has it,
+  from your internet address, as seeding does. Someone who looks can see which sites your computer
+  helps keep up (the ones you've opened, and Commonplace).
 - **Off:** turning the switch off stops Kubo. Sites you open are then kept for you only, and come
-  from public gateways.
+  from public gateways, and nothing is announced.
 
 It makes the genesis block itself (`csd genesis`, which always gives the same block), so there is
 nothing to download besides the app.

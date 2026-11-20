@@ -78,7 +78,7 @@
     <button id="commonplace">Open</button>
   </div>
   <div class="row">
-    <div>Share the sites you open<small id="sharingStatus">Keeps them up for others over IPFS, with no server</small></div>
+    <div>Help keep sites up<small id="sharingStatus">Your app helps host the sites on the network, so they stay up with no server</small></div>
     <label class="switch"><input type="checkbox" id="sharing"><i></i></label>
   </div>
   <div class="row">
@@ -185,7 +185,7 @@
           for (const [path, bytes] of files) {
             await invoke("site_put", bytes, { headers: { "x-cid": ipfs, "x-path": encodeURIComponent(path) } });
           }
-          // and shared from here on, when sharing is on
+          // and helped to stay up from here on, when that's on
           if ($("sharing").checked) invoke("site_share", car, { headers: { "x-cid": ipfs } }).then(sharing).catch(() => {});
         }
         url = await invoke("site_open", { name: r.name, cid: ipfs });
@@ -210,16 +210,16 @@
     dl.onOpenUrl(urls => { if (urls && urls[0]) openName(urls[0]); });
   }
 
-  // sharing the sites this app keeps (and its Commonplace) over IPFS
+  // helping keep the sites this app has (and its Commonplace) up, over IPFS
   async function sharing() {
     let s; try { s = await invoke("sharing_state"); } catch { return; }
     $("sharing").checked = s.on;
-    $("sharingStatus").textContent = !s.on ? "Off. Sites you open are kept for you only"
-      : !s.running ? "Starting IPFS…"
-      : `Sharing ${s.sites} ${s.sites === 1 ? "site" : "sites"} over IPFS, so they stay up with no server`;
+    $("sharingStatus").textContent = !s.on ? "Off. Your app keeps sites for you only"
+      : !s.running ? "Starting…"
+      : `Helping keep ${s.sites} ${s.sites === 1 ? "site" : "sites"} up, with no server`;
   }
   $("sharing").onchange = async e => {
-    $("sharingStatus").textContent = e.target.checked ? "Starting IPFS…" : "Stopping…";
+    $("sharingStatus").textContent = e.target.checked ? "Starting…" : "Stopping…";
     try { await invoke("set_sharing", { on: e.target.checked }); } catch (err) { $("sharingStatus").textContent = String(err); }
     sharing();
   };
