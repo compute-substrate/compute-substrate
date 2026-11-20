@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "es2022", "module": "esnext", "moduleResolution": "bundler", "strict": true,
+    "resolveJsonModule": true, "declaration": true, "emitDeclarationOnly": true, "outDir": "dist",
+    "skipLibCheck": true, "lib": ["es2022", "dom"]
+  },
+  "include": ["src"]
+}

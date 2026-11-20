@@ -1,0 +1,45 @@
+{
+  "name": "compute-substrate",
+  "version": "0.1.0",
+  "description": "Build on Compute Substrate: read any topic from any node, check every record against the proof-of-work yourself, and write records signed by your own key or a wallet. No server, no account.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.mjs && tsc -p tsconfig.json",
+    "test": "tsx test/kit.test.mts"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/compute-substrate/compute-substrate.git",
+    "directory": "kit"
+  },
+  "keywords": [
+    "compute-substrate",
+    "csd",
+    "light-client",
+    "serverless",
+    "static-site"
+  ]
+}
