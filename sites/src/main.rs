@@ -1,0 +1,248 @@
+// csd-sites: a door's site store. It keeps the sites that .csd names point to and serves them, so a
+// site stays up when its author's own computer is off, or can't be reached, as most home and mobile
+// connections can't.
+//
+//   GET  /sites/<cid>.car   the site, as a .car file (HEAD: whether this door has it)
+//   POST /sites/<cid>.car   give this door a site. Kept only if a name's profile points to it, and
+//                           only once every block checks out against <cid>.
+//   GET  /sites             what this door keeps
+//
+// Readers check every block against the address the name points to, as they would from anyone,
+// so a door is trusted with nothing. Anyone can run one; the Compute Substrate Node app gives the
+// sites it has to the doors it knows, and reads from them.
+//
+// It reads names from its own node (its RPC, --node), and runs beside it, usually behind the same
+// web server (Caddy) as the node's public RPC. Nothing here is consensus.
+
+mod car;
+mod index;
+
+use clap::Parser;
+use index::Index;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const MAX_SITE: usize = 64 * 1024 * 1024;
+
+#[derive(Parser)]
+#[command(about = "A door's site store: keeps the sites .csd names point to, and serves them")]
+struct Args {
+    /// this machine's node, its RPC
+    #[arg(long, default_value = "http://127.0.0.1:8789")]
+    node: String,
+    /// where the sites are kept
+    #[arg(long, default_value = "/var/lib/csd/sites")]
+    dir: PathBuf,
+    /// where it answers; usually only this machine, with a web server in front
+    #[arg(long, default_value = "127.0.0.1:8795")]
+    listen: String,
+    /// the most it keeps, in GB; past that it takes no new sites
+    #[arg(long, default_value_t = 20)]
+    max_gb: u64,
+    /// answer browsers from any site itself (when no web server in front adds these headers)
+    #[arg(long)]
+    cors: bool,
+}
+
+struct Door {
+    dir: PathBuf,
+    index: Mutex<Index>,
+    max_bytes: u64,
+    cors: bool,
+}
+
+fn car_path(dir: &Path, cid: &str) -> PathBuf {
+    dir.join(format!("{cid}.car"))
+}
+
+fn kept(dir: &Path) -> Vec<(String, u64)> {
+    let Ok(rd) = fs::read_dir(dir) else { return vec![] };
+    rd.flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            let cid = n.strip_suffix(".car")?.to_string();
+            car::parse_cid(&cid)?;
+            Some((cid, e.metadata().ok()?.len()))
+        })
+        .collect()
+}
+
+fn save_index(dir: &Path, index: &Index) {
+    let tmp = dir.join("index.json.tmp");
+    if fs::write(&tmp, serde_json::to_vec(index).unwrap()).is_ok() {
+        let _ = fs::rename(tmp, dir.join("index.json"));
+    }
+}
+
+// Every minute: read the node's new records, and drop sites no name has wanted for the grace period
+fn follow(node: String, door: Arc<Door>) {
+    loop {
+        let mut ix = std::mem::take(&mut *door.index.lock().unwrap());
+        match index::catch_up(&node, &mut ix) {
+            Ok(()) => {}
+            Err(e) => eprintln!("[sites] {e}"),
+        }
+        for (cid, _) in kept(&door.dir) {
+            if !ix.wanted(&cid) {
+                eprintln!("[sites] dropping {cid}: no name points to it any more");
+                let _ = fs::remove_file(car_path(&door.dir, &cid));
+            }
+        }
+        // forget long-dropped sites
+        let tip = ix.tip;
+        ix.dropped.retain(|_, h| *h + index::GRACE_BLOCKS > tip);
+        save_index(&door.dir, &ix);
+        *door.index.lock().unwrap() = ix;
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+fn respond(req: tiny_http::Request, door: &Door, status: u16, body: Vec<u8>, kind: &str) {
+    let mut r = tiny_http::Response::from_data(body).with_status_code(status)
+        .with_header(tiny_http::Header::from_bytes("Content-Type", kind).unwrap());
+    if door.cors {
+        for (k, v) in [("Access-Control-Allow-Origin", "*"), ("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS"), ("Access-Control-Allow-Headers", "content-type"), ("Access-Control-Max-Age", "600")] {
+            r.add_header(tiny_http::Header::from_bytes(k, v).unwrap());
+        }
+    }
+    let _ = req.respond(r);
+}
+
+fn text(req: tiny_http::Request, door: &Door, status: u16, msg: &str) {
+    respond(req, door, status, serde_json::to_vec(&serde_json::json!({ "ok": status < 300, "message": msg })).unwrap(), "application/json");
+}
+
+fn handle(mut req: tiny_http::Request, door: &Door) {
+    use tiny_http::Method::*;
+    let path = req.url().split('?').next().unwrap_or("").to_string();
+    if *req.method() == Options {
+        return respond(req, door, 204, vec![], "text/plain");
+    }
+    if path == "/sites" || path == "/sites/" {
+        let ks = kept(&door.dir);
+        let ix = door.index.lock().unwrap();
+        let body = serde_json::json!({
+            "ok": true,
+            "sites": ks.iter().map(|(c, n)| serde_json::json!({ "cid": c, "bytes": n })).collect::<Vec<_>>(),
+            "names_read_to": ix.next.saturating_sub(1),
+            "tip": ix.tip,
+        });
+        drop(ix);
+        return respond(req, door, 200, serde_json::to_vec(&body).unwrap(), "application/json");
+    }
+    let Some(cid) = path.strip_prefix("/sites/").and_then(|p| p.strip_suffix(".car")).filter(|c| car::parse_cid(c).is_some()).map(str::to_string) else {
+        return text(req, door, 404, "Not here. This door serves /sites/<cid>.car.");
+    };
+    let file = car_path(&door.dir, &cid);
+    match req.method() {
+        Get | Head => match fs::read(&file) {
+            Ok(b) => {
+                let head = *req.method() == Head;
+                respond(req, door, 200, if head { vec![] } else { b }, "application/vnd.ipld.car")
+            }
+            Err(_) => text(req, door, 404, "This door doesn't have that site."),
+        },
+        Post => {
+            if file.exists() {
+                return text(req, door, 200, "This door has it already.");
+            }
+            if !door.index.lock().unwrap().wanted(&cid) {
+                return text(req, door, 403, "No .csd name points to this site, so this door doesn't keep it. Point a name to it first (its site, ipfs://<cid>), and give it again once that record is in a block.");
+            }
+            let mut body = Vec::new();
+            if req.as_reader().take(MAX_SITE as u64 + 1).read_to_end(&mut body).is_err() {
+                return text(req, door, 400, "The upload broke off.");
+            }
+            if body.len() > MAX_SITE {
+                return text(req, door, 413, "A site can be at most 64 MB.");
+            }
+            let used: u64 = kept(&door.dir).iter().map(|(_, n)| n).sum();
+            if used + body.len() as u64 > door.max_bytes {
+                return text(req, door, 507, "This door is full.");
+            }
+            if let Err(e) = car::check(&body, car::parse_cid(&cid).unwrap()) {
+                return text(req, door, 422, &format!("That isn't this site intact: {e}."));
+            }
+            let tmp = door.dir.join(format!("{cid}.car.part"));
+            if fs::write(&tmp, &body).and_then(|_| fs::rename(&tmp, &file)).is_err() {
+                return text(req, door, 500, "Couldn't save it.");
+            }
+            eprintln!("[sites] keeping {cid} ({} bytes)", body.len());
+            text(req, door, 201, "Kept. This door serves it from now on.")
+        }
+        _ => text(req, door, 405, "GET, HEAD or POST."),
+    }
+}
+
+fn main() {
+    let a = Args::parse();
+    fs::create_dir_all(&a.dir).unwrap_or_else(|e| panic!("can't use {}: {e}", a.dir.display()));
+    let index: Index = fs::read(a.dir.join("index.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let door = Arc::new(Door { dir: a.dir.clone(), index: Mutex::new(index), max_bytes: a.max_gb * 1_000_000_000, cors: a.cors });
+    let node = a.node.trim_end_matches('/').to_string();
+    {
+        let door = door.clone();
+        std::thread::spawn(move || follow(node, door));
+    }
+    let server = Arc::new(tiny_http::Server::http(&a.listen).unwrap_or_else(|e| panic!("can't listen on {}: {e}", a.listen)));
+    eprintln!("[sites] keeping sites in {}, answering on {}", a.dir.display(), a.listen);
+    let workers: Vec<_> = (0..8).map(|_| {
+        let (server, door) = (server.clone(), door.clone());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                handle(req, &door);
+            }
+        })
+    }).collect();
+    for w in workers {
+        let _ = w.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_decide_what_is_kept() {
+        let mut ix = Index { tip: 100_000, ..Default::default() };
+        let (a, b) = ("bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24".to_string(), "bafybeicnb2kolu7wllsf7mn4lmkbz36jwww7gtave57s7cwzwsdz6l2y7q".to_string());
+        ix.apply("commonplace", "owner", Some(a.clone()), 90_000);
+        assert!(ix.wanted(&a) && !ix.wanted(&b));
+        // someone else's profile for the same name doesn't push the owner's site out
+        ix.apply("commonplace", "stranger", Some(b.clone()), 90_001);
+        assert!(ix.wanted(&a) && ix.wanted(&b));
+        // the owner moves on: the old site stays for the grace period, then goes
+        ix.apply("commonplace", "owner", Some(b.clone()), 95_000);
+        assert!(ix.wanted(&a));
+        ix.tip = 95_000 + index::GRACE_BLOCKS;
+        assert!(!ix.wanted(&a) && ix.wanted(&b));
+        // an older record read again changes nothing
+        ix.apply("commonplace", "owner", Some(a.clone()), 90_000);
+        assert!(!ix.wanted(&a));
+        assert_eq!(index::profile_site(r#"{"v":1,"t":"nprofile","name":"x","p":{"contenthash":"ipfs://bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24"}}"#), Some(("x".into(), Some(a.clone()))));
+        assert_eq!(index::profile_site(r#"{"v":1,"t":"nprofile","name":"x","p":{"url":"https://x"}}"#), Some(("x".into(), None)));
+        assert_eq!(index::profile_site(r#"{"v":1,"t":"nreg","name":"x"}"#), None);
+    }
+
+    #[test]
+    fn checks_a_real_site() {
+        let Ok(car) = std::env::var("TEST_CAR") else { return };
+        let bytes = fs::read(&car).unwrap();
+        let root = car::parse_cid(&std::env::var("TEST_CID").unwrap()).unwrap();
+        assert!(car::check(&bytes, root).unwrap() > 1000);
+        // one byte changed anywhere in the blocks: refused
+        let mut bad = bytes.clone();
+        let i = bad.len() / 2;
+        bad[i] ^= 1;
+        assert!(car::check(&bad, root).is_err());
+        // a block missing: refused
+        assert!(car::check(&bytes[..bytes.len() - 5000], root).is_err());
+        // a different site's address: refused
+        let other = car::parse_cid("bafybeicnb2kolu7wllsf7mn4lmkbz36jwww7gtave57s7cwzwsdz6l2y7q").unwrap();
+        assert!(car::check(&bytes, other).is_err());
+    }
+}

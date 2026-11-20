@@ -1,0 +1,24 @@
+[package]
+name = "csd-sites"
+version = "0.1.0"
+edition = "2021"
+description = "A door's site store: keeps the sites .csd names point to, checked, and serves them, so they stay up with no one's own server"
+license = "MIT"
+publish = false
+
+# A program of its own, beside the node, with its own Cargo.lock. Nothing here is consensus.
+
+[dependencies]
+tiny_http = "0.12"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ripemd = "0.1"
+hex = "0.4"
+data-encoding = "2"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

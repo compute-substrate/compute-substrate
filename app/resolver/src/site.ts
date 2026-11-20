@@ -59,37 +59,46 @@ export async function filesFromCar(bytes: Uint8Array, root: string): Promise<Map
   return files;
 }
 
-// This app's own IPFS (Kubo, when sharing is on) asks the IPFS network directly, other Node apps
-// included; the public gateways are a fallback, tried if it hasn't answered in a few seconds.
-const OWN = "http://127.0.0.1:8091";
-const FALLBACK_AFTER = 8_000;
+// The doors first (public nodes keeping the sites names point to, /sites/<cid>.car); IPFS gateways
+// as a fallback, asked if no door has answered in a few seconds. Whatever answers, every block is
+// checked here against the address the name points to.
+const FALLBACK_AFTER = 6_000;
 
-async function fromGateway(gw: string, cid: string, signal: AbortSignal): Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }> {
-  const r = await fetch(`${gw}/ipfs/${cid}?format=car`, { headers: { accept: "application/vnd.ipld.car" }, signal });
-  if (!r.ok) throw new Error(`${new URL(gw).host} answered ${r.status}`);
+async function fromUrl(url: string, cid: string, signal: AbortSignal): Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }> {
+  const r = await fetch(url, { headers: { accept: "application/vnd.ipld.car" }, signal });
+  if (!r.ok) throw new Error(`${new URL(url).host} answered ${r.status}`);
   const car = new Uint8Array(await r.arrayBuffer());
   return { files: await filesFromCar(car, cid), car };
 }
 
 // A site, from whichever source sends it intact first. Returns its files, checked, and the .car
-// they came in, for this app to share on.
-export async function fetchSite(cid: string): Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }> {
+// they came in, for this app to keep and give to doors that don't have it.
+export async function fetchSite(cid: string, doors: string[] = []): Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }> {
   const stop = new AbortController();
   const errors: string[] = [];
-  const attempt = (gw: string, delay: number) => new Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }>((resolve, reject) => {
+  const attempt = (url: string, delay: number) => new Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }>((resolve, reject) => {
     const t = setTimeout(() => {
       const mine = new AbortController();
       const limit = setTimeout(() => mine.abort(), 120_000);
       stop.signal.addEventListener("abort", () => mine.abort());
-      fromGateway(gw, cid, mine.signal).finally(() => clearTimeout(limit))
+      fromUrl(url, cid, mine.signal).finally(() => clearTimeout(limit))
         .then(resolve, e => { errors.push(String((e as Error)?.message ?? e)); reject(e); });
     }, delay);
     stop.signal.addEventListener("abort", () => { clearTimeout(t); reject(new Error("stopped")); });
   });
   try {
-    const got = await Promise.any([attempt(OWN, 0), ...GATEWAYS.map((g, i) => attempt(g, FALLBACK_AFTER + i * 2_000))]);
-    return got;
+    return await Promise.any([
+      ...doors.map((d, i) => attempt(`${d}/sites/${cid}.car`, i * 1_500)),
+      ...GATEWAYS.map((g, i) => attempt(`${g}/ipfs/${cid}?format=car`, (doors.length ? FALLBACK_AFTER : 0) + i * 2_000)),
+    ]);
   } catch {
-    throw new Error(`Nobody sent this site intact (${errors.filter(e => !/stopped|fetch/i.test(e))[0] ?? "no answer"}). Whoever runs it needs to keep it pinned, or have the Node app open.`);
+    throw new Error(`No door or gateway sent this site intact (${errors.filter(e => !/stopped|fetch/i.test(e))[0] ?? "no answer"}). Its author can give it to the doors by opening it once in the Compute Substrate Node app.`);
   } finally { stop.abort(); }
+}
+
+// A .car's root: the site's address, for a .car the person picked themselves
+export async function carRoot(bytes: Uint8Array): Promise<string> {
+  const roots = await (await CarReader.fromBytes(bytes)).getRoots();
+  if (roots.length !== 1) throw new Error("That .car doesn't have exactly one root, so it isn't one site.");
+  return roots[0].toV1().toString();
 }

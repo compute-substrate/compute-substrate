@@ -490,11 +490,11 @@ fn serve_name(dir: &Path, sites: &Sites, name: &str, cid: &str) -> Result<u16, S
 
 #[tauri::command]
 fn site_kept(app: tauri::AppHandle, cid: String) -> bool {
-    // with sharing on, a site kept before the app shared sites is downloaded once more, for its .car
+    // with helping on, a site kept before the app kept .car files is downloaded once more, for its .car
     let Ok(d) = sites_dir(&app) else { return false };
     valid_cid(&cid)
         && d.join(&cid).join("index.html").is_file()
-        && (!sharing_on(&app) || d.join(format!("{cid}.shared")).exists() || d.join(format!("{cid}.car")).exists())
+        && (!sharing_on(&app) || d.join(format!("{cid}.car")).exists())
 }
 
 // One checked file of a site, as raw bytes; headers x-cid and x-path (percent-encoded) say which.
@@ -549,41 +549,23 @@ fn serve_known_sites(app: &tauri::AppHandle, sites: &Sites) {
 }
 
 
-// ── Sharing the sites you open, over IPFS ───────────────────────────────────
-// Every site this app opens (a .csd name's contenthash) is kept here, checked. With sharing on, the
-// app also runs Kubo, the standard IPFS program, which shares those sites, and the release of
-// Commonplace the app carries, with anyone who asks for them over IPFS. Then a site stays up as long
-// as some of the people who use it have the app open, with no server of anyone's, and gateways
-// (ipfs.io and the like) can find it here too. Whoever downloads it still checks every block
-// against the address the name points to, so nobody can change a byte.
+// ── Helping keep sites up: the doors ─────────────────────────────────────────
+// Most home and mobile connections can't be reached from outside, so this computer can't serve the
+// sites it has to others directly. Doors can: public nodes that also run a site store (csd-sites),
+// which keep the sites .csd names point to and serve them to anyone. This app keeps each site it
+// opens as a .car, reads sites from the doors first, and gives every site it has to any door that
+// lacks it, over connections it makes itself, so it works from behind any router. So a site whose
+// author opens it once in the app reaches the doors, and stays up with nobody's own server. Whoever
+// downloads a site still checks every block against the address its name points to.
 //
-// Kubo runs on ports of its own, so a Kubo someone runs already isn't disturbed, in its low-power
-// mode, with few connections, sharing only what this app pinned. Its data is in ipfs/ in the app's
-// folder. Turning sharing off stops it.
-const IPFS_API: &str = "127.0.0.1:5101";
-const IPFS_GATEWAY: &str = "127.0.0.1:8091";
-const IPFS_SWARM_PORT: u16 = 4011;
+// The doors it knows: app/doors.txt, shipped with it. Anyone can run one (docs/public-node.md).
+const DOORS: &str = include_str!("../../doors.txt");
 const SHARING_OFF: &str = "sharing-off";
-
-#[derive(Default)]
-struct Ipfs {
-    child: Mutex<Option<Child>>,
-    ready: Mutex<bool>,
-}
 
 #[derive(Clone, Serialize, Default)]
 struct Sharing {
     on: bool,
-    running: bool,
-    sites: usize,
-    message: String,
-}
-
-fn ipfs_binary() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or("no folder for the app")?;
-    let p = dir.join(if cfg!(windows) { "ipfs.exe" } else { "ipfs" });
-    if p.exists() { Ok(p) } else { Err(format!("The IPFS program is missing from the app ({}).", p.display())) }
+    sites: Vec<String>,
 }
 
 fn app_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -594,231 +576,63 @@ fn sharing_on(app: &tauri::AppHandle) -> bool {
     app_dir(app).map(|d| !d.join(SHARING_OFF).exists()).unwrap_or(false)
 }
 
-fn ipfs_cmd(bin: &Path, repo: &Path) -> Command {
-    let mut c = command(bin);
-    c.env("IPFS_PATH", repo).stdin(Stdio::null());
-    c
+// The release of Commonplace the app carries (app/commonplace.json), whose .car ships beside it
+fn carried_cid() -> Option<String> {
+    let j: serde_json::Value = serde_json::from_str(include_str!("../../commonplace.json")).ok()?;
+    j["cid"].as_str().filter(|c| valid_cid(c)).map(str::to_string)
 }
 
-fn ipfs_run(bin: &Path, repo: &Path, args: &[&str]) -> Result<(), String> {
-    ipfs_out(bin, repo, args).map(|_| ())
-}
-
-fn ipfs_out(bin: &Path, repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = ipfs_cmd(bin, repo).args(args).output().map_err(|e| format!("Can't run IPFS: {e}"))?;
-    if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).to_string()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
-}
-
-// Announce a site's root at once. Kubo announces every block of what's pinned, one by one, which
-// from a home connection can take hours for a site of a few hundred blocks; but whoever looks for a
-// site looks for its root, and once connected fetches the rest straight from here.
-fn ipfs_announce(app: &tauri::AppHandle, cid: &str) {
-    let (Ok(bin), Ok(dir)) = (ipfs_binary(), app_dir(app)) else { return };
-    let (cid, repo) = (cid.to_string(), dir.join("ipfs"));
-    std::thread::spawn(move || {
-        if let Err(e) = ipfs_run(&bin, &repo, &["routing", "provide", &cid]) {
-            eprintln!("[ipfs] announcing {cid}: {e}");
-        }
-    });
-}
-
-// The settings, applied at every start so a newer app's settings reach an older folder
-fn ipfs_configure(bin: &Path, repo: &Path) -> Result<(), String> {
-    if !repo.join("config").exists() {
-        fs::create_dir_all(repo).map_err(|e| e.to_string())?;
-        ipfs_run(bin, repo, &["init", "--profile", "lowpower", "--empty-repo"])?;
+fn car_file(app: &tauri::AppHandle, cid: &str) -> Option<PathBuf> {
+    if !valid_cid(cid) {
+        return None;
     }
-    let p = IPFS_SWARM_PORT;
-    let swarm = format!(r#"["/ip4/0.0.0.0/tcp/{p}","/ip6/::/tcp/{p}","/ip4/0.0.0.0/udp/{p}/quic-v1","/ip6/::/udp/{p}/quic-v1"]"#);
-    let api = format!("/ip4/{}/tcp/{}", IPFS_API.split(':').next().unwrap(), IPFS_API.split(':').nth(1).unwrap());
-    let gw = format!("/ip4/{}/tcp/{}", IPFS_GATEWAY.split(':').next().unwrap(), IPFS_GATEWAY.split(':').nth(1).unwrap());
-    for args in [
-        vec!["config", "Addresses.API", api.as_str()],
-        vec!["config", "Addresses.Gateway", gw.as_str()],
-        vec!["config", "--json", "Addresses.Swarm", swarm.as_str()],
-        // few connections, and only what this app pinned is announced
-        vec!["config", "--json", "Swarm.ConnMgr", r#"{"Type":"basic","LowWater":20,"HighWater":40,"GracePeriod":"30s"}"#],
-        vec!["config", "--json", "Swarm.ResourceMgr.MaxMemory", r#""256MB""#],
-        vec!["config", "Reprovider.Strategy", "pinned"],
-        // behind a home router: reachable through relays and hole punching
-        vec!["config", "--json", "Swarm.RelayClient.Enabled", "true"],
-        vec!["config", "--json", "Swarm.EnableHolePunching", "true"],
-        vec!["config", "Datastore.StorageMax", "2GB"],
-    ] {
-        ipfs_run(bin, repo, &args)?;
-    }
-    Ok(())
-}
-
-// A site's .car into Kubo, pinned, so it's shared from now on
-fn ipfs_import(app: &tauri::AppHandle, car: &Path) -> Result<(), String> {
-    let (bin, repo) = (ipfs_binary()?, app_dir(app)?.join("ipfs"));
-    let out = ipfs_out(&bin, &repo, &["dag", "import", "--pin-roots=true", &car.to_string_lossy()])?;
-    // "Pinned root\t<cid>\tsuccess"
-    for root in out.lines().filter_map(|l| l.split('\t').nth(1)).filter(|c| valid_cid(c)) {
-        ipfs_announce(app, root);
-    }
-    Ok(())
-}
-
-// Every site pinned here, announced again (each start, and every few hours while the app runs)
-fn ipfs_announce_all(app: &tauri::AppHandle) {
-    let (Ok(bin), Ok(dir)) = (ipfs_binary(), app_dir(app)) else { return };
-    if let Ok(out) = ipfs_out(&bin, &dir.join("ipfs"), &["pin", "ls", "--type=recursive", "--quiet"]) {
-        for cid in out.lines().map(str::trim).filter(|c| valid_cid(c)) {
-            ipfs_announce(app, cid);
+    if Some(cid) == carried_cid().as_deref() {
+        let p = app.path().resource_dir().ok()?.join("commonplace.car");
+        if p.is_file() {
+            return Some(p);
         }
     }
-}
-
-// Every .car waiting in sites/ (saved while IPFS wasn't running), and the carried Commonplace
-fn ipfs_import_waiting(app: &tauri::AppHandle) {
-    if let Ok(res) = app.path().resource_dir() {
-        let car = res.join("commonplace.car");
-        if car.is_file() {
-            if let Err(e) = ipfs_import(app, &car) {
-                eprintln!("[ipfs] sharing Commonplace: {e}");
-            }
-        }
-    }
-    let Ok(dir) = sites_dir(app) else { return };
-    let Ok(rd) = fs::read_dir(&dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Some(cid) = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".car")).map(str::to_string) else { continue };
-        if !valid_cid(&cid) {
-            continue;
-        }
-        match ipfs_import(app, &p) {
-            Ok(()) => {
-                let _ = fs::write(dir.join(format!("{cid}.shared")), "");
-                let _ = fs::remove_file(&p);
-            }
-            Err(e) => eprintln!("[ipfs] sharing {cid}: {e}"),
-        }
-    }
-}
-
-fn start_ipfs(app: &tauri::AppHandle, ipfs: &Arc<Ipfs>) -> Result<(), String> {
-    if !sharing_on(app) || ipfs.child.lock().unwrap().is_some() {
-        return Ok(());
-    }
-    let bin = ipfs_binary()?;
-    let repo = app_dir(app)?.join("ipfs");
-    if port_in_use(IPFS_API) {
-        // a Kubo left running by an earlier copy of the app: use it
-        if answers(IPFS_API) {
-            *ipfs.ready.lock().unwrap() = true;
-            let app = app.clone();
-            std::thread::spawn(move || ipfs_import_waiting(&app));
-            return Ok(());
-        }
-        return Err(format!("Something else is using {IPFS_API}, the address IPFS needs."));
-    }
-    ipfs_configure(&bin, &repo)?;
-    let log = File::create(repo.join("ipfs.log")).map_err(|e| e.to_string())?;
-    let err = log.try_clone().map_err(|e| e.to_string())?;
-    let child = ipfs_cmd(&bin, &repo)
-        .args(["daemon", "--enable-gc", "--migrate=true"])
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .map_err(|e| format!("Can't start IPFS: {e}"))?;
-    *ipfs.child.lock().unwrap() = Some(child);
-    let (ipfs, app) = (ipfs.clone(), app.clone());
-    std::thread::spawn(move || {
-        let t = Instant::now();
-        while t.elapsed() < Duration::from_secs(120) {
-            if ipfs.child.lock().unwrap().is_none() {
-                return;
-            }
-            if answers(IPFS_API) {
-                *ipfs.ready.lock().unwrap() = true;
-                let _ = app.emit("sharing-changed", ());
-                ipfs_import_waiting(&app);
-                let _ = app.emit("sharing-changed", ());
-                // give it a minute to find peers, then announce every site; again every 6 hours
-                std::thread::sleep(Duration::from_secs(60));
-                while *ipfs.ready.lock().unwrap() {
-                    ipfs_announce_all(&app);
-                    for _ in 0..(6 * 60 * 60 / 5) {
-                        if !*ipfs.ready.lock().unwrap() { return; }
-                        std::thread::sleep(Duration::from_secs(5));
-                    }
-                }
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    });
-    Ok(())
-}
-
-fn stop_ipfs(app: &tauri::AppHandle, ipfs: &Ipfs) {
-    *ipfs.ready.lock().unwrap() = false;
-    let Some(mut child) = ipfs.child.lock().unwrap().take() else { return };
-    if let (Ok(bin), Ok(dir)) = (ipfs_binary(), app_dir(app)) {
-        let _ = ipfs_run(&bin, &dir.join("ipfs"), &["shutdown"]);
-    }
-    let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(10) {
-        if let Ok(Some(_)) = child.try_wait() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn shared_count(app: &tauri::AppHandle) -> usize {
-    let carried = app.path().resource_dir().map(|d| d.join("commonplace.car").is_file()).unwrap_or(false) as usize;
-    let Ok(dir) = sites_dir(app) else { return carried };
-    carried + fs::read_dir(dir).map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".shared")).count()).unwrap_or(0)
-}
-
-// What the window needs to ask an outside service whether this computer can be reached: its IPFS
-// peer id, and one site it has (the newest pinned)
-#[derive(Serialize)]
-struct Identity { peer: String, cid: Option<String> }
-
-#[tauri::command(async)]
-fn ipfs_identity(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>) -> Result<Identity, String> {
-    if !*ipfs.ready.lock().unwrap() {
-        return Err("IPFS isn't running".into());
-    }
-    let (bin, repo) = (ipfs_binary()?, app_dir(&app)?.join("ipfs"));
-    let peer = ipfs_out(&bin, &repo, &["id", "-f", "<id>"])?.trim().to_string();
-    let cid = ipfs_out(&bin, &repo, &["pin", "ls", "--type=recursive", "--quiet"]).ok()
-        .and_then(|o| o.lines().map(str::trim).find(|c| valid_cid(c)).map(str::to_string));
-    Ok(Identity { peer, cid })
+    let p = sites_dir(app).ok()?.join(format!("{cid}.car"));
+    p.is_file().then_some(p)
 }
 
 #[tauri::command]
-fn sharing_state(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>) -> Sharing {
-    let on = sharing_on(&app);
-    let running = *ipfs.ready.lock().unwrap();
-    Sharing { on, running, sites: shared_count(&app), message: String::new() }
+fn doors() -> Vec<String> {
+    peer_lines(DOORS).filter(|l| l.starts_with("https://") && !l.contains(char::is_whitespace)).map(|l| l.trim_end_matches('/').to_string()).collect()
 }
 
-#[tauri::command(async)]
-fn set_sharing(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>, on: bool) -> Result<(), String> {
+// The sites this app has as .car files (each one it opened, and its Commonplace), when helping is on
+#[tauri::command]
+fn sharing_state(app: tauri::AppHandle) -> Sharing {
+    let on = sharing_on(&app);
+    let mut sites: Vec<String> = carried_cid().into_iter().filter(|c| car_file(&app, c).is_some()).collect();
+    if let Ok(rd) = sites_dir(&app).and_then(|d| fs::read_dir(d).map_err(|e| e.to_string())) {
+        for e in rd.flatten() {
+            if let Some(c) = e.file_name().to_str().and_then(|n| n.strip_suffix(".car")) {
+                if valid_cid(c) && !sites.iter().any(|x| x == c) {
+                    sites.push(c.to_string());
+                }
+            }
+        }
+    }
+    Sharing { on, sites }
+}
+
+#[tauri::command]
+fn set_sharing(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     let marker = app_dir(&app)?.join(SHARING_OFF);
-    let ipfs = ipfs.inner().clone();
     if on {
         let _ = fs::remove_file(&marker);
-        start_ipfs(&app, &ipfs)
+        Ok(())
     } else {
         fs::create_dir_all(marker.parent().unwrap()).map_err(|e| e.to_string())?;
-        fs::write(&marker, "").map_err(|e| e.to_string())?;
-        stop_ipfs(&app, &ipfs);
-        Ok(())
+        fs::write(&marker, "").map_err(|e| e.to_string())
     }
 }
 
-// A checked site's .car, as raw bytes (header x-cid): kept until IPFS has it, then shared
-#[tauri::command(async)]
-fn site_share(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+// A checked site's .car, as raw bytes (header x-cid), kept beside its files
+#[tauri::command]
+fn site_keep_car(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("expected the site's bytes".into()) };
     let cid = request.headers().get("x-cid").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     if !valid_cid(&cid) {
@@ -826,15 +640,15 @@ fn site_share(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>, request:
     }
     let dir = sites_dir(&app)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let car = dir.join(format!("{cid}.car"));
-    fs::write(&car, bytes).map_err(|e| e.to_string())?;
-    if *ipfs.ready.lock().unwrap() {
-        ipfs_import(&app, &car)?;
-        let _ = fs::write(dir.join(format!("{cid}.shared")), "");
-        let _ = fs::remove_file(&car);
-        let _ = app.emit("sharing-changed", ());
-    }
-    Ok(())
+    let tmp = dir.join(format!("{cid}.car.part"));
+    fs::write(&tmp, bytes).and_then(|_| fs::rename(&tmp, dir.join(format!("{cid}.car")))).map_err(|e| e.to_string())
+}
+
+// A site's .car, to give to a door
+#[tauri::command(async)]
+fn site_car(app: tauri::AppHandle, cid: String) -> Result<tauri::ipc::Response, String> {
+    let p = car_file(&app, &cid).ok_or("This app doesn't have that site.")?;
+    Ok(tauri::ipc::Response::new(fs::read(p).map_err(|e| e.to_string())?))
 }
 
 #[tauri::command]
@@ -897,7 +711,6 @@ fn add_peer(app: tauri::AppHandle, node: tauri::State<'_, Arc<Node>>, addr: Stri
 
 fn main() {
     let node = Arc::new(Node::default());
-    let ipfs = Arc::new(Ipfs::default());
     let app = tauri::Builder::default()
         // one copy of the app: a second launch (on Windows, how a clicked web+csd: link arrives)
         // hands its link to the running one and quits. It must come first.
@@ -913,11 +726,9 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
         .manage(Sites::default())
-        .manage(ipfs.clone())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, sharing_state, set_sharing, site_share, ipfs_identity])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, sharing_state, set_sharing, site_keep_car, site_car, doors])
         .setup({
             let node = node.clone();
-            let ipfs = ipfs.clone();
             move |app| {
                 // on Linux and Windows the scheme is registered at run time; macOS reads it from the bundle
                 #[cfg(any(target_os = "linux", windows))]
@@ -935,9 +746,6 @@ fn main() {
                     }
                 }
                 serve_known_sites(app.handle(), &app.state::<Sites>());
-                if let Err(e) = start_ipfs(app.handle(), &ipfs) {
-                    eprintln!("[ipfs] {e}");
-                }
                 Ok(())
             }
         })
@@ -955,12 +763,8 @@ fn main() {
                         let _ = handle.emit("node-changed", ());
                         std::thread::spawn(move || {
                             stop(&node);
-                            stop_ipfs(&handle, &handle.state::<Arc<Ipfs>>());
                             handle.exit(0);
                         });
-                    } else {
-                        let handle = window.app_handle().clone();
-                        stop_ipfs(&handle, &handle.state::<Arc<Ipfs>>());
                     }
                 }
             }
@@ -978,15 +782,11 @@ fn main() {
             let (node, handle) = (node.clone(), handle.clone());
             std::thread::spawn(move || {
                 stop(&node);
-                stop_ipfs(&handle, &handle.state::<Arc<Ipfs>>());
                 handle.exit(0);
             });
         }
         // and if the app ends any other way, still close the node's stdin and wait for it
-        RunEvent::Exit => {
-            stop(&node);
-            stop_ipfs(handle, &handle.state::<Arc<Ipfs>>());
-        }
+        RunEvent::Exit => stop(&node),
         _ => {}
     });
 }
@@ -1063,26 +863,9 @@ mod tests {
         assert_eq!(get(port, "/"), (200, "v2".into()));
         assert!(valid_cid("bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs44"));
         assert!(!valid_cid("../bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs"));
+        assert_eq!(doors(), vec!["https://csd.aon.network".to_string()]);
+        assert!(carried_cid().is_some());
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&dir).ok();
-    }
-    // IPFS set up as the app does it: its own ports, low power, sharing only what it pinned. Needs
-    // the IPFS program in binaries/ (as the build puts it there); skipped without it.
-    #[test]
-    fn sets_up_ipfs_on_its_own_ports() {
-        let triple = if cfg!(target_os = "linux") { "x86_64-unknown-linux-gnu" } else { return };
-        let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("binaries/ipfs-{triple}"));
-        if !bin.exists() { return; }
-        let repo = std::env::temp_dir().join(format!("csd-ipfs-test-{}", std::process::id()));
-        ipfs_configure(&bin, &repo).unwrap();
-        ipfs_configure(&bin, &repo).unwrap(); // and again, over an existing folder
-        let c: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("config")).unwrap()).unwrap();
-        assert_eq!(c["Addresses"]["API"], "/ip4/127.0.0.1/tcp/5101");
-        assert_eq!(c["Addresses"]["Gateway"], "/ip4/127.0.0.1/tcp/8091");
-        assert!(c["Addresses"]["Swarm"].as_array().unwrap().iter().all(|a| a.as_str().unwrap().contains("/4011")));
-        assert_eq!(c["Reprovider"]["Strategy"], "pinned");
-        assert_eq!(c["Swarm"]["ConnMgr"]["HighWater"], 40);
-        assert_eq!(c["Routing"]["Type"], "autoclient"); // the low-power profile's
-        fs::remove_dir_all(&repo).ok();
     }
 }

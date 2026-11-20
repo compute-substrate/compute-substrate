@@ -49,14 +49,21 @@ csd.example.org {
 		path /tx/submit
 	}
 
-	request_body {
-		max_size 1MB
-	}
 	handle @read {
 		reverse_proxy 127.0.0.1:8789
 	}
 	handle @submit {
+		request_body {
+			max_size 1MB
+		}
 		reverse_proxy 127.0.0.1:8789
+	}
+	# the site store, if this door keeps sites (below)
+	handle /sites* {
+		request_body {
+			max_size 70MB
+		}
+		reverse_proxy 127.0.0.1:8795
 	}
 	@preflight method OPTIONS
 	handle @preflight {
@@ -97,33 +104,36 @@ setup above, and nothing else.
 
 ## Helping keep sites up
 
-A door can also keep `.csd` names' sites up over IPFS, which most home computers can't: behind a home
+A door can also keep the sites `.csd` names point to, which most home computers can't: behind a home
 or mobile connection, nobody outside can reach them. A door can always be reached, so a site it
-keeps opens for anyone, through any IPFS gateway or the Node app, even when its author is offline.
-You choose which names to keep.
+keeps opens for anyone, even when its author's computer is off.
 
-**1. Kubo**, the standard IPFS program, checked against its published checksum:
+The site store, [`csd-sites`](../sites/README.md), runs beside the node:
+
+- **What it keeps:** a site only while some name's profile points to it (its `contenthash`,
+  `ipfs://<CID>`), read from this machine's own node, and for 30 days after. Writing that record
+  costs CSD, so nobody can fill your disk with sites no name points to. Up to 64 MB a site, 20 GB in
+  all unless you set `--max-gb`.
+- **Where sites come from:** whoever has one gives it to the doors. The Compute Substrate Node app
+  does it by itself for every site it opens, from behind any router, since it only connects out.
+- **What it checks:** every block against its address, before keeping anything. Readers check again
+  themselves, so nobody has to trust your door.
 
 ```bash
-V=v0.35.0
-curl -fsSLO https://github.com/ipfs/kubo/releases/download/$V/kubo_${V}_linux-amd64.tar.gz
-echo "771112001cef93d0c77fa61450990a3eb9d86ebd9cda6ba5ffed550db3f163b97426f01f6fe7e4d9532699474385f3e524b7499d55e4d92848aa0b02899b5c9e  kubo_${V}_linux-amd64.tar.gz" | sha512sum -c -
-tar xzf kubo_${V}_linux-amd64.tar.gz && sudo install kubo/ipfs /usr/local/bin/ipfs
-sudo -u csd env IPFS_PATH=/var/lib/csd/ipfs ipfs init --profile server
+cd /opt/compute-substrate/sites && cargo build --release --locked
+sudo install target/release/csd-sites /usr/local/bin/csd-sites
+sudo mkdir -p /var/lib/csd/sites && sudo chown csd: /var/lib/csd/sites
 ```
 
-Open TCP and UDP port 4001 in the firewall, and run it as a service:
-
 ```ini
-# /etc/systemd/system/csd-ipfs.service
+# /etc/systemd/system/csd-sites.service
 [Unit]
-Description=IPFS for Compute Substrate sites
-After=network-online.target
+Description=Compute Substrate site store
+After=csd.service
 
 [Service]
 User=csd
-Environment=IPFS_PATH=/var/lib/csd/ipfs
-ExecStart=/usr/local/bin/ipfs daemon --enable-gc
+ExecStart=/usr/local/bin/csd-sites --node http://127.0.0.1:8789 --dir /var/lib/csd/sites --listen 127.0.0.1:8795
 Restart=always
 
 [Install]
@@ -131,53 +141,19 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now csd-ipfs
+sudo systemctl daemon-reload && sudo systemctl enable --now csd-sites
 ```
 
-**2. The names to keep.** `keep-sites` reads each name through your own node, exactly as the Node app
-does, keeps the site it points to pinned (and drops the one it pointed to before, when it changes),
-and announces it. It needs Node.js 18 or newer:
+`--node` is your node's RPC address. The Caddyfile above already passes `/sites` to it: reload
+Caddy, and check from somewhere else:
 
 ```bash
-cd /opt/compute-substrate/app/resolver && npm ci && npm run build:keep
-sudo -u csd env IPFS_PATH=/var/lib/csd/ipfs CSD_NODE=http://127.0.0.1:8789 node dist/keep-sites.mjs commonplace
+curl https://csd.example.org/sites
 ```
 
-`CSD_NODE` is your node's RPC address. If nobody reachable has a site yet, it says so: import its
-`.car` once by hand (`ipfs dag import --pin-roots=true <file>`, as the `csd` user with the same
-`IPFS_PATH`), and from then on it's kept.
-
-Then on a timer, every 30 minutes, so a name's new site is picked up:
-
-```ini
-# /etc/systemd/system/csd-keep-sites.service
-[Unit]
-Description=Keep .csd names' sites up over IPFS
-After=csd-ipfs.service csd.service
-
-[Service]
-Type=oneshot
-User=csd
-Environment=IPFS_PATH=/var/lib/csd/ipfs
-Environment=CSD_NODE=http://127.0.0.1:8789
-ExecStart=/usr/bin/node /opt/compute-substrate/app/resolver/dist/keep-sites.mjs commonplace
-```
-
-```ini
-# /etc/systemd/system/csd-keep-sites.timer
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=30min
-
-[Install]
-WantedBy=timers.target
-```
-
-```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now csd-keep-sites.timer
-```
-
-To see that it works from outside, give a site's CID to [check.ipfs.network](https://check.ipfs.network).
+It lists what it keeps, and how far it has read the names (`names_read_to`, which reaches the tip
+within a minute or so). To have the Node app use your door, add its address to `app/doors.txt` in a
+pull request.
 
 ## Letting people use it
 

@@ -139,4 +139,4 @@ export async function lookup(input: string): Promise<Opened> {
   return { name, owner: st.owner, open: `${COMMONPLACE}/?node=${encodeURIComponent(NODE)}#/p/${addr}` };
 }
 
-export { fetchSite } from "./site";
+export { fetchSite, carRoot, filesFromCar } from "./site";

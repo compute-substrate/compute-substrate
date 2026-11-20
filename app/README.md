@@ -72,28 +72,28 @@ registers itself for those links.
   - It serves each name at an address of its own on this computer (`http://localhost:8801`, the next
     name `8802`, and so on), and opens that in your normal browser. Each name keeps its address, its
     storage and its logins, even when it points to a newer site.
-  - It asks its own IPFS first (below), and public gateways too if that hasn't answered in a few
-    seconds.
+  - It asks the doors first (below), and IPFS gateways too if no door has it.
 
 Names are registered and managed on Cairn; the app only reads them.
 
-**Helping keep sites up.** With *Help keep sites up* on (the default), the app also runs
-[Kubo](https://github.com/ipfs/kubo), the standard IPFS program, and helps host the sites it has,
-and the release of Commonplace it carries, for anyone who asks over IPFS, the way seeding works in
-BitTorrent. So a site stays up for as long as some of the people who use it have the app open: no
-server, and no one person keeping it pinned. Gateways such as ipfs.io find it there too.
+**Helping keep sites up.** Most home and mobile connections can't be reached from outside, so a
+computer at home can't serve sites to others directly. *Doors* can: public nodes that also run a
+site store ([`sites/`](../sites/README.md)), which keep the sites `.csd` names point to and serve them
+to anyone. With *Help keep sites up* on (the default), the app:
 
-- **Nothing to trust:** whoever downloads a site checks every block against the address its name
-  points to, so a copy from a stranger's computer is as good as the author's.
-- **Light on your connection:** Kubo runs in its low-power mode, with few connections, and announces
-  only what the app pinned. It uses ports of its own (5101, 8091 and 4011), so a Kubo you already
-  run isn't disturbed.
-- **Its data** is in `ipfs/` in the app's folder, up to 2 GB.
-- **What others can see:** helping host a site means announcing on IPFS that this computer has it,
-  from your internet address, as seeding does. Someone who looks can see which sites your computer
-  helps keep up (the ones you've opened, and Commonplace).
-- **Off:** turning the switch off stops Kubo. Sites you open are then kept for you only, and come
-  from public gateways, and nothing is announced.
+- keeps each site it opens as a `.car` file, and reads sites from the doors first (IPFS gateways are a
+  fallback);
+- gives every site it has, and the release of Commonplace it carries, to any door that doesn't have
+  it yet, over connections it makes itself, so it works from behind any router.
+
+So a site whose author opens it once in the app reaches the doors, and stays up with nobody's own
+server. *Put a site on the doors* does the same for a `.car` you made yourself (`npx ipfs-car pack
+<folder>`, say), once a name points to it. Whoever downloads a site checks every block against the
+address its name points to, so a door is trusted with nothing. A door keeps a site only while a name
+points to it.
+
+The doors it knows are in `app/doors.txt`. Anyone can run one: see the
+[door guide](../docs/public-node.md).
 
 It makes the genesis block itself (`csd genesis`, which always gives the same block), so there is
 nothing to download besides the app.

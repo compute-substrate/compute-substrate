@@ -78,8 +78,13 @@
     <button id="commonplace">Open</button>
   </div>
   <div class="row">
-    <div>Help keep sites up<small id="sharingStatus">Your app helps host the sites on the network, so they stay up with no server</small></div>
+    <div>Help keep sites up<small id="sharingStatus">Passes the sites your app has on to the doors, so they stay up with no server</small></div>
     <label class="switch"><input type="checkbox" id="sharing"><i></i></label>
+  </div>
+  <div class="row">
+    <div style="flex:1">Put a site on the doors<small id="putStatus">Your own site, as a .car file, once a .csd name points to it</small></div>
+    <input type="file" id="putFile" accept=".car" hidden>
+    <button id="put">Choose</button>
   </div>
   <div class="row">
     <div>Start when I log in<small>Keeps your node running in the background</small></div>
@@ -181,12 +186,13 @@
         // its site: downloaded from IPFS and checked here (once), then served from this computer
         if (!(await invoke("site_kept", { cid: ipfs }))) {
           st.textContent = `Getting ${r.name}.csd's site from IPFS and checking it…`;
-          const { files, car } = await CsdResolver.fetchSite(ipfs);
+          const { files, car } = await CsdResolver.fetchSite(ipfs, await doorList());
           for (const [path, bytes] of files) {
             await invoke("site_put", bytes, { headers: { "x-cid": ipfs, "x-path": encodeURIComponent(path) } });
           }
           // and helped to stay up from here on, when that's on
-          if ($("sharing").checked) invoke("site_share", car, { headers: { "x-cid": ipfs } }).then(sharing).catch(() => {});
+          await invoke("site_keep_car", car, { headers: { "x-cid": ipfs } }).catch(() => {});
+          if ($("sharing").checked) seed(ipfs).then(sharing);
         }
         url = await invoke("site_open", { name: r.name, cid: ipfs });
       }
@@ -211,43 +217,81 @@
   }
 
   // helping keep the sites this app has (and its Commonplace) up, over IPFS
-  // Whether others can actually reach this computer: asked of IPFS's own check service, which tries
-  // to fetch a site from here. Behind most home and mobile connections they can't, and then the app
-  // keeps sites for its own user only, and says so.
-  let reach = null, reachAt = Date.now(); // the first check a minute in, once IPFS has announced itself
-  async function checkReach() {
-    let id; try { id = await invoke("ipfs_identity"); } catch { return; }
-    if (!id.cid) return;
-    try {
-      const q = `cid=${id.cid}&multiaddr=${encodeURIComponent("/p2p/" + id.peer)}&timeoutSeconds=60`;
-      const r = await fetch(`https://ipfs-check-backend.probelab.io/check?${q}`, { method: "POST", signal: AbortSignal.timeout(90_000) });
-      if (!r.ok) return;
-      const j = await r.json();
-      const one = Array.isArray(j) ? j[0] : j;
-      reach = !one?.ConnectionError && !!one?.DataAvailableOverBitswap?.Found;
-      reachAt = Date.now();
-      sharing();
-    } catch {}
+  // Helping keep sites up: every site this app has goes to any door that doesn't have it yet, over
+  // connections this computer makes itself, so it works from behind any router. A door keeps a site
+  // only while a .csd name points to it.
+  let doorsCache = null;
+  const doorList = async () => doorsCache ??= await invoke("doors").catch(() => []);
+  const onDoors = new Map(); // cid -> how many doors have it
+  async function seed(cid) {
+    let n = 0, car = null;
+    for (const d of await doorList()) {
+      try {
+        const head = await fetch(`${d}/sites/${cid}.car`, { method: "HEAD", signal: AbortSignal.timeout(15_000) });
+        if (head.ok) { n++; continue; }
+        if (head.status !== 404) continue;
+        car ??= await invoke("site_car", { cid });
+        const r = await fetch(`${d}/sites/${cid}.car`, { method: "POST", headers: { "content-type": "application/vnd.ipld.car" }, body: car, signal: AbortSignal.timeout(300_000) });
+        if (r.ok) n++;
+      } catch {}
+    }
+    onDoors.set(cid, n);
+    return n;
+  }
+  let seededAt = 0;
+  async function seedAll() {
+    seededAt = Date.now();
+    let s; try { s = await invoke("sharing_state"); } catch { return; }
+    if (!s.on) return;
+    for (const cid of s.sites) await seed(cid);
+    sharing();
   }
   async function sharing() {
     let s; try { s = await invoke("sharing_state"); } catch { return; }
     $("sharing").checked = s.on;
-    const n = `${s.sites} ${s.sites === 1 ? "site" : "sites"}`;
+    const kept = s.sites.length, up = s.sites.filter(c => onDoors.get(c) > 0).length;
+    const n = k => `${k} ${k === 1 ? "site" : "sites"}`;
     $("sharingStatus").textContent = !s.on ? "Off. Your app keeps sites for you only"
-      : !s.running ? "Starting…"
-      : reach === false ? `Your internet connection doesn't let others reach this computer (most home and mobile ones don't), so it keeps ${n} for you only`
-      : reach === true ? `Helping keep ${n} up, with no server`
-      : `Keeping ${n}, and checking whether others can reach them…`;
-    // a minute after IPFS is up, then every hour
-    if (s.on && s.running && Date.now() - reachAt > (reach === null ? 60_000 : 3_600_000)) { reachAt = Date.now(); checkReach(); }
+      : onDoors.size === 0 ? `Passes the ${n(kept)} your app has on to the doors, so they stay up with no server`
+      : `${n(up)} of ${kept} on the doors, so they stay up with no server`;
+    // the first round a few seconds in, then every 6 hours
+    if (s.on && Date.now() - seededAt > (seededAt === 0 ? 5_000 : 6 * 3_600_000)) seedAll();
   }
   $("sharing").onchange = async e => {
-    $("sharingStatus").textContent = e.target.checked ? "Starting…" : "Stopping…";
-    reach = null; reachAt = Date.now();
     try { await invoke("set_sharing", { on: e.target.checked }); } catch (err) { $("sharingStatus").textContent = String(err); }
+    if (e.target.checked) seededAt = 0;
     sharing();
   };
-  listen("sharing-changed", sharing);
+
+  // An author's own site: a .car they made (npx ipfs-car pack <folder>, or their build's), checked
+  // here, kept, and given to the doors
+  $("put").onclick = () => $("putFile").click();
+  $("putFile").onchange = async () => {
+    const f = $("putFile").files[0]; $("putFile").value = "";
+    if (!f) return;
+    const st = $("putStatus");
+    try {
+      st.textContent = "Checking it…";
+      const car = new Uint8Array(await f.arrayBuffer());
+      const cid = await CsdResolver.carRoot(car);
+      await CsdResolver.filesFromCar(car, cid);
+      await invoke("site_keep_car", car, { headers: { "x-cid": cid } });
+      st.textContent = "Giving it to the doors…";
+      const said = [];
+      for (const d of await doorList()) {
+        try {
+          const r = await fetch(`${d}/sites/${cid}.car`, { method: "POST", headers: { "content-type": "application/vnd.ipld.car" }, body: car, signal: AbortSignal.timeout(300_000) });
+          const j = await r.json().catch(() => ({}));
+          said.push(r.ok ? null : (j.message ?? `${new URL(d).host} answered ${r.status}`));
+        } catch (err) { said.push(`${new URL(d).host} didn't answer`); }
+      }
+      const ok = said.filter(x => x === null).length;
+      onDoors.set(cid, ok);
+      st.textContent = ok ? `On ${ok} ${ok === 1 ? "door" : "doors"}: ipfs://${cid}. It stays up as long as a .csd name points to it.`
+        : `Not taken: ${said.find(Boolean) ?? "no door answered"} Its address: ipfs://${cid}`;
+      sharing();
+    } catch (err) { st.textContent = String(err && err.message || err); }
+  };
   sharing();
   setInterval(sharing, 15000);
   listen("node-changed", tick);

@@ -100,27 +100,6 @@ jobs:
           mkdir -p app/src-tauri/binaries
           cp target/x86_64-pc-windows-msvc/release/csd.exe app/src-tauri/binaries/csd-x86_64-pc-windows-msvc.exe
 
-      # Kubo, the standard IPFS program, that shares the sites the app keeps. Its published release,
-      # checked against the checksums written here (from that release's .sha512 files).
-      - name: Get IPFS (Kubo), checked
-        shell: bash
-        run: |
-          V=v0.35.0
-          get() { curl -fsSL -o "$2" "https://github.com/ipfs/kubo/releases/download/$V/kubo_${V}_$1"; echo "$3  $2" | (sha512sum -c - 2>/dev/null || shasum -a 512 -c -); }
-          mkdir -p app/src-tauri/binaries
-          if [ "${{ matrix.name }}" = macos ]; then
-            get darwin-arm64.tar.gz arm.tgz 17836b8339ed9f2b37e9046fa96f6f488f22d25a42af6969698fffa4ba49a3ee571ea369334059b333ee2108d0b159e73775a0b72c904395cb073f57cd72f56a
-            get darwin-amd64.tar.gz x86.tgz e443a9bb9e8a6c74663a949068047feded0821fbdfd51e3c747920c2c318ef22f5c5bff0fe663519905bc26d680d18e61c7777905a4e707e70227258c8da5916
-            mkdir arm x86 && tar xzf arm.tgz -C arm && tar xzf x86.tgz -C x86
-            lipo -create -output app/src-tauri/binaries/ipfs-universal-apple-darwin arm/kubo/ipfs x86/kubo/ipfs
-            cp app/src-tauri/binaries/ipfs-universal-apple-darwin app/src-tauri/binaries/ipfs-aarch64-apple-darwin
-            cp app/src-tauri/binaries/ipfs-universal-apple-darwin app/src-tauri/binaries/ipfs-x86_64-apple-darwin
-          else
-            get windows-amd64.zip win.zip f86203c9181fd949062ac8ec0d72f7797b352f69048223ab9a10cc801a79baaea81bc495e39542dfa73b8041dcbebbaa4e3e52ce4f516e62e676868b31449575
-            unzip -q win.zip -d win
-            cp win/kubo/ipfs.exe app/src-tauri/binaries/ipfs-x86_64-pc-windows-msvc.exe
-          fi
-
       # the .csd name resolver the window uses (app/resolver), bundled into app/ui/resolver.js
       - uses: actions/setup-node@v4
         with:

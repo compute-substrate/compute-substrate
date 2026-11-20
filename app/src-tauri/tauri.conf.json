@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 http://127.0.0.1:8091 https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link https://ipfs-check-backend.probelab.io ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 https: https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
@@ -30,8 +30,7 @@
       "nsis"
     ],
     "externalBin": [
-      "binaries/csd",
-      "binaries/ipfs"
+      "binaries/csd"
     ],
     "icon": [
       "icons/32x32.png",
