@@ -61,6 +61,10 @@
   .site small { color: var(--muted); display: block; }
   .link { background: none; border: 0; padding: 0; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .link:hover { color: var(--ink); }
+  .publish { margin-top: 12px; }
+  .publish #publishBox { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .publish #publishBox p { margin: 0; }
+  .publish .go { margin: 10px 0 4px; }
   details.settings { margin-top: 22px; border-top: 1px solid var(--line); }
   details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 12px 2px; }
   details.settings > summary::-webkit-details-marker { display: none; }
@@ -91,6 +95,18 @@
 
   <h2>Your sites</h2>
   <div id="sites"></div>
+  <div class="publish">
+    <button id="publish">Publish a site</button>
+    <input type="file" id="publishFolder" webkitdirectory hidden>
+    <div id="publishBox" hidden>
+      <p id="publishSaid"></p>
+      <form class="go" id="publishForm">
+        <input id="publishName" placeholder="Your .csd name" spellcheck="false" autocomplete="off" aria-label="Your .csd name">
+        <button class="primary">Point it here</button>
+      </form>
+      <p class="hint" id="publishStatus"></p>
+    </div>
+  </div>
   <p class="hint">Each site you open is kept here. <i>Help keep it up</i> passes it on to the doors, so it stays up with no server.</p>
 
   <details class="settings" id="settingsBox">
@@ -191,12 +207,12 @@
   })();
 
   // .csd names (Cairn's name service): looked up through this computer's own node, then opened
-  async function openName(input) {
+  async function openName(input, show = true) {
     const st = $("nameStatus");
     st.textContent = `Looking up ${input.replace(/^web\+csd:(\/\/)?/, "")}…`;
     try {
       const r = await CsdResolver.lookup(input);
-      if (!r.open) { st.textContent = r.why; return; }
+      if (!r.open) { st.textContent = r.why; if (!show) invoke("name_answer", { name: r.name, why: r.why }).catch(() => {}); return; }
       let url = r.open;
       const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(r.open)?.[1];
       if (ipfs) {
@@ -212,10 +228,14 @@
         }
         url = await invoke("site_open", { name: r.name, cid: ipfs });
       }
-      st.textContent = `Opening ${r.name}.csd`;
+      if (!ipfs) invoke("name_answer", { name: r.name, go: url }).catch(() => {});
+      st.textContent = show ? `Opening ${r.name}.csd` : `${r.name}.csd is ready`;
       renderSites();
-      await invoke("plugin:opener|open_url", { url });
-    } catch (e) { st.textContent = String(e && e.message || e); }
+      if (show) await invoke("plugin:opener|open_url", { url });
+    } catch (e) {
+      st.textContent = String(e && e.message || e);
+      if (!show) invoke("name_answer", { name: String(input).replace(/\.csd$/, ""), why: `Couldn't open ${input}.csd: ${st.textContent}` }).catch(() => {});
+    }
   }
   $("peerForm").onsubmit = async e => {
     e.preventDefault();
@@ -226,6 +246,15 @@
     catch (err) { $("peerStatus").textContent = String(err); }
     tick();
   };
+  // a name typed into the browser as <name>.localhost that this app hasn't opened yet: looked up and
+  // fetched here, while the browser's page waits and reloads (at most once a minute per name)
+  const wanted = new Map();
+  listen("want-name", e => {
+    const n = String(e.payload);
+    if (Date.now() - (wanted.get(n) ?? 0) < 60_000) return;
+    wanted.set(n, Date.now());
+    openName(n, false);
+  });
   $("nameForm").onsubmit = e => { e.preventDefault(); const v = $("nameInput").value.trim(); if (v) openName(v); };
   const dl = window.__TAURI__.deepLink;
   if (dl) {
@@ -321,6 +350,54 @@
       for (const x of list.filter(x => x.helping)) await seed(x.cid);
       renderSites();
     }
+  }
+
+  // Publish a site: pick a folder; it's packed here into one site with one address (the same one
+  // `npx ipfs-car pack` gives), kept, and helped up. You point one of your names at it on that name's
+  // page (approving once in Cairn), and the moment that record is in a block, the doors take it.
+  let pending = null; // { cid, name, until }
+  $("publish").onclick = () => $("publishFolder").click();
+  $("publishFolder").onchange = async () => {
+    const list = [...$("publishFolder").files]; $("publishFolder").value = "";
+    if (!list.length) return;
+    $("publishBox").hidden = false; $("publishForm").hidden = true;
+    $("publishSaid").textContent = `Packing ${list.length} files…`; $("publishStatus").textContent = "";
+    try {
+      const r = await CsdResolver.packFolder(list.map(f => ({ path: f.webkitRelativePath || f.name, bytes: async () => new Uint8Array(await f.arrayBuffer()) })));
+      await invoke("site_keep_car", r.car, { headers: { "x-cid": r.cid } });
+      await invoke("set_helping", { cid: r.cid, on: true });
+      pending = { cid: r.cid, name: null, until: 0 };
+      const mb = (r.bytes / 1e6).toFixed(r.bytes < 1e6 ? 2 : 1);
+      $("publishSaid").textContent = `Ready: ${r.files} files, ${mb} MB. Which of your names should show it?`;
+      $("publishForm").hidden = false; $("publishName").focus();
+      renderSites();
+    } catch (err) { $("publishSaid").textContent = String(err && err.message || err); }
+  };
+  $("publishForm").onsubmit = async e => {
+    e.preventDefault();
+    const name = $("publishName").value.trim().toLowerCase().replace(/\.csd$/, "");
+    if (!pending || !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(name)) { $("publishStatus").textContent = "That isn't a .csd name."; return; }
+    pending.name = name; pending.until = Date.now() + 60 * 60_000;
+    $("publishStatus").textContent = "Opening your name's page. Approve the change there in Cairn Wallet.";
+    await openName("commonplace", false).catch(() => {}); // the newest Commonplace, for its name page
+    const base = await invoke("site_url");
+    await invoke("plugin:opener|open_url", { url: `${base}#/n/${name}/site/${pending.cid}` });
+    publishTick();
+  };
+  // until the doors take it: they do once the name's record is in a block, about two minutes
+  async function publishTick() {
+    if (!pending || !pending.name) return;
+    if (Date.now() > pending.until) { $("publishStatus").textContent = "No door took it within an hour. Check that the name points to it, then use Publish again."; pending = null; return; }
+    const n = await seed(pending.cid);
+    if (n > 0) {
+      const name = pending.name; pending = null;
+      $("publishStatus").textContent = `Live on ${n === 1 ? "1 door" : n + " doors"}. Opening ${name}.csd…`;
+      await openName(name);
+      renderSites();
+      return;
+    }
+    $("publishStatus").textContent = `Waiting for ${pending.name}.csd to point to it. The doors take it once that's in a block, about two minutes after you approve.`;
+    setTimeout(publishTick, 30_000);
   }
 
   // An author's own site: a .car they made (npx ipfs-car pack <folder>, or their build's), checked

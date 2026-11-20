@@ -7,10 +7,11 @@
   },
   "dependencies": {
     "@inversealtruism/cairnx-core": "0.2.4",
-    "@noble/curves": "1.9.1",
-    "@noble/hashes": "1.8.0",
     "@ipld/car": "5.4.7",
     "@ipld/dag-pb": "4.2.0",
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0",
+    "ipfs-car": "3.1.0",
     "ipfs-unixfs": "11.2.5",
     "multiformats": "13.4.2"
   },

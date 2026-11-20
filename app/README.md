@@ -44,7 +44,7 @@ After that it opens normally.
   `node.log` there is the node's log. Deleting the folder starts over with a fresh sync.
 
 It carries Commonplace, and opens it from your own computer: *Commonplace* in the
-window, at `http://localhost:8790`. Commonplace is one example of an app built on the network, with
+window, at `http://commonplace.localhost`. Commonplace is one example of an app built on the network, with
 no special place there; anyone can build others over the same records.
 
 - **Which copy:** `app/commonplace.json` pins the release by its commit and IPFS address. The build
@@ -69,12 +69,22 @@ registers itself for those links.
   - It downloads the site from an IPFS gateway and checks every block against the address the name
     points to, so a gateway can refuse to send it but can't change it. It keeps the checked copy in
     `sites/` in its folder, so later visits don't download it again.
-  - It serves each name at an address of its own on this computer (`http://localhost:8801`, the next
-    name `8802`, and so on), and opens that in your normal browser. Each name keeps its address, its
-    storage and its logins, even when it points to a newer site.
+  - It serves each name at its own address on this computer, **`http://<name>.localhost`**, and
+    opens that in your normal browser. Browsers send every `.localhost` name to this computer by
+    their own rule, with no DNS and no certificate, and treat it as secure, so wallets and passkeys
+    work. Each name is an origin of its own, so sites can't read each other's storage. You can also
+    type `<name>.localhost` straight into the browser: the app looks the name up and fetches it
+    while the page waits. (Port 80 when the computer allows it; otherwise
+    `http://<name>.localhost:8800`.)
   - It asks the doors first (below), and IPFS gateways too if no door has it.
 
 Names are registered and managed on Cairn; the app only reads them.
+
+**Publishing a site.** *Publish a site* in the window: pick the site's folder (it needs an
+`index.html`). The app packs it into one site with one address, the same one `npx ipfs-car pack`
+gives, keeps it, and opens your name's page in Commonplace with the new site filled in, to approve
+once in Cairn Wallet. As soon as that's in a block, the app gives the site to the doors, and it's
+live at `<name>.localhost` for anyone with the app, and on every door within minutes.
 
 **Helping keep sites up.** Most home and mobile connections can't be reached from outside, so a
 computer at home can't serve sites to others directly. *Doors* can: public nodes that also run a

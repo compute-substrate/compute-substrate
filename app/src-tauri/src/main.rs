@@ -366,10 +366,19 @@ fn mime(path: &str) -> &'static str {
 // points to a newer site keeps its address). Only files inside the folder, nothing else.
 fn serve_dir(server: tiny_http::Server, root: Arc<Mutex<PathBuf>>) {
     for req in server.incoming_requests() {
+        let r = root.lock().unwrap().clone();
+        respond_from(req, &r);
+    }
+}
+
+// One request, answered from a site's folder: /about from about.html, a folder from its index.html,
+// anything missing from the site's own 404.html. Nothing outside the folder.
+fn respond_from(req: tiny_http::Request, root: &Path) {
+    {
         let path = req.url().split(['?', '#']).next().unwrap_or("/").to_string();
-        let Ok(root) = root.lock().unwrap().canonicalize() else {
+        let Ok(root) = root.canonicalize() else {
             let _ = req.respond(tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404));
-            continue;
+            return;
         };
         let rel = path.trim_start_matches('/');
         let rel = percent_decode(rel);
@@ -396,6 +405,89 @@ fn serve_dir(server: tiny_http::Server, root: Arc<Mutex<PathBuf>>) {
             None => tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404),
         };
         let _ = req.respond(resp);
+    }
+}
+
+// ── Every site at its own name: http://<name>.localhost ─────────────────────
+// Browsers send every name ending in .localhost to this computer, by their own rule: no DNS, no
+// certificate, and they treat it as a secure origin (wallets, passkeys, crypto all work). Each
+// <name>.localhost is an origin of its own, so sites can't read each other's storage or keys. So a
+// .csd name opens at http://<name>.localhost: found through this computer's own node, its bytes
+// from any door, checked here, shown by the browser. Nobody else is asked anything.
+//
+// One server answers every name, on port 80 when this computer allows it (so the address has no
+// number), else on 8800. A name not opened yet: the window looks it up and fetches it while the
+// browser waits on a page that reloads itself.
+static NAMES_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+fn names_origin(name: &str) -> String {
+    match NAMES_PORT.get().copied().unwrap_or(8800) {
+        80 => format!("http://{name}.localhost"),
+        p => format!("http://{name}.localhost:{p}"),
+    }
+}
+
+fn name_of_host(host: &str) -> Option<String> {
+    let h = host.trim().to_ascii_lowercase();
+    let h = h.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h.to_string()).unwrap_or(h);
+    let name = h.strip_suffix(".localhost")?.trim_end_matches(".csd").to_string();
+    let ok = !name.is_empty() && name.len() <= 32 && !name.starts_with('-') && !name.ends_with('-')
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    ok.then_some(name)
+}
+
+fn waiting_page(name: &str) -> String {
+    format!(r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name}.csd</title><meta http-equiv="refresh" content="2"><style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555}}</style><p>Opening <b>{name}.csd</b>…</p>"#)
+}
+
+fn serve_names(app: tauri::AppHandle) {
+    let server = [80u16, 8800].into_iter().find_map(|p| tiny_http::Server::http(("127.0.0.1", p)).ok().map(|s| (p, s)));
+    let Some((port, server)) = server else {
+        eprintln!("[names] can't listen on port 80 or 8800");
+        return;
+    };
+    let _ = NAMES_PORT.set(port);
+    // browsers may reach *.localhost over IPv6 too
+    if let Ok(v6) = tiny_http::Server::http(("::1", port)) {
+        let app = app.clone();
+        std::thread::spawn(move || for req in v6.incoming_requests() { route_name(&app, req) });
+    }
+    for req in server.incoming_requests() {
+        route_name(&app, req);
+    }
+}
+
+fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
+    let host = req.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().to_string()).unwrap_or_default();
+    let Some(name) = name_of_host(&host) else {
+        let _ = req.respond(tiny_http::Response::from_string("Open a .csd name as http://<name>.localhost").with_status_code(404));
+        return;
+    };
+    // a name opened in this app: its site; else the Commonplace this app carries, for "commonplace"
+    let root = app.state::<Sites>().served.lock().unwrap().get(&name).map(|(_, r)| r.lock().unwrap().clone())
+        .filter(|r| r.join("index.html").is_file())
+        .or_else(|| (name == "commonplace").then(|| app.path().resource_dir().ok().map(|d| d.join("commonplace"))).flatten().filter(|r| r.join("index.html").is_file()));
+    let answer = app.state::<Sites>().answers.lock().unwrap().get(&name).cloned();
+    match (root, answer) {
+        (Some(r), _) => respond_from(req, &r),
+        (None, Some(NameAnswer::Go(url))) => {
+            let _ = req.respond(tiny_http::Response::empty(302).with_header(tiny_http::Header::from_bytes(&b"Location"[..], url.as_bytes()).unwrap()));
+        }
+        (None, Some(NameAnswer::Why(why))) => {
+            let esc = why.replace('&', "&amp;").replace('<', "&lt;");
+            let _ = req.respond(tiny_http::Response::from_string(format!(r#"<!doctype html><meta charset="utf-8"><title>{name}.csd</title><style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555}}</style><p>{esc}</p>"#))
+                .with_status_code(404)
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap()));
+            // asked again later: the name may have been registered or pointed somewhere since
+            app.state::<Sites>().answers.lock().unwrap().remove(&name);
+        }
+        (None, None) => {
+            // ask the window to look the name up and fetch its site
+            let _ = app.emit("want-name", name.clone());
+            let _ = req.respond(tiny_http::Response::from_string(waiting_page(&name))
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap())
+                .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap()));
+        }
     }
 }
 
@@ -437,6 +529,14 @@ const FIRST_SITE_PORT: u16 = 8801;
 struct Sites {
     // name -> (port, folder being served)
     served: Mutex<std::collections::HashMap<String, (u16, Arc<Mutex<PathBuf>>)>>,
+    // name -> what <name>.localhost answers when the name has no site here: a link to go to, or why not
+    answers: Mutex<std::collections::HashMap<String, NameAnswer>>,
+}
+
+#[derive(Clone)]
+enum NameAnswer {
+    Go(String),
+    Why(String),
 }
 
 #[derive(serde::Deserialize, Serialize)]
@@ -533,9 +633,8 @@ fn site_open(app: tauri::AppHandle, sites: tauri::State<'_, Sites>, name: String
     if !done.join("index.html").is_file() {
         return Err("The site isn't here yet.".into());
     }
-    let port = serve_name(&dir, &sites, &name, &cid)?;
-    // localhost rather than 127.0.0.1: browsers treat it as a secure origin, which wallets and passkeys need
-    Ok(format!("http://localhost:{port}/"))
+    serve_name(&dir, &sites, &name, &cid)?;
+    Ok(format!("{}/", names_origin(&name)))
 }
 
 // At start: serve every name opened before, so its address keeps working
@@ -685,11 +784,23 @@ fn site_car(app: tauri::AppHandle, cid: String) -> Result<tauri::ipc::Response, 
     Ok(tauri::ipc::Response::new(fs::read(p).map_err(|e| e.to_string())?))
 }
 
+// What <name>.localhost should answer for a name with no site: a link (`go`), or why there's nothing
+#[tauri::command]
+fn name_answer(sites: tauri::State<'_, Sites>, name: String, go: Option<String>, why: Option<String>) -> Result<(), String> {
+    let a = match (go, why) {
+        (Some(u), _) if u.starts_with("https://") || u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1") => NameAnswer::Go(u),
+        (_, Some(w)) => NameAnswer::Why(w),
+        _ => return Err("nothing to answer".into()),
+    };
+    sites.answers.lock().unwrap().insert(name, a);
+    Ok(())
+}
+
 #[tauri::command]
 fn site_url() -> String {
     // localhost rather than 127.0.0.1: browsers treat it as a secure origin, which wallets and
     // passkeys need. Reading goes through this computer's own node.
-    format!("http://localhost:8790/?node={}", "http%3A%2F%2F127.0.0.1%3A8789")
+    format!("{}/?node={}", names_origin("commonplace"), "http%3A%2F%2F127.0.0.1%3A8789")
 }
 
 #[tauri::command]
@@ -760,7 +871,7 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
         .manage(Sites::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer])
         .setup({
             let node = node.clone();
             move |app| {
@@ -780,6 +891,10 @@ fn main() {
                     }
                 }
                 serve_known_sites(app.handle(), &app.state::<Sites>());
+                {
+                    let h = app.handle().clone();
+                    std::thread::spawn(move || serve_names(h));
+                }
                 Ok(())
             }
         })
@@ -898,6 +1013,12 @@ mod tests {
         assert!(valid_cid("bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs44"));
         assert!(!valid_cid("../bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs"));
         assert_eq!(doors(), vec!["https://csd.aon.network".to_string()]);
+        assert_eq!(name_of_host("commonplace.localhost"), Some("commonplace".into()));
+        assert_eq!(name_of_host("Guest-Book.localhost:8800"), Some("guest-book".into()));
+        assert_eq!(name_of_host("alice.csd.localhost"), Some("alice".into()));
+        assert_eq!(name_of_host("localhost:80"), None);
+        assert_eq!(name_of_host("evil.com"), None);
+        assert_eq!(name_of_host("a.b.localhost"), None);
         assert!(carried_cid().is_some());
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&dir).ok();

@@ -140,3 +140,4 @@ export async function lookup(input: string): Promise<Opened> {
 }
 
 export { fetchSite, carRoot, filesFromCar } from "./site";
+export { packFolder } from "./pack";
