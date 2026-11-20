@@ -1,43 +1,67 @@
-# Running a public door
+# Running a door
 
-A *door* is a node that web pages can reach from anyone's browser. Apps on Compute Substrate read
-and write through some node, and a visitor with no node of their own needs one that's open to them.
+A *door* is a server that lets anyone use Compute Substrate from a browser, and keeps the sites
+`.csd` names point to, so they stay up with nobody's own server. Run one and you're part of what
+keeps the network open. No door is special and none has to be trusted: everything a door serves is
+checked by whoever receives it, against the network's proof-of-work, byte for byte.
 
-Anyone can run one. No door is special, and none has to be trusted: pages check what a door tells
-them against the network's proof-of-work, so a door can refuse to answer, but it can't feed anyone a
-false record. The more doors there are, run by more people, the less any app depends on one of them.
+## Run one
 
-A door serves only what every node already makes public: blocks, records, balances, proofs, and
-`POST /tx/submit` for transactions their owners signed. It never holds anyone's key.
+**1. Rent a server.** Debian or Ubuntu, x86-64 or ARM. The cheapest one most providers rent is
+usually enough to start; the node's data grows with the network. No domain needed.
 
-A door also keeps the sites `.csd` names point to (below), which home computers can't: behind a home
-or mobile connection, nobody outside can reach them.
-
-## In one command
-
-On any Debian or Ubuntu server, x86-64 or ARM (the cheapest you can rent is plenty), as root:
+**2. Run this on it, as root:**
 
 ```bash
-curl -fsSL https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.6/door.sh | bash
+curl -fsSL https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.8/door.sh | bash
 ```
 
-It installs the node, the site store and Caddy, and serves them over HTTPS. With no domain of your
-own, it uses one made from the server's address (`1-2-3-4.sslip.io`), which Caddy gets a
-certificate for by itself. It prints the door's address, and a key's address: send that key 0.3 CSD,
-and within 10 minutes the door announces itself on the network (a record under `csd.doors` whose
-text is its address). The Compute Substrate Node app reads those, tries each door, and uses the ones
-that answer, so nobody keeps a list and nobody has to approve yours.
+It installs a node, the site store and Caddy, and serves them over HTTPS at an address made from the
+server's IP (`https://1-2-3-4.sslip.io`), with a certificate Caddy gets by itself. Every program it
+downloads is checked against the release's checksums. It ends by printing the door's address and a
+key's address.
+
+**3. Send that key 0.3 CSD.** As soon as the node has synced far enough to see it, the door announces
+itself on the network: a record under `csd.doors` whose text is its address. That's all it takes to
+be found. The Compute Substrate Node app and every other door read those records, try each door,
+and use the ones that answer. Nobody keeps a list, and nobody approves yours.
+
+Within minutes of syncing, your door copies every site a name points to from the other doors, and
+from then on serves them to anyone.
+
+### Checking on it
+
+```bash
+curl -s https://<your door>/tip          # the node's height; it climbs while it syncs
+curl -s https://<your door>/sites        # the sites it keeps
+journalctl -u csd-door-announce -n 5     # whether it has announced itself
+```
+
+### What you answer for
+
+A door is a host: what it serves, you serve. If there's a site you won't keep, put its CID or its
+`.csd` name in `/etc/csd/deny.txt`, one per line. It's dropped within a minute and refused from then
+on. Readers get it from other doors or not at all; nothing on the network changes.
+
+### Options
+
+Pass them after `bash -s --`, as in `... | bash -s -- --domain example.org`:
 
 - `--domain example.org`: a domain of yours, already pointing to the server
-- `--invite <link>`: pay for the announcement with an invite link
-- `--node http://127.0.0.1:8789`: use a node already running there
+- `--invite <link>`: pay for the announcement with an invite link, not by sending CSD
+- `--node http://127.0.0.1:8789`: use a node already running on the server
 - `--announce-only --domain example.org`: only announce a door you set up by hand
 
-Pass them after `bash -s --`, as in `... | bash -s -- --domain example.org`. Running it again updates
-the programs and keeps everything else. Open TCP ports 80, 443 and 17999 in your provider's firewall
-if it has one.
+If the provider has a firewall in its web panel, open TCP ports 80, 443 and 17999 there.
 
-The rest of this page is the same thing by hand, piece by piece.
+### Updating and stopping
+
+Running the command again updates the programs and keeps everything else. To stop being a door:
+`systemctl disable --now csd-door-announce.timer csd-sites csd`. Its announcement stays on the
+network, and apps simply find it no longer answers.
+
+The rest of this page is the same thing by hand, piece by piece, for anyone who wants to know exactly
+what runs.
 
 ## By hand
 

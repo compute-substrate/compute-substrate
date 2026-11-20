@@ -10,9 +10,9 @@ While it runs, apps on the same computer can use your node instead of someone el
 
 ## Download
 
-- **macOS** (Apple Silicon and Intel): [Compute-Substrate-Node-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.4/Compute-Substrate-Node-macOS.dmg).
+- **macOS** (Apple Silicon and Intel): [Compute-Substrate-Node-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.8/Compute-Substrate-Node-macOS.dmg).
   Open it and drag the app to Applications.
-- **Windows**: [Compute-Substrate-Node-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.4/Compute-Substrate-Node-Windows-setup.exe).
+- **Windows**: [Compute-Substrate-Node-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.8/Compute-Substrate-Node-Windows-setup.exe).
 
 These are version 0.1.2. Newer versions, with their checksums, are on
 [Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
