@@ -601,8 +601,25 @@ fn ipfs_cmd(bin: &Path, repo: &Path) -> Command {
 }
 
 fn ipfs_run(bin: &Path, repo: &Path, args: &[&str]) -> Result<(), String> {
+    ipfs_out(bin, repo, args).map(|_| ())
+}
+
+fn ipfs_out(bin: &Path, repo: &Path, args: &[&str]) -> Result<String, String> {
     let out = ipfs_cmd(bin, repo).args(args).output().map_err(|e| format!("Can't run IPFS: {e}"))?;
-    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+    if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).to_string()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+}
+
+// Announce a site's root at once. Kubo announces every block of what's pinned, one by one, which
+// from a home connection can take hours for a site of a few hundred blocks; but whoever looks for a
+// site looks for its root, and once connected fetches the rest straight from here.
+fn ipfs_announce(app: &tauri::AppHandle, cid: &str) {
+    let (Ok(bin), Ok(dir)) = (ipfs_binary(), app_dir(app)) else { return };
+    let (cid, repo) = (cid.to_string(), dir.join("ipfs"));
+    std::thread::spawn(move || {
+        if let Err(e) = ipfs_run(&bin, &repo, &["routing", "provide", &cid]) {
+            eprintln!("[ipfs] announcing {cid}: {e}");
+        }
+    });
 }
 
 // The settings, applied at every start so a newer app's settings reach an older folder
@@ -636,7 +653,22 @@ fn ipfs_configure(bin: &Path, repo: &Path) -> Result<(), String> {
 // A site's .car into Kubo, pinned, so it's shared from now on
 fn ipfs_import(app: &tauri::AppHandle, car: &Path) -> Result<(), String> {
     let (bin, repo) = (ipfs_binary()?, app_dir(app)?.join("ipfs"));
-    ipfs_run(&bin, &repo, &["dag", "import", "--pin-roots=true", &car.to_string_lossy()])
+    let out = ipfs_out(&bin, &repo, &["dag", "import", "--pin-roots=true", &car.to_string_lossy()])?;
+    // "Pinned root\t<cid>\tsuccess"
+    for root in out.lines().filter_map(|l| l.split('\t').nth(1)).filter(|c| valid_cid(c)) {
+        ipfs_announce(app, root);
+    }
+    Ok(())
+}
+
+// Every site pinned here, announced again (each start, and every few hours while the app runs)
+fn ipfs_announce_all(app: &tauri::AppHandle) {
+    let (Ok(bin), Ok(dir)) = (ipfs_binary(), app_dir(app)) else { return };
+    if let Ok(out) = ipfs_out(&bin, &dir.join("ipfs"), &["pin", "ls", "--type=recursive", "--quiet"]) {
+        for cid in out.lines().map(str::trim).filter(|c| valid_cid(c)) {
+            ipfs_announce(app, cid);
+        }
+    }
 }
 
 // Every .car waiting in sites/ (saved while IPFS wasn't running), and the carried Commonplace
@@ -705,6 +737,15 @@ fn start_ipfs(app: &tauri::AppHandle, ipfs: &Arc<Ipfs>) -> Result<(), String> {
                 let _ = app.emit("sharing-changed", ());
                 ipfs_import_waiting(&app);
                 let _ = app.emit("sharing-changed", ());
+                // give it a minute to find peers, then announce every site; again every 6 hours
+                std::thread::sleep(Duration::from_secs(60));
+                while *ipfs.ready.lock().unwrap() {
+                    ipfs_announce_all(&app);
+                    for _ in 0..(6 * 60 * 60 / 5) {
+                        if !*ipfs.ready.lock().unwrap() { return; }
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
+                }
                 return;
             }
             std::thread::sleep(Duration::from_millis(500));
