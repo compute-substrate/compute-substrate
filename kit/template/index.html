@@ -61,7 +61,7 @@
     <textarea id="text" maxlength="500" placeholder="Leave a line…" aria-label="Your entry"></textarea>
     <div class="bar">
       <button class="link" id="keyToggle" aria-expanded="false" aria-controls="panel">Writing key <span id="bal">…</span> CSD</button>
-      <button id="sign">Sign</button>
+      <button id="sign">Post</button>
     </div>
     <p id="status" aria-live="polite"></p>
     <div class="panel" id="panel" hidden>
@@ -117,11 +117,11 @@
   $("sign").onclick = async () => {
     const text = $("text").value.trim();
     if (!text) return;
-    say("Signing…");
+    say("Posting…");
     try {
       await net.write(me.signer(net), TOPIC, text);
       $("text").value = "";
-      say("Signed. It shows with the next block, in about two minutes.");
+      say("Posted. It shows up in about two minutes.");
       setTimeout(load, 130_000);
     } catch (e) { say(String(e.message ?? e)); }
     showKey();
