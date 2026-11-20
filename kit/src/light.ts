@@ -3,7 +3,7 @@
 // For any transaction the page shows (an entry, a reply, a resonance, a frontier result) this proves,
 // from the node's answer alone, that:
 //   - the transaction is exactly these bytes: its txid is their hash;
-//   - its author signed it: the signature on its first input checks against its public key;
+//   - its author: the owner of the coin its first input spends (see authorOf);
 //   - it is in a block: the merkle branch leads from its txid to the block header's merkle root;
 //   - that block is on the network's heaviest chain:
 //       below the newest anchor, its header links by hash to the block hashes this release carries
@@ -20,7 +20,7 @@
 //   proof-of-work hash <= target(bits), both big-endian                        chain/pow.rs
 //   difficulty    LWMA over the 45 headers before, solvetimes clamped [1, 12*120]  chain/pow.rs
 //   merkle        sha256d(left || right), the last duplicated when odd          chain/mine.rs
-import { bytesToHex, hexToBytes, sha256d, deserializeTx, serializeTx, signerOf, type Bytes, type Hex, type Tx } from "./core";
+import { bytesToHex, hexToBytes, sha256d, deserializeTx, serializeTx, type Bytes, type Hex, type Tx } from "./core";
 import anchorFile from "./anchors.json";
 
 export const GENESIS_HASH: Hex = "0x00000052c2821f71b19c3d79dfabfb12d4076ba15d83b47d008e582aad6c0d52";
@@ -291,6 +291,31 @@ export function lightClient(base: string, opts: { fetch?: typeof fetch; anchors?
     return { h: (await stretch(k))[height - k * anchors.every], tip: t.height };
   };
 
+  // Who wrote a transaction: the owner of the coin its first input spends. Not whoever signed the
+  // copy a node served: the signatures aren't part of the txid, so a node could hand over a copy
+  // re-signed by another key, and it would still hash to the same txid and sit in the same block. The
+  // spent coin can't be swapped like that: its transaction has to hash to the txid the input names,
+  // and the network only took this one because its owner's signature held.
+  const owners = new Map<string, Promise<Hex | null>>();
+  const authorOf = (tx: Tx): Promise<Hex | null> => {
+    const i = tx.inputs[0];
+    if (!i || /^(0x)?0+$/.test(i.txid)) return Promise.resolve(null);
+    const k = `${i.txid}:${i.vout}`.toLowerCase();
+    let p = owners.get(k);
+    if (!p) {
+      p = (async () => {
+        const r = await get(`/proof/tx/${i.txid.replace(/^0x/, "")}`);
+        if (!r?.ok) throw new Error("NOT_FOUND: the coin it spends");
+        const spent = deserializeTx(hexToBytes(r.tx_raw));
+        if (bytesToHex(sha256d(serializeTx(spent, true))).toLowerCase() !== i.txid.toLowerCase()) throw new Error("BAD_PROOF: the coin it spends isn't the one it names");
+        const o = spent.outputs[i.vout];
+        return o ? (o.addr20.toLowerCase() as Hex) : null;
+      })().catch(e => { owners.delete(k); throw e; });
+      owners.set(k, p);
+    }
+    return p;
+  };
+
   // One transaction, checked. Throws with a reason when the node's answer doesn't hold up.
   const checkTx = async (txid: Hex): Promise<Verified> => {
     const p = await get(`/proof/tx/${txid.replace(/^0x/, "")}`);
@@ -306,8 +331,8 @@ export function lightClient(base: string, opts: { fetch?: typeof fetch; anchors?
     const root = merkleRootFrom(txid, index, p.merkle_branch ?? []);
     const { h, tip } = await headerAt(height);
     if (root !== h.merkle) throw new Error("BAD_PROOF: not in that block");
-    return { txid, tx, author: signerOf(tx), height, index, blockHash: h.hash, depth: tip - height + 1 };
+    return { txid, tx, author: await authorOf(tx), height, index, blockHash: h.hash, depth: tip - height + 1 };
   };
 
-  return { syncTail, checkTx, headerAt };
+  return { syncTail, checkTx, headerAt, authorOf };
 }
