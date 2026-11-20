@@ -49,6 +49,12 @@ struct Args {
     /// note). Read again every minute; what it lists is dropped at once.
     #[arg(long)]
     deny: Option<PathBuf>,
+    /// this door's own address, so it doesn't copy from itself
+    #[arg(long)]
+    url: Option<String>,
+    /// another door to copy sites from, besides those announced on the network (repeatable)
+    #[arg(long = "door")]
+    doors: Vec<String>,
 }
 
 struct Door {
@@ -118,7 +124,70 @@ fn save_index(dir: &Path, index: &Index) {
 }
 
 // Every minute: read the node's new records, and drop sites no name has wanted for the grace period
-fn follow(node: String, door: Arc<Door>) {
+// The other doors: those given with --door, and every door announced on the network (a record under
+// csd.doors whose text is its address), read from this door's own node
+fn other_doors(node: &str, given: &[String], me: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = given.iter().map(|d| d.trim_end_matches('/').to_string()).collect();
+    if let Ok(r) = ureq::get(&format!("{node}/proposals/csd.doors/200")).timeout(Duration::from_secs(30)).call() {
+        if let Ok(j) = r.into_json::<serde_json::Value>() {
+            for p in j["proposals"].as_array().cloned().unwrap_or_default() {
+                let u = p["uri"].as_str().unwrap_or("").trim().trim_end_matches('/').to_string();
+                let host = u.strip_prefix("https://").unwrap_or("");
+                if !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':') && !out.contains(&u) {
+                    out.push(u);
+                }
+            }
+        }
+    }
+    let me = me.map(|m| m.trim_end_matches('/'));
+    out.retain(|d| Some(d.as_str()) != me);
+    out.truncate(40);
+    out
+}
+
+// Copy, from the other doors, every site a name points to that this door doesn't have yet: so a new
+// door has every named site within minutes, and a site survives any one door going away. Each one is
+// checked like any site given to this door.
+fn fill(door: &Door, node: &str, given: &[String], me: Option<&str>) {
+    let ix = door.index.lock().unwrap();
+    let mut want: Vec<String> = ix.current.values().map(|(c, _)| c.clone()).collect();
+    drop(ix);
+    want.sort();
+    want.dedup();
+    let held: std::collections::HashSet<String> = kept(&door.dir).into_iter().map(|(c, _)| c).collect();
+    want.retain(|c| !held.contains(c) && !door.denied(c));
+    if want.is_empty() {
+        return;
+    }
+    let doors = other_doors(node, given, me);
+    for cid in want {
+        let root = car::parse_cid(&cid).unwrap();
+        for d in &doors {
+            let Ok(r) = ureq::get(&format!("{d}/sites/{cid}.car")).timeout(Duration::from_secs(180)).call() else { continue };
+            let mut body = Vec::new();
+            if r.into_reader().take(MAX_SITE as u64 + 1).read_to_end(&mut body).is_err() || body.len() > MAX_SITE {
+                continue;
+            }
+            let used: u64 = kept(&door.dir).iter().map(|(_, n)| n).sum();
+            if used + body.len() as u64 > door.max_bytes {
+                eprintln!("[sites] full: not copying {cid}");
+                return;
+            }
+            if let Err(e) = car::check(&body, root) {
+                eprintln!("[sites] {d} sent {cid} broken ({e}); trying another door");
+                continue;
+            }
+            let (tmp, file) = (door.dir.join(format!("{cid}.car.part")), car_path(&door.dir, &cid));
+            if fs::write(&tmp, &body).and_then(|_| fs::rename(&tmp, &file)).is_ok() {
+                eprintln!("[sites] copied {cid} from {d}");
+            }
+            break;
+        }
+    }
+}
+
+fn follow(node: String, door: Arc<Door>, given: Vec<String>, me: Option<String>) {
+    let mut filled_at: Option<std::time::Instant> = None;
     loop {
         let mut ix = std::mem::take(&mut *door.index.lock().unwrap());
         match index::catch_up(&node, &mut ix) {
@@ -139,6 +208,12 @@ fn follow(node: String, door: Arc<Door>) {
                 eprintln!("[sites] dropping {cid}: {why}");
                 let _ = fs::remove_file(car_path(&door.dir, &cid));
             }
+        }
+        // every 10 minutes, once the names are read
+        let caught_up = { let ix = door.index.lock().unwrap(); ix.tip > 0 && ix.next > ix.tip };
+        if caught_up && filled_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(600)) {
+            filled_at = Some(std::time::Instant::now());
+            fill(&door, &node, &given, me.as_deref());
         }
         std::thread::sleep(Duration::from_secs(60));
     }
@@ -234,7 +309,8 @@ fn main() {
     let node = a.node.trim_end_matches('/').to_string();
     {
         let door = door.clone();
-        std::thread::spawn(move || follow(node, door));
+        let (given, me) = (a.doors.clone(), a.url.clone());
+        std::thread::spawn(move || follow(node, door, given, me));
     }
     let server = Arc::new(tiny_http::Server::http(&a.listen).unwrap_or_else(|e| panic!("can't listen on {}: {e}", a.listen)));
     eprintln!("[sites] keeping sites in {}, answering on {}", a.dir.display(), a.listen);

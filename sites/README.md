@@ -8,6 +8,9 @@ connections can't.
   it (`contenthash`, `ipfs://<CID>`, in a CairnX `nprofile` record), read from this machine's own
   node, and for 30 days after it stops. Writing that record costs CSD, so nobody can fill a door with
   sites no name points to. Up to 64 MB a site, and `--max-gb` in all (20 GB by default).
+- **From other doors:** every 10 minutes it copies any site a name points to that it doesn't have yet
+  from the other doors announced on the network (`csd.doors`), or given with `--door`. `--url` is
+  its own address, so it doesn't ask itself.
 - **What it checks:** every block against its address, and that every block reachable from the root
   is there, before keeping anything. Readers check again themselves, so a door is trusted with
   nothing.

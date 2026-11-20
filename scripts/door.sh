@@ -17,18 +17,20 @@
 #   --domain example.org   a domain of yours, already pointing to this server (default: <ip>.sslip.io)
 #   --invite <link>        an invite link, to pay for the announcement
 #   --node URL             use a node already running here, at this RPC address, not a new one
+#   --announce-only        only announce a door already set up by hand (with --domain, its domain)
 #
 # Running it again updates the programs and keeps everything else. Nothing here is consensus.
 set -euo pipefail
 
 TAG="__TAG__"   # filled in when a release is made
 REPO="compute-substrate/compute-substrate"
-DOMAIN="" INVITE="" NODE=""
+DOMAIN="" INVITE="" NODE="" ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
     --invite) INVITE="$2"; shift 2 ;;
     --node) NODE="$2"; shift 2 ;;
+    --announce-only) ONLY=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -63,12 +65,18 @@ for p in csd csd-sites; do
   install -m 755 "$TMP/$p-linux-$ARCH" "/usr/local/bin/$p"
 done
 
+if [ -n "$ONLY" ]; then
+  [ -n "$DOMAIN" ] || { echo "--announce-only needs --domain, the door's domain." >&2; exit 1; }
+  NODE="$(systemctl show csd-sites -p ExecStart --value 2>/dev/null | grep -o -- '--node [^ ]*' | cut -d' ' -f2 || true)"
+  [ -n "$NODE" ] || { echo "No site store (csd-sites service) here to announce." >&2; exit 1; }
+fi
+
 id csd >/dev/null 2>&1 || useradd --system --home /var/lib/csd --create-home --shell /usr/sbin/nologin csd
 install -d -o csd -g csd /var/lib/csd /var/lib/csd/sites
 install -d /etc/csd
 [ -f /etc/csd/deny.txt ] || printf '# Sites this door won'"'"'t keep or serve: CIDs and .csd names, one per line.\n' > /etc/csd/deny.txt
 
-if [ -z "$NODE" ]; then
+if [ -z "$NODE" ] && [ -z "$ONLY" ]; then
   say "The node"
   NODE="http://127.0.0.1:8789"
   [ -f /var/lib/csd/genesis.bin ] || sudo -u csd /usr/local/bin/csd genesis --out /var/lib/csd/genesis.bin >/dev/null
@@ -90,6 +98,14 @@ WantedBy=multi-user.target
 EOF
 fi
 
+if [ -z "$DOMAIN" ]; then
+  IP=$(curl -fsS -4 https://api.ipify.org)
+  DOMAIN="${IP//./-}.sslip.io"
+fi
+URL="https://$DOMAIN"
+NODE_HOSTPORT="${NODE#http://}"
+
+if [ -z "$ONLY" ]; then
 say "The site store"
 cat > /etc/systemd/system/csd-sites.service <<EOF
 [Unit]
@@ -97,18 +113,11 @@ Description=Compute Substrate site store
 After=network-online.target csd.service
 [Service]
 User=csd
-ExecStart=/usr/local/bin/csd-sites --node $NODE --dir /var/lib/csd/sites --listen 127.0.0.1:8795 --deny /etc/csd/deny.txt
+ExecStart=/usr/local/bin/csd-sites --node $NODE --dir /var/lib/csd/sites --listen 127.0.0.1:8795 --deny /etc/csd/deny.txt --url $URL
 Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-
-if [ -z "$DOMAIN" ]; then
-  IP=$(curl -fsS -4 https://api.ipify.org)
-  DOMAIN="${IP//./-}.sslip.io"
-fi
-URL="https://$DOMAIN"
-NODE_HOSTPORT="${NODE#http://}"
 
 say "HTTPS, at $URL"
 cat > /etc/caddy/csd-door.caddy <<EOF
@@ -165,6 +174,7 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 if command -v ufw >/dev/null && ufw status | grep -q active; then
   ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw allow 17999/tcp >/dev/null
 fi
+fi # not --announce-only
 
 say "The announcement"
 KEY=/var/lib/csd/door.key
@@ -222,10 +232,15 @@ EOF
 chown csd: /etc/csd/door-url
 
 systemctl daemon-reload
-[ -f /etc/systemd/system/csd.service ] && systemctl enable --now csd >/dev/null 2>&1 && systemctl restart csd
-systemctl enable --now csd-sites >/dev/null 2>&1 && systemctl restart csd-sites
+if [ -z "$ONLY" ]; then
+  [ -f /etc/systemd/system/csd.service ] && systemctl enable --now csd >/dev/null 2>&1 && systemctl restart csd
+  systemctl enable --now csd-sites >/dev/null 2>&1 && systemctl restart csd-sites
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
+else
+  systemctl restart csd-sites 2>/dev/null || true
+fi
 systemctl enable --now csd-door-announce.timer >/dev/null 2>&1
-systemctl reload caddy 2>/dev/null || systemctl restart caddy
+systemctl start csd-door-announce.service >/dev/null 2>&1 || true
 
 ADDR="$(/usr/local/bin/csd wallet recover --privkey "$(cat "$KEY")" | awk '/^addr20:/ {print $2}')"
 say "Done. This door is $URL"

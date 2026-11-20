@@ -31,6 +31,7 @@ that answer, so nobody keeps a list and nobody has to approve yours.
 - `--domain example.org`: a domain of yours, already pointing to the server
 - `--invite <link>`: pay for the announcement with an invite link
 - `--node http://127.0.0.1:8789`: use a node already running there
+- `--announce-only --domain example.org`: only announce a door you set up by hand
 
 Pass them after `bash -s --`, as in `... | bash -s -- --domain example.org`. Running it again updates
 the programs and keeps everything else. Open TCP ports 80, 443 and 17999 in your provider's firewall
@@ -146,6 +147,9 @@ The site store, [`csd-sites`](../sites/README.md), runs beside the node:
   all unless you set `--max-gb`.
 - **Where sites come from:** whoever has one gives it to the doors. The Compute Substrate Node app
   does it by itself for every site it opens, from behind any router, since it only connects out.
+- **From other doors:** every 10 minutes it copies, from the other announced doors, any site a name
+  points to that it doesn't have yet. A new door has every named site within minutes, and a site
+  survives any one door going away.
 - **What it checks:** every block against its address, before keeping anything. Readers check again
   themselves, so nobody has to trust your door.
 
