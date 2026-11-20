@@ -16,7 +16,9 @@ import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha2";
 import { ripemd160 } from "@noble/hashes/legacy";
 
-const NODE = "http://127.0.0.1:8789";
+let NODE = "http://127.0.0.1:8789";
+// which node names are read through (the app uses its own; a door, its own RPC)
+export function useNode(url: string) { NODE = url.replace(/\/$/, ""); }
 const CAIRN = "https://cairn-substrate.com";
 // the copy of Commonplace this app carries, served from this computer (an example app on the network)
 const COMMONPLACE = "http://localhost:8790";

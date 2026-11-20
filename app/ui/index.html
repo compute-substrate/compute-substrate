@@ -211,15 +211,39 @@
   }
 
   // helping keep the sites this app has (and its Commonplace) up, over IPFS
+  // Whether others can actually reach this computer: asked of IPFS's own check service, which tries
+  // to fetch a site from here. Behind most home and mobile connections they can't, and then the app
+  // keeps sites for its own user only, and says so.
+  let reach = null, reachAt = Date.now(); // the first check a minute in, once IPFS has announced itself
+  async function checkReach() {
+    let id; try { id = await invoke("ipfs_identity"); } catch { return; }
+    if (!id.cid) return;
+    try {
+      const q = `cid=${id.cid}&multiaddr=${encodeURIComponent("/p2p/" + id.peer)}&timeoutSeconds=60`;
+      const r = await fetch(`https://ipfs-check-backend.probelab.io/check?${q}`, { method: "POST", signal: AbortSignal.timeout(90_000) });
+      if (!r.ok) return;
+      const j = await r.json();
+      const one = Array.isArray(j) ? j[0] : j;
+      reach = !one?.ConnectionError && !!one?.DataAvailableOverBitswap?.Found;
+      reachAt = Date.now();
+      sharing();
+    } catch {}
+  }
   async function sharing() {
     let s; try { s = await invoke("sharing_state"); } catch { return; }
     $("sharing").checked = s.on;
+    const n = `${s.sites} ${s.sites === 1 ? "site" : "sites"}`;
     $("sharingStatus").textContent = !s.on ? "Off. Your app keeps sites for you only"
       : !s.running ? "Starting…"
-      : `Helping keep ${s.sites} ${s.sites === 1 ? "site" : "sites"} up, with no server`;
+      : reach === false ? `Your internet connection doesn't let others reach this computer (most home and mobile ones don't), so it keeps ${n} for you only`
+      : reach === true ? `Helping keep ${n} up, with no server`
+      : `Keeping ${n}, and checking whether others can reach them…`;
+    // a minute after IPFS is up, then every hour
+    if (s.on && s.running && Date.now() - reachAt > (reach === null ? 60_000 : 3_600_000)) { reachAt = Date.now(); checkReach(); }
   }
   $("sharing").onchange = async e => {
     $("sharingStatus").textContent = e.target.checked ? "Starting…" : "Stopping…";
+    reach = null; reachAt = Date.now();
     try { await invoke("set_sharing", { on: e.target.checked }); } catch (err) { $("sharingStatus").textContent = String(err); }
     sharing();
   };

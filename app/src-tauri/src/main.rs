@@ -777,6 +777,23 @@ fn shared_count(app: &tauri::AppHandle) -> usize {
     carried + fs::read_dir(dir).map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".shared")).count()).unwrap_or(0)
 }
 
+// What the window needs to ask an outside service whether this computer can be reached: its IPFS
+// peer id, and one site it has (the newest pinned)
+#[derive(Serialize)]
+struct Identity { peer: String, cid: Option<String> }
+
+#[tauri::command(async)]
+fn ipfs_identity(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>) -> Result<Identity, String> {
+    if !*ipfs.ready.lock().unwrap() {
+        return Err("IPFS isn't running".into());
+    }
+    let (bin, repo) = (ipfs_binary()?, app_dir(&app)?.join("ipfs"));
+    let peer = ipfs_out(&bin, &repo, &["id", "-f", "<id>"])?.trim().to_string();
+    let cid = ipfs_out(&bin, &repo, &["pin", "ls", "--type=recursive", "--quiet"]).ok()
+        .and_then(|o| o.lines().map(str::trim).find(|c| valid_cid(c)).map(str::to_string));
+    Ok(Identity { peer, cid })
+}
+
 #[tauri::command]
 fn sharing_state(app: tauri::AppHandle, ipfs: tauri::State<'_, Arc<Ipfs>>) -> Sharing {
     let on = sharing_on(&app);
@@ -897,7 +914,7 @@ fn main() {
         .manage(node.clone())
         .manage(Sites::default())
         .manage(ipfs.clone())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, sharing_state, set_sharing, site_share])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, sharing_state, set_sharing, site_share, ipfs_identity])
         .setup({
             let node = node.clone();
             let ipfs = ipfs.clone();

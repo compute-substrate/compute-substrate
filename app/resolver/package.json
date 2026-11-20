@@ -1,9 +1,10 @@
 {
   "name": "csd-app-resolver",
   "private": true,
-  "description": "Opens .csd names (web+csd: links) through the app's own node; bundled into app/ui/resolver.js",
+  "description": "Opens .csd names (web+csd: links) through the app's own node; bundled into app/ui/resolver.js. Also keep-sites, for doors: keeps named sites up over IPFS.",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js"
+    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js",
+    "build:keep": "esbuild src/keep.ts --bundle --platform=node --format=esm --target=node18 --outfile=dist/keep-sites.mjs"
   },
   "dependencies": {
     "@inversealtruism/cairnx-core": "0.2.4",
