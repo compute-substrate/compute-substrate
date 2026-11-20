@@ -47,7 +47,7 @@
       <button id="cairn">Use Cairn Wallet</button>
       <span class="muted" id="status"></span>
     </div>
-    <p class="muted">Writing costs 0.25 CSD. Your key lives in this browser: <code id="addr"></code> holds <span id="bal">…</span> CSD. Send it a little CSD to sign.</p>
+    <p class="muted">Writing costs 0.25 CSD. <span id="who"></span> <code id="addr"></code> holds <span id="bal">…</span> CSD.<span id="topup"> Send it a little CSD to sign, or use Cairn Wallet.</span></p>
   </section>
 
   <section id="list" aria-live="polite"><p class="muted">Reading the network…</p></section>
@@ -67,10 +67,15 @@
   // a key for this browser, made once and kept (whoever has it can write as you)
   let priv = null;
   try { priv = localStorage.getItem("guestbook.key"); if (!priv) { priv = newKey(); localStorage.setItem("guestbook.key", priv); } } catch { priv = newKey(); }
-  let signer = keySigner(net, priv);
+  // Signing works two ways: with a key this page made and keeps in this browser (send it a little
+  // CSD and it signs on its own), or with Cairn Wallet, which keeps the key itself
+  let signer = keySigner(net, priv), viaCairn = false;
   const showSigner = async () => {
+    $("who").textContent = viaCairn ? "Signing with Cairn Wallet:" : "Signing with a key kept in this browser:";
     $("addr").textContent = signer.address;
-    try { $("bal").textContent = String(await net.balance(signer.address)); } catch { $("bal").textContent = "?"; }
+    let bal = null;
+    try { bal = await net.balance(signer.address); $("bal").textContent = String(bal); } catch { $("bal").textContent = "?"; }
+    $("topup").hidden = bal !== 0 || viaCairn;
   };
 
   const short = a => `${a.slice(0, 6)}…${a.slice(-4)}`;
@@ -99,7 +104,7 @@
     showSigner();
   };
   $("cairn").onclick = async () => {
-    try { signer = await cairnSigner(); $("status").textContent = "Signing with Cairn Wallet."; showSigner(); }
+    try { signer = await cairnSigner(); viaCairn = true; $("status").textContent = "Connected."; $("cairn").hidden = true; showSigner(); }
     catch (e) { $("status").textContent = String(e.message ?? e); }
   };
 
