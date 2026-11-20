@@ -24,7 +24,7 @@ set -euo pipefail
 
 TAG="__TAG__"   # filled in when a release is made
 REPO="compute-substrate/compute-substrate"
-DOMAIN="" INVITE="" NODE="" ONLY=""
+DOMAIN="" INVITE="" NODE="" ONLY="" OWN_NODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
@@ -78,6 +78,7 @@ install -d /etc/csd
 
 if [ -z "$NODE" ] && [ -z "$ONLY" ]; then
   say "The node"
+  OWN_NODE=1
   NODE="http://127.0.0.1:8789"
   [ -f /var/lib/csd/genesis.bin ] || sudo -u csd /usr/local/bin/csd genesis --out /var/lib/csd/genesis.bin >/dev/null
   BOOT=$(curl -fsSL "https://raw.githubusercontent.com/$REPO/main/app/bootnodes.txt" | grep -v '^\s*#' | grep '/p2p/' | paste -sd, -)
@@ -233,7 +234,8 @@ chown csd: /etc/csd/door-url
 
 systemctl daemon-reload
 if [ -z "$ONLY" ]; then
-  [ -f /etc/systemd/system/csd.service ] && systemctl enable --now csd >/dev/null 2>&1 && systemctl restart csd
+  # only a node this script set up; one given with --node is left running as it is
+  if [ -n "$OWN_NODE" ]; then systemctl enable csd >/dev/null 2>&1; systemctl restart csd; fi
   systemctl enable --now csd-sites >/dev/null 2>&1 && systemctl restart csd-sites
   systemctl reload caddy 2>/dev/null || systemctl restart caddy
 else
@@ -247,9 +249,7 @@ say "Done. This door is $URL"
 cat <<EOF
 - The node is syncing. Check it with:   curl -s $URL/tip
 - Its sites:                             curl -s $URL/sites
-- It announces itself once its key holds 0.3 CSD: send it to $ADDR
-  (or run this again with --invite <link>). See how it's going with:
-  journalctl -u csd-door-announce -n 5
+$(if [ -f /var/lib/csd/door-announce.json ]; then echo "- It has announced itself on the network."; else printf '%s\n' "- It announces itself once its key holds 0.3 CSD: send it to $ADDR" "  (or run this again with --invite <link>). See how it's going with:" "  journalctl -u csd-door-announce -n 5"; fi)
 - Sites you won't keep or serve go in /etc/csd/deny.txt (CIDs or .csd names, one per line). A door
   is a host: what it serves is yours to answer for.
 - Open TCP ports 80, 443 and 17999 in your provider's firewall too, if it has one.
