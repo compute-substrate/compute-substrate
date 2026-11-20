@@ -490,11 +490,11 @@ fn serve_name(dir: &Path, sites: &Sites, name: &str, cid: &str) -> Result<u16, S
 
 #[tauri::command]
 fn site_kept(app: tauri::AppHandle, cid: String) -> bool {
-    // with helping on, a site kept before the app kept .car files is downloaded once more, for its .car
+    // a site kept before the app kept .car files is downloaded once more, for its .car
     let Ok(d) = sites_dir(&app) else { return false };
     valid_cid(&cid)
         && d.join(&cid).join("index.html").is_file()
-        && (!sharing_on(&app) || d.join(format!("{cid}.car")).exists())
+        && d.join(format!("{cid}.car")).exists()
 }
 
 // One checked file of a site, as raw bytes; headers x-cid and x-path (percent-encoded) say which.
@@ -560,20 +560,17 @@ fn serve_known_sites(app: &tauri::AppHandle, sites: &Sites) {
 //
 // The doors it knows: app/doors.txt, shipped with it. Anyone can run one (docs/public-node.md).
 const DOORS: &str = include_str!("../../doors.txt");
-const SHARING_OFF: &str = "sharing-off";
+// Which sites this app passes on: each is its owner's choice. Off for a site someone opens (a name
+// can point anywhere, and passing a site on is helping publish it), on for the Commonplace the app
+// carries. sites/helping.json: cid -> on.
+const HELPING: &str = "helping.json";
 
-#[derive(Clone, Serialize, Default)]
-struct Sharing {
-    on: bool,
-    sites: Vec<String>,
-}
-
-fn app_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path().app_data_dir().map_err(|e| e.to_string())
-}
-
-fn sharing_on(app: &tauri::AppHandle) -> bool {
-    app_dir(app).map(|d| !d.join(SHARING_OFF).exists()).unwrap_or(false)
+#[derive(Clone, Serialize)]
+struct KeptSite {
+    cid: String,
+    names: Vec<String>,
+    helping: bool,
+    carried: bool,
 }
 
 // The release of Commonplace the app carries (app/commonplace.json), whose .car ships beside it
@@ -586,14 +583,21 @@ fn car_file(app: &tauri::AppHandle, cid: &str) -> Option<PathBuf> {
     if !valid_cid(cid) {
         return None;
     }
+    let p = sites_dir(app).ok()?.join(format!("{cid}.car"));
+    if p.is_file() {
+        return Some(p);
+    }
     if Some(cid) == carried_cid().as_deref() {
         let p = app.path().resource_dir().ok()?.join("commonplace.car");
         if p.is_file() {
             return Some(p);
         }
     }
-    let p = sites_dir(app).ok()?.join(format!("{cid}.car"));
-    p.is_file().then_some(p)
+    None
+}
+
+fn helping_map(dir: &Path) -> std::collections::BTreeMap<String, bool> {
+    fs::read_to_string(dir.join(HELPING)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -601,33 +605,63 @@ fn doors() -> Vec<String> {
     peer_lines(DOORS).filter(|l| l.starts_with("https://") && !l.contains(char::is_whitespace)).map(|l| l.trim_end_matches('/').to_string()).collect()
 }
 
-// The sites this app has as .car files (each one it opened, and its Commonplace), when helping is on
+// The sites this app keeps: each one opened by name, and its Commonplace
 #[tauri::command]
-fn sharing_state(app: tauri::AppHandle) -> Sharing {
-    let on = sharing_on(&app);
-    let mut sites: Vec<String> = carried_cid().into_iter().filter(|c| car_file(&app, c).is_some()).collect();
-    if let Ok(rd) = sites_dir(&app).and_then(|d| fs::read_dir(d).map_err(|e| e.to_string())) {
+fn kept_sites(app: tauri::AppHandle) -> Vec<KeptSite> {
+    let Ok(dir) = sites_dir(&app) else { return vec![] };
+    let help = helping_map(&dir);
+    let names = load_site_map(&dir);
+    let carried = carried_cid();
+    let mut cids: Vec<String> = carried.iter().filter(|c| car_file(&app, c).is_some()).cloned().collect();
+    if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.flatten() {
             if let Some(c) = e.file_name().to_str().and_then(|n| n.strip_suffix(".car")) {
-                if valid_cid(c) && !sites.iter().any(|x| x == c) {
-                    sites.push(c.to_string());
+                if valid_cid(c) && !cids.iter().any(|x| x == c) {
+                    cids.push(c.to_string());
                 }
             }
         }
     }
-    Sharing { on, sites }
+    cids.into_iter().map(|cid| {
+        let is_carried = Some(&cid) == carried.as_ref();
+        KeptSite {
+            names: names.iter().filter(|(_, e)| e.cid == cid).map(|(n, _)| n.clone()).collect(),
+            helping: help.get(&cid).copied().unwrap_or(is_carried),
+            carried: is_carried,
+            cid,
+        }
+    }).collect()
 }
 
 #[tauri::command]
-fn set_sharing(app: tauri::AppHandle, on: bool) -> Result<(), String> {
-    let marker = app_dir(&app)?.join(SHARING_OFF);
-    if on {
-        let _ = fs::remove_file(&marker);
-        Ok(())
-    } else {
-        fs::create_dir_all(marker.parent().unwrap()).map_err(|e| e.to_string())?;
-        fs::write(&marker, "").map_err(|e| e.to_string())
+fn set_helping(app: tauri::AppHandle, cid: String, on: bool) -> Result<(), String> {
+    if !valid_cid(&cid) {
+        return Err("bad site address".into());
     }
+    let dir = sites_dir(&app)?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut m = helping_map(&dir);
+    m.insert(cid, on);
+    fs::write(dir.join(HELPING), serde_json::to_string_pretty(&m).unwrap()).map_err(|e| e.to_string())
+}
+
+// Forget a site: its files, its .car, and the names that opened it. (The Commonplace the app
+// carries can't be forgotten, only no longer passed on.)
+#[tauri::command]
+fn forget_site(app: tauri::AppHandle, cid: String) -> Result<(), String> {
+    if !valid_cid(&cid) {
+        return Err("bad site address".into());
+    }
+    let dir = sites_dir(&app)?;
+    let _ = fs::remove_dir_all(dir.join(&cid));
+    let _ = fs::remove_file(dir.join(format!("{cid}.car")));
+    let mut map = load_site_map(&dir);
+    map.retain(|_, e| e.cid != cid);
+    let _ = fs::write(dir.join("sites.json"), serde_json::to_string_pretty(&map).unwrap());
+    let mut h = helping_map(&dir);
+    h.remove(&cid);
+    let _ = fs::write(dir.join(HELPING), serde_json::to_string_pretty(&h).unwrap());
+    Ok(())
 }
 
 // A checked site's .car, as raw bytes (header x-cid), kept beside its files
@@ -726,7 +760,7 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
         .manage(Sites::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, sharing_state, set_sharing, site_keep_car, site_car, doors])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors])
         .setup({
             let node = node.clone();
             move |app| {

@@ -45,6 +45,10 @@ struct Args {
     /// answer browsers from any site itself (when no web server in front adds these headers)
     #[arg(long)]
     cors: bool,
+    /// sites this door won't keep or serve: a file of CIDs and .csd names, one per line (`#` starts a
+    /// note). Read again every minute; what it lists is dropped at once.
+    #[arg(long)]
+    deny: Option<PathBuf>,
 }
 
 struct Door {
@@ -52,6 +56,42 @@ struct Door {
     index: Mutex<Index>,
     max_bytes: u64,
     cors: bool,
+    deny_file: Option<PathBuf>,
+    deny: Mutex<Deny>,
+}
+
+// What the operator won't keep: sites by CID, and every site a denied name points to
+#[derive(Default)]
+struct Deny {
+    cids: std::collections::HashSet<String>,
+    names: std::collections::HashSet<String>,
+}
+
+impl Deny {
+    fn read(file: &Path) -> Deny {
+        let mut d = Deny::default();
+        for line in fs::read_to_string(file).unwrap_or_default().lines() {
+            let l = line.split('#').next().unwrap_or("").trim().to_ascii_lowercase();
+            let l = l.trim_start_matches("ipfs://");
+            if l.is_empty() {
+                continue;
+            }
+            if car::parse_cid(l).is_some() {
+                d.cids.insert(l.to_string());
+            } else {
+                d.names.insert(l.trim_end_matches(".csd").to_string());
+            }
+        }
+        d
+    }
+}
+
+impl Door {
+    fn denied(&self, cid: &str) -> bool {
+        let d = self.deny.lock().unwrap();
+        d.cids.contains(cid) || (!d.names.is_empty() && self.index.lock().unwrap().current.iter()
+            .any(|(k, (c, _))| c == cid && d.names.contains(k.split(' ').next().unwrap_or(""))))
+    }
 }
 
 fn car_path(dir: &Path, cid: &str) -> PathBuf {
@@ -85,17 +125,21 @@ fn follow(node: String, door: Arc<Door>) {
             Ok(()) => {}
             Err(e) => eprintln!("[sites] {e}"),
         }
-        for (cid, _) in kept(&door.dir) {
-            if !ix.wanted(&cid) {
-                eprintln!("[sites] dropping {cid}: no name points to it any more");
-                let _ = fs::remove_file(car_path(&door.dir, &cid));
-            }
-        }
         // forget long-dropped sites
         let tip = ix.tip;
         ix.dropped.retain(|_, h| *h + index::GRACE_BLOCKS > tip);
         save_index(&door.dir, &ix);
         *door.index.lock().unwrap() = ix;
+        if let Some(f) = &door.deny_file {
+            *door.deny.lock().unwrap() = Deny::read(f);
+        }
+        for (cid, _) in kept(&door.dir) {
+            let why = if door.denied(&cid) { Some("on the deny list") } else if !door.index.lock().unwrap().wanted(&cid) { Some("no name points to it any more") } else { None };
+            if let Some(why) = why {
+                eprintln!("[sites] dropping {cid}: {why}");
+                let _ = fs::remove_file(car_path(&door.dir, &cid));
+            }
+        }
         std::thread::sleep(Duration::from_secs(60));
     }
 }
@@ -137,6 +181,10 @@ fn handle(mut req: tiny_http::Request, door: &Door) {
         return text(req, door, 404, "Not here. This door serves /sites/<cid>.car.");
     };
     let file = car_path(&door.dir, &cid);
+    if door.denied(&cid) {
+        let _ = fs::remove_file(&file);
+        return text(req, door, 451, "This door doesn't keep or serve that site.");
+    }
     match req.method() {
         Get | Head => match fs::read(&file) {
             Ok(b) => {
@@ -181,7 +229,8 @@ fn main() {
     let a = Args::parse();
     fs::create_dir_all(&a.dir).unwrap_or_else(|e| panic!("can't use {}: {e}", a.dir.display()));
     let index: Index = fs::read(a.dir.join("index.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let door = Arc::new(Door { dir: a.dir.clone(), index: Mutex::new(index), max_bytes: a.max_gb * 1_000_000_000, cors: a.cors });
+    let deny = a.deny.as_deref().map(Deny::read).unwrap_or_default();
+    let door = Arc::new(Door { dir: a.dir.clone(), index: Mutex::new(index), max_bytes: a.max_gb * 1_000_000_000, cors: a.cors, deny_file: a.deny.clone(), deny: Mutex::new(deny) });
     let node = a.node.trim_end_matches('/').to_string();
     {
         let door = door.clone();
@@ -226,6 +275,19 @@ mod tests {
         assert_eq!(index::profile_site(r#"{"v":1,"t":"nprofile","name":"x","p":{"contenthash":"ipfs://bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24"}}"#), Some(("x".into(), Some(a.clone()))));
         assert_eq!(index::profile_site(r#"{"v":1,"t":"nprofile","name":"x","p":{"url":"https://x"}}"#), Some(("x".into(), None)));
         assert_eq!(index::profile_site(r#"{"v":1,"t":"nreg","name":"x"}"#), None);
+    }
+
+    #[test]
+    fn the_deny_list_takes_sites_and_names() {
+        let f = std::env::temp_dir().join(format!("csd-deny-{}", std::process::id()));
+        fs::write(&f, "# not here\nbafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24\nbadname.csd  # a note\n\n").unwrap();
+        let mut ix = Index { tip: 100_000, ..Default::default() };
+        ix.apply("badname", "someone", Some("bafybeicnb2kolu7wllsf7mn4lmkbz36jwww7gtave57s7cwzwsdz6l2y7q".into()), 90_000);
+        let door = Door { dir: std::env::temp_dir(), index: Mutex::new(ix), max_bytes: 0, cors: false, deny_file: None, deny: Mutex::new(Deny::read(&f)) };
+        assert!(door.denied("bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24"));
+        assert!(door.denied("bafybeicnb2kolu7wllsf7mn4lmkbz36jwww7gtave57s7cwzwsdz6l2y7q")); // badname points to it
+        assert!(!door.denied("bafybeifud7i3hbqspxqonhaj3kf7ertxinqbeukiu6icgizjvbmbw624oi"));
+        fs::remove_file(&f).ok();
     }
 
     #[test]

@@ -79,18 +79,20 @@ Names are registered and managed on Cairn; the app only reads them.
 **Helping keep sites up.** Most home and mobile connections can't be reached from outside, so a
 computer at home can't serve sites to others directly. *Doors* can: public nodes that also run a
 site store ([`sites/`](../sites/README.md)), which keep the sites `.csd` names point to and serve them
-to anyone. With *Help keep sites up* on (the default), the app:
+to anyone.
 
-- keeps each site it opens as a `.car` file, and reads sites from the doors first (IPFS gateways are a
-  fallback);
-- gives every site it has, and the release of Commonplace it carries, to any door that doesn't have
-  it yet, over connections it makes itself, so it works from behind any router.
+- **Your sites:** each site you open is kept on this computer, listed in the window, and read from
+  the doors first (IPFS gateways are a fallback). *Forget* removes it.
+- **Help keep it up:** a switch on each site. On, the app gives that site to any door that doesn't
+  have it yet, over connections it makes itself, so it works from behind any router. It's off for
+  every site you open, since a name can point anywhere and passing a site on helps publish it, and
+  on for the Commonplace the app carries.
+- **Your own site:** *Settings, Put your site on the doors* gives the doors a `.car` you made
+  (`npx ipfs-car pack <folder>`, say), once a name points to it.
 
-So a site whose author opens it once in the app reaches the doors, and stays up with nobody's own
-server. *Put a site on the doors* does the same for a `.car` you made yourself (`npx ipfs-car pack
-<folder>`, say), once a name points to it. Whoever downloads a site checks every block against the
-address its name points to, so a door is trusted with nothing. A door keeps a site only while a name
-points to it.
+Whoever downloads a site checks every block against the address its name points to, so a door is
+trusted with nothing. A door keeps a site only while a name points to it, and its operator can
+refuse any site.
 
 The doors it knows are in `app/doors.txt`. Anyone can run one: see the
 [door guide](../docs/public-node.md).

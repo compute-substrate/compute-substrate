@@ -48,6 +48,25 @@
   .switch input:checked + i::after { transform: translateX(16px); }
   .actions { display: flex; gap: 8px; margin-top: 14px; }
   footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  .go { display: flex; gap: 8px; margin: 16px 0 4px; }
+  .go input { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; }
+  .go input:focus { outline: none; border-color: var(--accent); }
+  .go button { padding: 9px 16px; border-radius: 10px; font-size: 14px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 2px; min-height: 18px; }
+  h2 { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 22px 2px 4px; }
+  .site { display: flex; align-items: center; gap: 12px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
+  .site:last-child { border-bottom: 0; }
+  .site .what { flex: 1; min-width: 0; }
+  .site .what b { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .site small { color: var(--muted); display: block; }
+  .link { background: none; border: 0; padding: 0; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .link:hover { color: var(--ink); }
+  details.settings { margin-top: 22px; border-top: 1px solid var(--line); }
+  details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 12px 2px; }
+  details.settings > summary::-webkit-details-marker { display: none; }
+  details.settings > summary::before { content: "▸ "; }
+  details.settings[open] > summary::before { content: "▾ "; }
+  .field { width: 110px; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -64,46 +83,45 @@
     </div>
   </section>
 
-  <div class="facts">
-    <div><b id="height">–</b><span>blocks checked</span></div>
-    <div><b id="peers">–</b><span>connected nodes</span></div>
-  </div>
+  <form class="go" id="nameForm">
+    <input id="nameInput" placeholder="Go to a name, like commonplace" spellcheck="false" autocomplete="off" aria-label="A .csd name">
+    <button class="primary">Open</button>
+  </form>
+  <p class="hint" id="nameStatus">Sites and pages named on the network, opened through your own node</p>
 
-  <div class="row">
-    <div>Apps on this computer can use it at<small><code id="rpc">http://127.0.0.1:8789</code></small></div>
-    <button id="copy">Copy</button>
-  </div>
-  <div class="row">
-    <div>Commonplace<small>Runs on this computer, on your own node. No website needed.<br>One example of an app on the network; anyone can build others.</small></div>
-    <button id="commonplace">Open</button>
-  </div>
-  <div class="row">
-    <div>Help keep sites up<small id="sharingStatus">Passes the sites your app has on to the doors, so they stay up with no server</small></div>
-    <label class="switch"><input type="checkbox" id="sharing"><i></i></label>
-  </div>
-  <div class="row">
-    <div style="flex:1">Put a site on the doors<small id="putStatus">Your own site, as a .car file, once a .csd name points to it</small></div>
-    <input type="file" id="putFile" accept=".car" hidden>
-    <button id="put">Choose</button>
-  </div>
-  <div class="row">
-    <div>Start when I log in<small>Keeps your node running in the background</small></div>
-    <label class="switch"><input type="checkbox" id="autostart"><i></i></label>
-  </div>
-  <div class="row">
-    <div>Its data<small>A full copy of the network, checked block by block</small></div>
-    <button id="folder">Show</button>
-  </div>
-  <form class="row" id="peerForm">
-    <div style="flex:1">Add a peer<small id="peerStatus">If it can't find other nodes, paste one's address</small></div>
-    <input id="peerInput" placeholder="/ip4/…/tcp/17999/p2p/…" spellcheck="false" autocomplete="off" style="width:110px;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)">
-    <button>Add</button>
-  </form>
-  <form class="row" id="nameForm">
-    <div style="flex:1">Go to a name<small id="nameStatus">Sites and pages named on the network, opened through your own node</small></div>
-    <input id="nameInput" placeholder="commonplace" spellcheck="false" autocomplete="off" style="width:110px;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)">
-    <button>Open</button>
-  </form>
+  <h2>Your sites</h2>
+  <div id="sites"></div>
+  <p class="hint">Each site you open is kept here. <i>Help keep it up</i> passes it on to the doors, so it stays up with no server.</p>
+
+  <details class="settings" id="settingsBox">
+    <summary>Settings</summary>
+    <div class="facts">
+      <div><b id="height">–</b><span>blocks checked</span></div>
+      <div><b id="peers">–</b><span>connected nodes</span></div>
+    </div>
+    <div class="row">
+      <div>Apps on this computer can use it at<small><code id="rpc">http://127.0.0.1:8789</code></small></div>
+      <button id="copy">Copy</button>
+    </div>
+    <div class="row">
+      <div>Start when I log in<small>Keeps your node running in the background</small></div>
+      <label class="switch"><input type="checkbox" id="autostart"><i></i></label>
+    </div>
+    <div class="row">
+      <div>Its data<small>A full copy of the network, checked block by block</small></div>
+      <button id="folder">Show</button>
+    </div>
+    <form class="row" id="peerForm">
+      <div style="flex:1">Add a peer<small id="peerStatus">If it can't find other nodes, paste one's address</small></div>
+      <input id="peerInput" class="field" placeholder="/ip4/…/tcp/17999/p2p/…" spellcheck="false" autocomplete="off">
+      <button>Add</button>
+    </form>
+    <div class="row">
+      <div style="flex:1">Put your site on the doors<small id="putStatus">A .car file of your site, once a .csd name points to it</small></div>
+      <input type="file" id="putFile" accept=".car" hidden>
+      <button id="put">Choose</button>
+    </div>
+  </details>
 
   <footer>Your node checks every block itself and passes them on to others. Closing this window stops it cleanly.</footer>
 
@@ -161,7 +179,6 @@
   $("copy").onclick = async () => {
     try { await navigator.clipboard.writeText(rpc); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1500); } catch {}
   };
-  $("commonplace").onclick = async () => invoke("plugin:opener|open_url", { url: await invoke("site_url") });
   $("folder").onclick = $("log").onclick = () => invoke("open_data_folder");
   $("retry").onclick = async () => { show("busy", "Starting…", ""); $("failActions").hidden = true; try { await invoke("restart"); } catch {} tick(); };
 
@@ -192,11 +209,11 @@
           }
           // and helped to stay up from here on, when that's on
           await invoke("site_keep_car", car, { headers: { "x-cid": ipfs } }).catch(() => {});
-          if ($("sharing").checked) seed(ipfs).then(sharing);
         }
         url = await invoke("site_open", { name: r.name, cid: ipfs });
       }
       st.textContent = `Opening ${r.name}.csd`;
+      renderSites();
       await invoke("plugin:opener|open_url", { url });
     } catch (e) { st.textContent = String(e && e.message || e); }
   }
@@ -238,30 +255,49 @@
     onDoors.set(cid, n);
     return n;
   }
+  // Your sites: each one opened by name, and the Commonplace the app carries, with whether it's
+  // passed on to the doors (each its owner's choice) and a way to forget it
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   let seededAt = 0;
-  async function seedAll() {
-    seededAt = Date.now();
-    let s; try { s = await invoke("sharing_state"); } catch { return; }
-    if (!s.on) return;
-    for (const cid of s.sites) await seed(cid);
-    sharing();
+  async function renderSites() {
+    let list; try { list = await invoke("kept_sites"); } catch { return; }
+    list.sort((a, b) => (b.carried - a.carried) || (a.names[0] ?? "").localeCompare(b.names[0] ?? ""));
+    $("sites").innerHTML = list.length ? list.map((x, i) => {
+      const title = x.carried ? "Commonplace" : x.names.length ? x.names.map(n => n + ".csd").join(", ") : "A site no name points to now";
+      const doorsN = onDoors.get(x.cid);
+      const sub = !x.helping ? (x.carried ? "One example of an app on the network; it runs on this computer" : "Kept for you")
+        : doorsN == null ? "Helping keep it up…" : doorsN ? `Helping keep it up, on ${doorsN === 1 ? "1 door" : doorsN + " doors"}` : "Helping keep it up, once a door answers";
+      return `<div class="site">
+        <div class="what"><b>${esc(title)}</b><small>${esc(sub)}${x.carried ? "" : ` <button class="link" data-forget="${i}">Forget</button>`}</small></div>
+        ${x.carried || x.names.length ? `<button data-open="${i}">Open</button>` : ""}
+        <label class="switch" title="Help keep it up"><input type="checkbox" data-help="${i}" ${x.helping ? "checked" : ""}><i></i></label>
+      </div>`;
+    }).join("") : `<p class="hint">Sites you open by name show up here.</p>`;
+    $("sites").querySelectorAll("[data-open]").forEach(b => b.onclick = async () => {
+      const x = list[+b.dataset.open];
+      if (x.carried) invoke("plugin:opener|open_url", { url: await invoke("site_url") });
+      else openName(x.names[0]);
+    });
+    $("sites").querySelectorAll("[data-help]").forEach(c => c.onchange = async () => {
+      const x = list[+c.dataset.help];
+      await invoke("set_helping", { cid: x.cid, on: c.checked }).catch(() => {});
+      if (c.checked) { onDoors.delete(x.cid); renderSites(); await seed(x.cid); }
+      renderSites();
+    });
+    $("sites").querySelectorAll("[data-forget]").forEach(b => b.onclick = async () => {
+      const x = list[+b.dataset.forget];
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Forget it? Click again"; return; }
+      await invoke("forget_site", { cid: x.cid }).catch(() => {});
+      onDoors.delete(x.cid);
+      renderSites();
+    });
+    // the sites you help with go to any door that lacks them: a few seconds in, then every 6 hours
+    if (Date.now() - seededAt > (seededAt === 0 ? 3_000 : 6 * 3_600_000)) {
+      seededAt = Date.now();
+      for (const x of list.filter(x => x.helping)) await seed(x.cid);
+      renderSites();
+    }
   }
-  async function sharing() {
-    let s; try { s = await invoke("sharing_state"); } catch { return; }
-    $("sharing").checked = s.on;
-    const kept = s.sites.length, up = s.sites.filter(c => onDoors.get(c) > 0).length;
-    const n = k => `${k} ${k === 1 ? "site" : "sites"}`;
-    $("sharingStatus").textContent = !s.on ? "Off. Your app keeps sites for you only"
-      : onDoors.size === 0 ? `Passes the ${n(kept)} your app has on to the doors, so they stay up with no server`
-      : `${n(up)} of ${kept} on the doors, so they stay up with no server`;
-    // the first round a few seconds in, then every 6 hours
-    if (s.on && Date.now() - seededAt > (seededAt === 0 ? 5_000 : 6 * 3_600_000)) seedAll();
-  }
-  $("sharing").onchange = async e => {
-    try { await invoke("set_sharing", { on: e.target.checked }); } catch (err) { $("sharingStatus").textContent = String(err); }
-    if (e.target.checked) seededAt = 0;
-    sharing();
-  };
 
   // An author's own site: a .car they made (npx ipfs-car pack <folder>, or their build's), checked
   // here, kept, and given to the doors
@@ -289,11 +325,11 @@
       onDoors.set(cid, ok);
       st.textContent = ok ? `On ${ok} ${ok === 1 ? "door" : "doors"}: ipfs://${cid}. It stays up as long as a .csd name points to it.`
         : `Not taken: ${said.find(Boolean) ?? "no door answered"} Its address: ipfs://${cid}`;
-      sharing();
+      renderSites();
     } catch (err) { st.textContent = String(err && err.message || err); }
   };
-  sharing();
-  setInterval(sharing, 15000);
+  renderSites();
+  setInterval(renderSites, 60000);
   listen("node-changed", tick);
   tick();
   setInterval(tick, 3000);

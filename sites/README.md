@@ -21,6 +21,10 @@ POST /sites/<cid>.car   give this door a site
 GET  /sites             what this door keeps
 ```
 
+- **What it won't keep:** `--deny <file>`, a list of CIDs and `.csd` names, one per line. Read again
+  every minute; listed sites are dropped at once and refused from then on. A door is a host, and
+  its operator answers for what it serves.
+
 Run it beside a node, behind the same web server as the node's public RPC. The
 [door guide](../docs/public-node.md) has the steps.
 

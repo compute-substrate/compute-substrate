@@ -144,7 +144,13 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload && sudo systemctl enable --now csd-sites
 ```
 
-`--node` is your node's RPC address. The Caddyfile above already passes `/sites` to it: reload
+`--node` is your node's RPC address.
+
+**What you serve is yours to answer for.** A door is a host: whatever it keeps, it serves to anyone.
+List anything you won't keep in a deny file, one CID or `.csd` name per line, and add
+`--deny /etc/csd/deny.txt` to the command. It's read again every minute; a listed site is dropped at
+once and refused from then on, and a listed name's sites go with it. Readers then fetch those sites
+from other doors, or not at all; nothing on the network changes. The Caddyfile above already passes `/sites` to it: reload
 Caddy, and check from somewhere else:
 
 ```bash
