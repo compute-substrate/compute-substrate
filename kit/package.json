@@ -1,6 +1,6 @@
 {
   "name": "compute-substrate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Build on Compute Substrate: read any topic from any node, check every record against the proof-of-work yourself, and write records signed by your own key or a wallet. No server, no account.",
   "type": "module",
   "main": "dist/index.js",

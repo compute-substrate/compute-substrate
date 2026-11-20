@@ -110,8 +110,11 @@ export function keySigner(net: Network, privateKey: Hex): Signer {
 // in its own window. Resolves once the wallet is found and the person has connected it.
 export async function cairnSigner(timeoutMs = 4000): Promise<Signer> {
   const provider = await new Promise<CairnProvider>((resolve, reject) => {
-    const t = setTimeout(() => { stop(); reject(new Error("Cairn Wallet isn't installed in this browser.")); }, timeoutMs);
-    const stop = discoverCairn(p => { clearTimeout(t); stop(); resolve(p); });
+    // the wallet can answer at once, before discoverCairn has returned, so stopping waits for it
+    let found: CairnProvider | null = null, stop: (() => void) | null = null;
+    const t = setTimeout(() => { stop?.(); reject(new Error("Cairn Wallet isn't installed in this browser.")); }, timeoutMs);
+    stop = discoverCairn(p => { if (found) return; found = p; clearTimeout(t); stop?.(); resolve(p); });
+    if (found) stop();
   });
   const address = await cairnConnect(provider);
   return { address, send: (app, fee) => cairnSubmit(provider, app, fee) };
