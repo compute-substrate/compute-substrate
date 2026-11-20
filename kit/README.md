@@ -9,16 +9,17 @@ npm install compute-substrate
 ```
 
 ```js
-import { connect, keySigner, newKey } from "compute-substrate";
+import { connect, browserKey } from "compute-substrate";
 
 const net = connect();                                   // a public node; or connect({ node: "http://127.0.0.1:8789" })
 const entries = await net.read("guestbook.example");     // newest first, each one checked
-const me = keySigner(net, newKey());                     // keep the key; send a little CSD to me.address
-await net.write(me, "guestbook.example", "Hello from my own app");
+const me = browserKey("guestbook");                      // a writing key, kept in this browser
+await net.write(me.signer(net), "guestbook.example", "Hello from my own app");  // once me.address holds a little CSD
 ```
 
 Or skip npm entirely: [`template/`](template) is a whole app, a guestbook, in one static page. Copy
-the folder, change the topic, host it anywhere.
+the folder, change the topic, host it anywhere. To try it, serve the folder (`python3 -m http.server`
+in it) and open `http://localhost:8000`; opened straight from disk, the browser won't load its script.
 
 ## How it works, in five lines
 
@@ -36,6 +37,17 @@ the folder, change the topic, host it anywhere.
 - **Bigger things live elsewhere.** Put files on IPFS or Arweave, and write their address with
   `payloadHash` set to their hash, so readers can check them too.
 
+## A writing key
+
+The simplest way to let people write is no wallet at all. `browserKey()` makes a key the first time
+someone visits and keeps it in their browser. Your page shows its address and says "send CSD here to
+write". Or it takes an invite link with `claimInvite()`, so a newcomer can start with nothing.
+
+Think of it as a spending wallet: a little CSD for writing, topped up from wherever someone keeps
+the rest. It's only as safe as the browser's storage (clearing site data loses it), so keep small
+amounts on it and offer `backup()` and `restore()`, as the template does. For more than that, or one
+identity across apps, sign with a wallet instead (`cairnSigner()`).
+
 ## The API
 
 | | |
@@ -46,6 +58,8 @@ the folder, change the topic, host it anywhere.
 | `net.write(signer, domain, text, { payloadHash?, fee? })` | write a record; returns its id. It shows from the next block, about 2 minutes |
 | `net.attest(signer, id, score, { confidence?, fee? })` | attest to a record with a number your app gives meaning to |
 | `net.balance(address)` | CSD at an address |
+| `browserKey(app?)` | the writing key this browser keeps for your app: `address`, `signer(net)`, `backup()`, `restore(hex)`, `forget()`, and `kept` (false in a private window) |
+| `claimInvite(net, link, address)` | move an invite link's CSD onto an address; a link like `…/#/invite/<code>`, as Commonplace makes, or the bare code |
 | `newKey()` | a fresh private key (hex) |
 | `keySigner(net, privateKey)` | sign with a key you hold |
 | `cairnSigner()` | sign with [Cairn Wallet](https://cairn-substrate.com), approving each record in its window |

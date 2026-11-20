@@ -7,7 +7,8 @@
 <!--
   A whole app on Compute Substrate in one page: no server, no database, no account. It reads a
   topic from a node, checks every entry against the network's proof-of-work in your browser, and
-  writes entries signed by a key kept in this browser (or by Cairn Wallet).
+  writes entries signed by a writing key kept in this browser: send it a little CSD, or an invite
+  link, and it writes.
 
   To make it yours: change TOPIC below, change the page, and host the folder anywhere (any static
   host, or IPFS). compute-substrate.js is the kit, built (npm run build in kit/, then copy
@@ -44,10 +45,20 @@
     <textarea id="text" maxlength="500" placeholder="Leave a line…"></textarea>
     <div class="row">
       <button class="primary" id="sign">Sign the guestbook</button>
-      <button id="cairn">Use Cairn Wallet</button>
       <span class="muted" id="status"></span>
     </div>
-    <p class="muted">Writing costs 0.25 CSD. <span id="who"></span> <code id="addr"></code> holds <span id="bal">…</span> CSD.<span id="topup"> Send it a little CSD to sign, or use Cairn Wallet.</span></p>
+  </section>
+
+  <section class="card">
+    <p><strong>Your writing key</strong> <span class="muted">holds <span id="bal">…</span> CSD. Each entry costs 0.25.</span></p>
+    <p class="muted">Send CSD here to write, from any wallet:</p>
+    <div class="row"><code id="addr"></code><button id="copy">Copy</button></div>
+    <div class="row"><input id="invite" placeholder="Or paste an invite link" style="flex:1;min-width:200px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)"><button id="claim">Use invite</button></div>
+    <details class="muted">
+      <summary>Back up or restore this key</summary>
+      <p style="margin-top:8px">It lives only in this browser. Clearing site data loses it, and the CSD on it. Keep small amounts here, and a copy of the key somewhere safe: whoever has it can write as you and spend its CSD.</p>
+      <div class="row" style="margin-top:8px"><button id="backup">Copy key</button><input id="restoreText" placeholder="Paste a key to restore" style="flex:1;min-width:200px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)"><button id="restore">Restore</button></div>
+    </details>
   </section>
 
   <section id="list" aria-live="polite"><p class="muted">Reading the network…</p></section>
@@ -55,27 +66,23 @@
 </main>
 
 <script type="module">
-  import { connect, keySigner, cairnSigner, newKey } from "./compute-substrate.js";
+  import { connect, browserKey, claimInvite } from "./compute-substrate.js";
 
   // Your app's topic: records in it are your app's data. Pick a name no one else uses.
   const TOPIC = "guestbook.example";
 
   const $ = id => document.getElementById(id);
+  const say = t => { $("status").textContent = t; };
   const net = connect({ node: new URLSearchParams(location.search).get("node") ?? undefined });
   $("node").textContent = net.node;
 
-  // a key for this browser, made once and kept (whoever has it can write as you)
-  let priv = null;
-  try { priv = localStorage.getItem("guestbook.key"); if (!priv) { priv = newKey(); localStorage.setItem("guestbook.key", priv); } } catch { priv = newKey(); }
-  // Signing works two ways: with a key this page made and keeps in this browser (send it a little
-  // CSD and it signs on its own), or with Cairn Wallet, which keeps the key itself
-  let signer = keySigner(net, priv), viaCairn = false;
-  const showSigner = async () => {
-    $("who").textContent = viaCairn ? "Signing with Cairn Wallet:" : "Signing with a key kept in this browser:";
-    $("addr").textContent = signer.address;
-    let bal = null;
-    try { bal = await net.balance(signer.address); $("bal").textContent = String(bal); } catch { $("bal").textContent = "?"; }
-    $("topup").hidden = bal !== 0 || viaCairn;
+  // A writing key, kept in this browser: like a spending wallet, topped up with a little CSD from
+  // wherever you keep the rest. No wallet to install, no button to connect. (To sign with Cairn
+  // Wallet instead, use cairnSigner() from the kit.)
+  const me = browserKey("guestbook");
+  const showKey = async () => {
+    $("addr").textContent = me.address;
+    try { $("bal").textContent = String(await net.balance(me.address)); } catch { $("bal").textContent = "?"; }
   };
 
   const short = a => `${a.slice(0, 6)}…${a.slice(-4)}`;
@@ -86,7 +93,7 @@
       $("list").innerHTML = entries.length ? entries.map(e => `
         <article class="card entry">
           <p>${esc(e.text)}</p>
-          <div class="meta"><span>${short(e.author)}</span><span>${new Date(e.time * 1000).toLocaleString()}</span><span class="ok" title="Signed by its author, and in a block with the network's proof-of-work above it">✓ checked</span></div>
+          <div class="meta"><span>${short(e.author)}</span><span>${new Date(e.time * 1000).toLocaleString()}</span><span class="ok" title="Written by its author, and in a block with the network's proof-of-work above it">✓ checked</span></div>
         </article>`).join("") : `<p class="muted">No entries yet. Be the first.</p>`;
     } catch (e) { $("list").innerHTML = `<p class="bad">Couldn't read the network: ${esc(String(e.message ?? e))}</p>`; }
   }
@@ -94,21 +101,29 @@
   $("sign").onclick = async () => {
     const text = $("text").value.trim();
     if (!text) return;
-    $("status").textContent = "Signing…";
+    say("Signing…");
     try {
-      await net.write(signer, TOPIC, text);
+      await net.write(me.signer(net), TOPIC, text);
       $("text").value = "";
-      $("status").textContent = "Signed. It shows with the next block, in about two minutes.";
+      say("Signed. It shows with the next block, in about two minutes.");
       setTimeout(load, 130_000);
-    } catch (e) { $("status").textContent = String(e.message ?? e); }
-    showSigner();
+    } catch (e) { say(String(e.message ?? e)); }
+    showKey();
   };
-  $("cairn").onclick = async () => {
-    try { signer = await cairnSigner(); viaCairn = true; $("status").textContent = "Connected."; $("cairn").hidden = true; showSigner(); }
-    catch (e) { $("status").textContent = String(e.message ?? e); }
+  const useInvite = async link => {
+    say("Taking the invite…");
+    try { const r = await claimInvite(net, link, me.address); say(`${r.csd} CSD is on its way to your writing key. You can write once it's in a block, in about two minutes.`); setTimeout(showKey, 130_000); }
+    catch (e) { say(String(e.message ?? e)); }
   };
+  $("claim").onclick = () => { const v = $("invite").value.trim(); if (v) { useInvite(v); $("invite").value = ""; } };
+  // an invite link to this page (…/#/invite/<code>) is taken as it opens
+  if (/#\/invite\//.test(location.hash)) { useInvite(location.hash); history.replaceState(null, "", location.pathname + location.search); }
+  $("copy").onclick = () => navigator.clipboard?.writeText(me.address).then(() => say("Address copied."));
+  $("backup").onclick = () => navigator.clipboard?.writeText(me.backup()).then(() => say("Key copied. Keep it somewhere safe."));
+  $("restore").onclick = () => { try { me.restore($("restoreText").value); $("restoreText").value = ""; say("Restored."); showKey(); } catch (e) { say(String(e.message ?? e)); } };
 
-  showSigner();
+  if (!me.kept) say("This browser won't keep the key (a private window?), so it lasts this visit only.");
+  showKey();
   load();
   setInterval(load, 120_000);
 </script>
