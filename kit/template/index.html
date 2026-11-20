@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>A guestbook on Compute Substrate</title>
+<title>Guestbook</title>
 <!--
   A whole app on Compute Substrate in one page: no server, no database, no account. It reads a
   topic from a node, checks every entry against the network's proof-of-work in your browser, and
@@ -15,59 +15,67 @@
   dist/compute-substrate.js here).
 -->
 <style>
-  :root { --bg: #f6f4ef; --card: #fff; --ink: #1d1c1a; --muted: #6b6760; --line: #e3dfd6; --accent: #2f6f5e; --bad: #a24a3a; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #121314; --card: #1b1c1e; --ink: #ecebe7; --muted: #9b978f; --line: #2c2d30; --accent: #6fc2a6; --bad: #e08a78; } }
+  :root { --bg: #fbfaf7; --ink: #1f1e1b; --muted: #8a857c; --line: #e8e4dc; --field: #f3f1ec; --accent: #2f6f5e; --bad: #a24a3a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #141516; --ink: #ecebe7; --muted: #8f8b84; --line: #26272a; --field: #1c1d1f; --accent: #6fc2a6; --bad: #e08a78; color-scheme: dark; } }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
-  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; display: flex; flex-direction: column; gap: 20px; }
-  h1 { margin: 0; font-size: 28px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 56px 20px 72px; display: flex; flex-direction: column; gap: 28px; }
+  h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -0.01em; }
   p { margin: 0; }
   .muted { color: var(--muted); font-size: 14px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
-  textarea { width: 100%; min-height: 80px; font: inherit; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
-  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
-  button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .entry .meta { color: var(--muted); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .small { color: var(--muted); font-size: 13px; }
+  textarea, input { width: 100%; font: inherit; color: var(--ink); background: var(--field); border: 1px solid transparent; border-radius: 10px; padding: 12px 14px; outline: none; }
+  textarea { min-height: 84px; resize: vertical; }
+  textarea:focus, input:focus { border-color: var(--line); }
+  button { font: inherit; font-size: 15px; padding: 8px 16px; border-radius: 999px; border: 0; background: var(--ink); color: var(--bg); cursor: pointer; }
+  button.link { background: none; color: var(--muted); padding: 0; border-radius: 0; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
+  button.link:hover, button.link:focus-visible { color: var(--ink); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .compose { display: flex; flex-direction: column; gap: 10px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  #status:empty { display: none; }
+  #status { font-size: 14px; color: var(--muted); }
+  .panel { display: flex; flex-direction: column; gap: 14px; padding: 16px 0 4px; border-top: 1px solid var(--line); }
+  [hidden] { display: none !important; }
+  .panel .row { display: flex; gap: 8px; align-items: center; }
+  .panel .row input { padding: 8px 12px; font-size: 14px; }
+  .panel .row button:not(.link) { font-size: 14px; padding: 7px 14px; white-space: nowrap; background: var(--field); color: var(--ink); }
+  code { font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .entries { display: flex; flex-direction: column; }
+  .entry { padding: 18px 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+  .entry:last-child { border-bottom: 1px solid var(--line); }
+  .entry p { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
   .ok { color: var(--accent); }
   .bad { color: var(--bad); }
-  code { font-size: 13px; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
 <main>
-  <header>
+  <header style="display:flex;flex-direction:column;gap:6px">
     <h1>Guestbook</h1>
-    <p class="muted">Kept on Compute Substrate. Every entry below was checked by your own browser against the network's proof-of-work, so no server has to be trusted.</p>
+    <p class="muted">Kept on Compute Substrate. Your browser checks every entry against the network itself, so no server has to be trusted.</p>
   </header>
 
-  <section class="card">
-    <textarea id="text" maxlength="500" placeholder="Leave a line…"></textarea>
-    <div class="row">
-      <button class="primary" id="sign">Sign the guestbook</button>
-      <span class="muted" id="status"></span>
+  <section class="compose">
+    <textarea id="text" maxlength="500" placeholder="Leave a line…" aria-label="Your entry"></textarea>
+    <div class="bar">
+      <button class="link" id="keyToggle" aria-expanded="false" aria-controls="panel">Writing key <span id="bal">…</span> CSD</button>
+      <button id="sign">Sign</button>
+    </div>
+    <p id="status" aria-live="polite"></p>
+    <div class="panel" id="panel" hidden>
+      <p class="small">A key kept in this browser writes your entries. Each one costs 0.25 CSD. Send CSD to it from any wallet:</p>
+      <div class="row"><code id="addr" style="flex:1"></code><button class="link" id="copy">Copy</button></div>
+      <div class="row"><input id="invite" placeholder="Or paste an invite link" aria-label="Invite link"><button id="claim">Use</button></div>
+      <p class="small">Clearing this site's data loses the key and its CSD, so keep small amounts here. <button class="link" id="backup">Copy key</button></p>
+      <div class="row"><input id="restoreText" placeholder="Paste a key to restore it" aria-label="Key to restore"><button id="restore">Restore</button></div>
+      <p class="small">Welcome the next person: leave invites, and someone new can write right away. <span id="waiting"></span> <button class="link" id="give">Leave 5 of 1 CSD</button></p>
     </div>
   </section>
 
-  <section class="card">
-    <p><strong>Your writing key</strong> <span class="muted">holds <span id="bal">…</span> CSD. Each entry costs 0.25.</span></p>
-    <p class="muted">Send CSD here to write, from any wallet:</p>
-    <div class="row"><code id="addr"></code><button id="copy">Copy</button></div>
-    <div class="row"><input id="invite" placeholder="Or paste an invite link" style="flex:1;min-width:200px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)"><button id="claim">Use invite</button></div>
-    <details class="muted">
-      <summary>Welcome the next person</summary>
-      <p style="margin-top:8px">Leave a few invites from your writing key. Someone opening this page for the first time with nothing on their key takes one, and can write right away. <span id="waiting"></span></p>
-      <div class="row" style="margin-top:8px"><button id="give">Leave 5 invites of 1 CSD</button></div>
-    </details>
-    <details class="muted">
-      <summary>Back up or restore this key</summary>
-      <p style="margin-top:8px">It lives only in this browser. Clearing site data loses it, and the CSD on it. Keep small amounts here, and a copy of the key somewhere safe: whoever has it can write as you and spend its CSD.</p>
-      <div class="row" style="margin-top:8px"><button id="backup">Copy key</button><input id="restoreText" placeholder="Paste a key to restore" style="flex:1;min-width:200px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)"><button id="restore">Restore</button></div>
-    </details>
-  </section>
-
-  <section id="list" aria-live="polite"><p class="muted">Reading the network…</p></section>
-  <p class="muted">Reading through <code id="node"></code>. Add <code>?node=http://127.0.0.1:8789</code> to read through your own node.</p>
+  <section class="entries" id="list" aria-live="polite"><p class="muted">Reading the network…</p></section>
+  <p class="small">Reading through <code id="node"></code>. Add <code>?node=…</code> to read through your own.</p>
 </main>
 
 <script type="module">
@@ -99,9 +107,9 @@
     try {
       const entries = await net.read(TOPIC, { limit: 100 }); // each one checked; anything that doesn't prove is left out
       $("list").innerHTML = entries.length ? entries.map(e => `
-        <article class="card entry">
+        <article class="entry">
           <p>${esc(e.text)}</p>
-          <div class="meta"><span>${short(e.author)}</span><span>${new Date(e.time * 1000).toLocaleString()}</span><span class="ok" title="Written by its author, and in a block with the network's proof-of-work above it">✓ checked</span></div>
+          <div class="meta"><span>${short(e.author)}</span><span>${new Date(e.time * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span><span class="ok" title="Written by its author, and in a block with the network's proof-of-work above it">✓ checked</span></div>
         </article>`).join("") : `<p class="muted">No entries yet. Be the first.</p>`;
     } catch (e) { $("list").innerHTML = `<p class="bad">Couldn't read the network: ${esc(String(e.message ?? e))}</p>`; }
   }
@@ -132,7 +140,7 @@
   $("restore").onclick = () => { try { me.restore($("restoreText").value); $("restoreText").value = ""; say("Restored."); showKey(); } catch (e) { say(String(e.message ?? e)); } };
 
   const showWaiting = async () => {
-    try { const n = (await openInvites(net, INVITES)).length; $("waiting").textContent = n ? `${n} waiting now.` : "None waiting now."; } catch {}
+    try { const n = (await openInvites(net, INVITES)).length; $("waiting").textContent = n ? `${n} waiting now.` : ""; } catch {}
   };
   $("give").onclick = async () => {
     say("Leaving invites…");
@@ -143,6 +151,7 @@
   if (!me.kept) say("This browser won't keep the key (a private window?), so it lasts this visit only.");
   // someone new, with nothing on their key: take one of the invites left for newcomers
   else if (!invited) welcome(net, me, INVITES).then(r => { if (r) { say(`Welcome! Someone left you ${r.csd} CSD to write with. It's ready in about two minutes.`); setTimeout(showKey, 130_000); } }).catch(() => {});
+  $("keyToggle").onclick = () => { const p = $("panel"); p.hidden = !p.hidden; $("keyToggle").setAttribute("aria-expanded", String(!p.hidden)); };
   showKey();
   showWaiting();
   load();
