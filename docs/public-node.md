@@ -97,8 +97,9 @@ setup above, and nothing else.
 
 ## Letting people use it
 
-Give the address out: in a post, in your app, to friends. In Commonplace, anyone can paste it as
-their node, and in the kit it's `connect({ node: "https://csd.example.org" })`. Pages check every
+Give the address out: in a post, in your app, to friends. If you hold a `.csd` name, put the address
+in its profile under `csd.rpc`, and people can choose your door by your name. In Commonplace, anyone
+can paste the address or the name as their node, and in the kit it's `connect({ node: "https://csd.example.org" })`. Pages check every
 answer, so a door can be listed anywhere without vouching for whoever runs it.
 
 What it costs: a small machine is enough (the node is the heavy part, the door adds almost nothing),
