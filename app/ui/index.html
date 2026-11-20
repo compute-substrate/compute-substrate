@@ -78,6 +78,10 @@
     <button id="commonplace">Open</button>
   </div>
   <div class="row">
+    <div>Share the sites you open<small id="sharingStatus">Keeps them up for others over IPFS, with no server</small></div>
+    <label class="switch"><input type="checkbox" id="sharing"><i></i></label>
+  </div>
+  <div class="row">
     <div>Start when I log in<small>Keeps your node running in the background</small></div>
     <label class="switch"><input type="checkbox" id="autostart"><i></i></label>
   </div>
@@ -177,10 +181,12 @@
         // its site: downloaded from IPFS and checked here (once), then served from this computer
         if (!(await invoke("site_kept", { cid: ipfs }))) {
           st.textContent = `Getting ${r.name}.csd's site from IPFS and checking it…`;
-          const files = await CsdResolver.fetchSite(ipfs);
+          const { files, car } = await CsdResolver.fetchSite(ipfs);
           for (const [path, bytes] of files) {
             await invoke("site_put", bytes, { headers: { "x-cid": ipfs, "x-path": encodeURIComponent(path) } });
           }
+          // and shared from here on, when sharing is on
+          if ($("sharing").checked) invoke("site_share", car, { headers: { "x-cid": ipfs } }).then(sharing).catch(() => {});
         }
         url = await invoke("site_open", { name: r.name, cid: ipfs });
       }
@@ -204,6 +210,22 @@
     dl.onOpenUrl(urls => { if (urls && urls[0]) openName(urls[0]); });
   }
 
+  // sharing the sites this app keeps (and its Commonplace) over IPFS
+  async function sharing() {
+    let s; try { s = await invoke("sharing_state"); } catch { return; }
+    $("sharing").checked = s.on;
+    $("sharingStatus").textContent = !s.on ? "Off. Sites you open are kept for you only"
+      : !s.running ? "Starting IPFS…"
+      : `Sharing ${s.sites} ${s.sites === 1 ? "site" : "sites"} over IPFS, so they stay up with no server`;
+  }
+  $("sharing").onchange = async e => {
+    $("sharingStatus").textContent = e.target.checked ? "Starting IPFS…" : "Stopping…";
+    try { await invoke("set_sharing", { on: e.target.checked }); } catch (err) { $("sharingStatus").textContent = String(err); }
+    sharing();
+  };
+  listen("sharing-changed", sharing);
+  sharing();
+  setInterval(sharing, 15000);
   listen("node-changed", tick);
   tick();
   setInterval(tick, 3000);

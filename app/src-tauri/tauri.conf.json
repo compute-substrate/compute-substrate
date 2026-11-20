@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 http://127.0.0.1:8091 https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
@@ -30,7 +30,8 @@
       "nsis"
     ],
     "externalBin": [
-      "binaries/csd"
+      "binaries/csd",
+      "binaries/ipfs"
     ],
     "icon": [
       "icons/32x32.png",
@@ -52,7 +53,8 @@
       }
     },
     "resources": {
-      "commonplace/": "commonplace/"
+      "commonplace/": "commonplace/",
+      "commonplace.car": "commonplace.car"
     }
   },
   "plugins": {

@@ -59,14 +59,37 @@ export async function filesFromCar(bytes: Uint8Array, root: string): Promise<Map
   return files;
 }
 
-export async function fetchSite(cid: string): Promise<Map<string, Uint8Array>> {
-  let last: unknown = null;
-  for (const gw of GATEWAYS) {
-    try {
-      const r = await fetch(`${gw}/ipfs/${cid}?format=car`, { headers: { accept: "application/vnd.ipld.car" }, signal: AbortSignal.timeout(120_000) });
-      if (!r.ok) throw new Error(`${new URL(gw).host} answered ${r.status}`);
-      return await filesFromCar(new Uint8Array(await r.arrayBuffer()), cid);
-    } catch (e) { last = e; }
-  }
-  throw new Error(`No IPFS gateway had this site, or none sent it intact (${(last as Error)?.message ?? "no answer"}). Whoever runs it needs to keep it pinned.`);
+// This app's own IPFS (Kubo, when sharing is on) asks the IPFS network directly, other Node apps
+// included; the public gateways are a fallback, tried if it hasn't answered in a few seconds.
+const OWN = "http://127.0.0.1:8091";
+const FALLBACK_AFTER = 8_000;
+
+async function fromGateway(gw: string, cid: string, signal: AbortSignal): Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }> {
+  const r = await fetch(`${gw}/ipfs/${cid}?format=car`, { headers: { accept: "application/vnd.ipld.car" }, signal });
+  if (!r.ok) throw new Error(`${new URL(gw).host} answered ${r.status}`);
+  const car = new Uint8Array(await r.arrayBuffer());
+  return { files: await filesFromCar(car, cid), car };
+}
+
+// A site, from whichever source sends it intact first. Returns its files, checked, and the .car
+// they came in, for this app to share on.
+export async function fetchSite(cid: string): Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }> {
+  const stop = new AbortController();
+  const errors: string[] = [];
+  const attempt = (gw: string, delay: number) => new Promise<{ files: Map<string, Uint8Array>; car: Uint8Array }>((resolve, reject) => {
+    const t = setTimeout(() => {
+      const mine = new AbortController();
+      const limit = setTimeout(() => mine.abort(), 120_000);
+      stop.signal.addEventListener("abort", () => mine.abort());
+      fromGateway(gw, cid, mine.signal).finally(() => clearTimeout(limit))
+        .then(resolve, e => { errors.push(String((e as Error)?.message ?? e)); reject(e); });
+    }, delay);
+    stop.signal.addEventListener("abort", () => { clearTimeout(t); reject(new Error("stopped")); });
+  });
+  try {
+    const got = await Promise.any([attempt(OWN, 0), ...GATEWAYS.map((g, i) => attempt(g, FALLBACK_AFTER + i * 2_000))]);
+    return got;
+  } catch {
+    throw new Error(`Nobody sent this site intact (${errors.filter(e => !/stopped|fetch/i.test(e))[0] ?? "no answer"}). Whoever runs it needs to keep it pinned, or have the Node app open.`);
+  } finally { stop.abort(); }
 }

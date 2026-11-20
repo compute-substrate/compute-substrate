@@ -72,9 +72,25 @@ registers itself for those links.
   - It serves each name at an address of its own on this computer (`http://localhost:8801`, the next
     name `8802`, and so on), and opens that in your normal browser. Each name keeps its address, its
     storage and its logins, even when it points to a newer site.
-  - The site must be pinned somewhere on IPFS for a first visit; whoever runs it keeps it pinned.
+  - It asks its own IPFS first (below), and public gateways too if that hasn't answered in a few
+    seconds.
 
 Names are registered and managed on Cairn; the app only reads them.
+
+**Sharing the sites you open.** With *Share the sites you open* on (the default), the app also runs
+[Kubo](https://github.com/ipfs/kubo), the standard IPFS program, and shares every site it has
+opened, and the release of Commonplace it carries, with anyone who asks over IPFS. So a site stays
+up for as long as some of the people who use it have the app open: no server, and no one person
+keeping it pinned. Gateways such as ipfs.io find it there too.
+
+- **Nothing to trust:** whoever downloads a site checks every block against the address its name
+  points to, so a copy from a stranger's computer is as good as the author's.
+- **Light on your connection:** Kubo runs in its low-power mode, with few connections, and announces
+  only what the app pinned. It uses ports of its own (5101, 8091 and 4011), so a Kubo you already
+  run isn't disturbed.
+- **Its data** is in `ipfs/` in the app's folder, up to 2 GB.
+- **Off:** turning the switch off stops Kubo. Sites you open are then kept for you only, and come
+  from public gateways.
 
 It makes the genesis block itself (`csd genesis`, which always gives the same block), so there is
 nothing to download besides the app.
