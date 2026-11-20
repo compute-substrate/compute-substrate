@@ -1,21 +1,24 @@
-# Compute Substrate Node
+# Doorway
 
-A Compute Substrate node on your own computer, with no terminal. Download it, open it, and leave it
-running. It keeps its own full copy of the network, checks every block itself before keeping it, and
-passes blocks and transactions on to other nodes.
+Doorway opens sites named on Compute Substrate, from your own computer. Type a name, like
+`commonplace`, or open `commonplace.localhost` in your browser: Doorway finds where the name points
+through the network itself, fetches the site from any door, checks every byte, and your browser
+shows it. No domain, no certificate authority, and no server anyone has to trust.
 
-While it runs, apps on the same computer can use your node instead of someone else's, at
-`http://127.0.0.1:8789`. For example, Commonplace reads through it when you open
-`https://commonplace.place/?node=http://127.0.0.1:8789` (the app has a button for that).
+It also keeps the sites you open, lets you help keep them up for everyone, and publishes your own
+site from a folder. To do all that it runs a node: its own full copy of the network, every block
+checked here before it's kept.
 
 ## Download
 
-- **macOS** (Apple Silicon and Intel): [Compute-Substrate-Node-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.8/Compute-Substrate-Node-macOS.dmg).
-  Open it and drag the app to Applications.
-- **Windows**: [Compute-Substrate-Node-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.1.8/Compute-Substrate-Node-Windows-setup.exe).
+- **macOS** (Apple Silicon and Intel): [Doorway-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.0/Doorway-macOS.dmg).
+  Open it and drag Doorway to Applications.
+- **Windows**: [Doorway-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.0/Doorway-Windows-setup.exe).
 
-These are version 0.1.2. Newer versions, with their checksums, are on
+Newer versions, with their checksums, are on
 [Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
+Doorway used to be called Compute Substrate Node; it keeps the same data, so if you have that
+installed, delete it after installing Doorway.
 
 ### The first time you open it
 
@@ -23,7 +26,7 @@ The app isn't signed by Apple or Microsoft (that costs money each year and ties 
 person or company), so your computer asks once whether you trust it:
 
 - **macOS:** open it; when macOS says it can't verify the app, click *Done*. Then open *System
-  Settings*, *Privacy & Security*, scroll down to the message about Compute Substrate Node and click
+  Settings*, *Privacy & Security*, scroll down to the message about Doorway and click
   *Open Anyway*.
 - **Windows:** if *Windows protected your PC* appears, click *More info*, then *Run anyway*.
 

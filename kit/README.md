@@ -94,13 +94,13 @@ Any node answers the same questions, and the kit checks what it says, so it does
 it is. Three choices:
 
 - **The public node** (`https://csd.aon.network`), the default.
-- **Your own**, with the [Compute Substrate Node app](../app/README.md): `connect({ node: "http://127.0.0.1:8789" })`.
+- **Your own**, with [Doorway](../app/README.md), which runs one: `connect({ node: "http://127.0.0.1:8789" })`.
 - **Anyone's**, if they run one with its RPC open to browsers (`csd node --rpc-allow-any-origin`).
 
 ## Shipping it
 
 The app is static files: put them on any host, or on IPFS so no host is needed, and give it a `.csd`
-name on Cairn that points to it. With the Compute Substrate Node app, typing the name opens it from the
+name on Cairn that points to it. With [Doorway](../app/README.md), typing the name opens it from the
 visitor's own computer, checked byte for byte.
 
 ## Checks it relies on

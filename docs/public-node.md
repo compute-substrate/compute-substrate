@@ -23,7 +23,7 @@ key's address.
 
 **3. Send that key 0.3 CSD.** As soon as the node has synced far enough to see it, the door announces
 itself on the network: a record under `csd.doors` whose text is its address. That's all it takes to
-be found. The Compute Substrate Node app and every other door read those records, try each door,
+be found. Doorway and every other door read those records, try each door,
 and use the ones that answer. Nobody keeps a list, and nobody approves yours.
 
 Within minutes of syncing, your door copies every site a name points to from the other doors, and
@@ -169,7 +169,7 @@ The site store, [`csd-sites`](../sites/README.md), runs beside the node:
   `ipfs://<CID>`), read from this machine's own node, and for 30 days after. Writing that record
   costs CSD, so nobody can fill your disk with sites no name points to. Up to 64 MB a site, 20 GB in
   all unless you set `--max-gb`.
-- **Where sites come from:** whoever has one gives it to the doors. The Compute Substrate Node app
+- **Where sites come from:** whoever has one gives it to the doors. Doorway
   does it by itself for every site it opens, from behind any router, since it only connects out.
 - **From other doors:** every 10 minutes it copies, from the other announced doors, any site a name
   points to that it doesn't have yet. A new door has every named site within minutes, and a site

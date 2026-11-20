@@ -3,82 +3,101 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Compute Substrate Node</title>
+<title>Doorway</title>
 <style>
+  /* Doorway: calm and plain. One place to type a name, your sites, and everything else folded away. */
   :root {
-    --bg: #f6f5f1; --card: #ffffff; --ink: #1b1d22; --muted: #6b6f78; --line: #e3e1da;
-    --accent: #2f6f5e; --accent-soft: #dcebe5; --warn: #9a3b2a; --warn-soft: #f6e3de;
+    --bg: #f6f4ef; --card: #fffdf9; --ink: #22201c; --muted: #77726a; --line: #e6e1d7;
+    --accent: #2f6a5a; --accent-soft: #dcebe4; --warn: #9a3b2a; --warn-soft: #f6e3de; --busy: #c28a2c;
+    --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #15171b; --card: #1d2026; --ink: #ecebe6; --muted: #9a9ea8; --line: #2c3038;
-      --accent: #6cc3a6; --accent-soft: #1f3a32; --warn: #f0a08f; --warn-soft: #3b231e;
+      --bg: #161614; --card: #1f1f1c; --ink: #edeae3; --muted: #9b968c; --line: #2e2d29;
+      --accent: #74c4a7; --accent-soft: #1f3830; --warn: #f0a08f; --warn-soft: #3b231e; --busy: #e0b259;
     }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--ink); }
-  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 28px 24px 20px; -webkit-user-select: none; user-select: none; }
-  h1 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 18px; }
-  .status { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
-  .big { font-size: 22px; font-weight: 600; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
-  .dot.ok { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
-  .dot.busy { background: #d4a13a; animation: pulse 1.4s ease-in-out infinite; }
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 26px 26px 22px; -webkit-user-select: none; user-select: none; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 26px; }
+  .brand { display: flex; align-items: center; gap: 10px; font: 600 24px/1 var(--display); letter-spacing: -.01em; }
+  .brand svg { width: 26px; height: 26px; color: var(--accent); }
+  .state { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--accent); }
+  .dot.busy { background: var(--busy); animation: pulse 1.4s ease-in-out infinite; }
   .dot.bad { background: var(--warn); }
   @keyframes pulse { 50% { opacity: .35; } }
-  .sub { color: var(--muted); margin: 0; white-space: pre-wrap; }
-  .bar { height: 6px; background: var(--line); border-radius: 3px; margin: 14px 0 2px; overflow: hidden; }
+  @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
+  .status { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin: -12px 0 20px; }
+  .status.ok, .status:not(.bad):not(.busy) { display: none; }
+  .status.bad { border-color: var(--warn); background: var(--warn-soft); }
+  .sub { color: var(--muted); margin: 0; white-space: pre-wrap; font-size: 13px; }
+  .bar { height: 5px; background: var(--line); border-radius: 3px; margin: 10px 0 2px; overflow: hidden; }
   .bar > div { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .6s ease; }
-  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin: 14px 0; }
-  .facts > div { background: var(--card); padding: 12px 16px; }
-  .facts b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
-  .facts span { color: var(--muted); font-size: 12px; }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 2px; border-bottom: 1px solid var(--line); }
-  .row:last-of-type { border-bottom: 0; }
-  .row small { color: var(--muted); display: block; }
-  code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-user-select: text; user-select: text; }
-  button { font: inherit; font-size: 13px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
-  button:hover { border-color: var(--muted); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
-  .switch { position: relative; width: 38px; height: 22px; flex: none; }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .switch i { position: absolute; inset: 0; background: var(--line); border-radius: 11px; cursor: pointer; transition: background .2s; }
-  .switch i::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--card); transition: transform .2s; }
-  .switch input:checked + i { background: var(--accent); }
-  .switch input:checked + i::after { transform: translateX(16px); }
-  .actions { display: flex; gap: 8px; margin-top: 14px; }
-  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
-  .go { display: flex; gap: 8px; margin: 16px 0 4px; }
-  .go input { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; }
-  .go input:focus { outline: none; border-color: var(--accent); }
-  .go button { padding: 9px 16px; border-radius: 10px; font-size: 14px; }
-  .hint { color: var(--muted); font-size: 12px; margin: 0 2px; min-height: 18px; }
-  h2 { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 22px 2px 4px; }
-  .site { display: flex; align-items: center; gap: 12px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
-  .site:last-child { border-bottom: 0; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .go { display: flex; gap: 8px; margin: 0 0 6px; }
+  .go input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .go input::placeholder { color: var(--muted); }
+  .go input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .go button { padding: 0 20px; border-radius: 14px; font-size: 15px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 4px; min-height: 18px; }
+  h2 { font: 600 17px/1.2 var(--display); margin: 28px 2px 8px; }
+  .cards { display: flex; flex-direction: column; gap: 8px; }
+  .site { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
   .site .what { flex: 1; min-width: 0; }
   .site .what b { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .site small { color: var(--muted); display: block; }
+  .site small { color: var(--muted); display: block; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 14px; border: 1px dashed var(--line); border-radius: 12px; text-align: center; }
+  .note { color: var(--muted); font-size: 12px; margin: 10px 4px 0; }
   .link { background: none; border: 0; padding: 0; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .link:hover { color: var(--ink); }
+  button { font: inherit; font-size: 13px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 13px; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
   .publish { margin-top: 12px; }
-  .publish #publishBox { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-  .publish #publishBox p { margin: 0; }
-  .publish .go { margin: 10px 0 4px; }
-  details.settings { margin-top: 22px; border-top: 1px solid var(--line); }
-  details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 12px 2px; }
+  #publishBox { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  #publishBox p { margin: 0; }
+  #publishBox .go { margin: 10px 0 4px; }
+  #publishBox .go input { font-size: 14px; padding: 9px 12px; border-radius: 10px; }
+  #publishBox .go button { border-radius: 10px; font-size: 13px; }
+  .switch { position: relative; width: 38px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .switch i { position: absolute; inset: 0; background: var(--line); border-radius: 11px; cursor: pointer; transition: background .2s; }
+  .switch i::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--card); transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+  .switch input:checked + i { background: var(--accent); }
+  .switch input:checked + i::after { transform: translateX(16px); }
+  .switch input:focus-visible + i { outline: 2px solid var(--accent); outline-offset: 2px; }
+  details.settings { margin-top: 28px; }
+  details.settings > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 8px 2px; }
   details.settings > summary::-webkit-details-marker { display: none; }
   details.settings > summary::before { content: "▸ "; }
   details.settings[open] > summary::before { content: "▾ "; }
-  .field { width: 110px; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; }
+  .group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin-top: 8px; }
+  .group h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 2px; }
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 6px; }
+  .facts b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
+  .facts span { color: var(--muted); font-size: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+  .row small { color: var(--muted); display: block; font-size: 12px; }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-user-select: text; user-select: text; }
+  .field { width: 110px; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); -webkit-user-select: text; user-select: text; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
-  <h1>Compute Substrate Node</h1>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 26 26" fill="none" aria-hidden="true"><path d="M5 24V11a8 8 0 0 1 16 0v13" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M2.5 24h21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M9.5 24v-9.5a3.5 3.5 0 0 1 7 0V24" fill="currentColor" opacity=".22"/></svg>
+      Doorway
+    </div>
+    <div class="state" title="This computer's part of the network"><span class="dot" id="dot"></span><span id="headline">Getting ready…</span></div>
+  </header>
 
-  <section class="status">
-    <p class="big"><span class="dot" id="dot"></span><span id="headline">Starting…</span></p>
+  <section class="status" id="statusBox">
     <p class="sub" id="detail"></p>
     <div class="bar" id="bar" hidden><div id="fill"></div></div>
     <div class="actions" id="failActions" hidden>
@@ -88,13 +107,13 @@
   </section>
 
   <form class="go" id="nameForm">
-    <input id="nameInput" placeholder="Go to a name, like commonplace" spellcheck="false" autocomplete="off" aria-label="A .csd name">
+    <input id="nameInput" placeholder="Go to a name" spellcheck="false" autocomplete="off" aria-label="A .csd name, like commonplace">
     <button class="primary">Open</button>
   </form>
-  <p class="hint" id="nameStatus">Sites and pages named on the network, opened through your own node</p>
+  <p class="hint" id="nameStatus">Type a name, like <b>commonplace</b>. Or open <b>commonplace.localhost</b> in your browser.</p>
 
   <h2>Your sites</h2>
-  <div id="sites"></div>
+  <div id="sites" class="cards"></div>
   <div class="publish">
     <button id="publish">Publish a site</button>
     <input type="file" id="publishFolder" webkitdirectory hidden>
@@ -107,39 +126,45 @@
       <p class="hint" id="publishStatus"></p>
     </div>
   </div>
-  <p class="hint">Each site you open is kept here. <i>Help keep it up</i> passes it on to the doors, so it stays up with no server.</p>
+  <p class="note">Sites you open are kept on this computer. Switch one on to help keep it up for everyone, with no server.</p>
 
   <details class="settings" id="settingsBox">
     <summary>Settings</summary>
-    <div class="facts">
-      <div><b id="height">–</b><span>blocks checked</span></div>
-      <div><b id="peers">–</b><span>connected nodes</span></div>
+    <div class="group">
+      <div class="row" style="border-top:0">
+        <div>Start when I log in<small>Keeps Doorway running in the background</small></div>
+        <label class="switch"><input type="checkbox" id="autostart" aria-label="Start when I log in"><i></i></label>
+      </div>
+      <div class="row">
+        <div style="flex:1">Put your site on the doors<small id="putStatus">A .car file of your site, once a .csd name points to it</small></div>
+        <input type="file" id="putFile" accept=".car" hidden>
+        <button id="put">Choose</button>
+      </div>
     </div>
-    <div class="row">
-      <div>Apps on this computer can use it at<small><code id="rpc">http://127.0.0.1:8789</code></small></div>
-      <button id="copy">Copy</button>
-    </div>
-    <div class="row">
-      <div>Start when I log in<small>Keeps your node running in the background</small></div>
-      <label class="switch"><input type="checkbox" id="autostart"><i></i></label>
-    </div>
-    <div class="row">
-      <div>Its data<small>A full copy of the network, checked block by block</small></div>
-      <button id="folder">Show</button>
-    </div>
-    <form class="row" id="peerForm">
-      <div style="flex:1">Add a peer<small id="peerStatus">If it can't find other nodes, paste one's address</small></div>
-      <input id="peerInput" class="field" placeholder="/ip4/…/tcp/17999/p2p/…" spellcheck="false" autocomplete="off">
-      <button>Add</button>
-    </form>
-    <div class="row">
-      <div style="flex:1">Put your site on the doors<small id="putStatus">A .car file of your site, once a .csd name points to it</small></div>
-      <input type="file" id="putFile" accept=".car" hidden>
-      <button id="put">Choose</button>
+    <div class="group">
+      <h3>This computer's part of the network</h3>
+      <p class="sub" style="margin:2px 0 6px">Doorway runs a node: it keeps a copy of the network and checks every block itself, so what you open is checked here, not taken on trust.</p>
+      <div class="facts">
+        <div><b id="height">–</b><span>blocks checked</span></div>
+        <div><b id="peers">–</b><span>connected nodes</span></div>
+      </div>
+      <div class="row">
+        <div>Apps on this computer can use it at<small><code id="rpc">http://127.0.0.1:8789</code></small></div>
+        <button id="copy">Copy</button>
+      </div>
+      <div class="row">
+        <div>Its data<small>A full copy of the network, checked block by block</small></div>
+        <button id="folder">Show</button>
+      </div>
+      <form class="row" id="peerForm">
+        <div style="flex:1">Add a peer<small id="peerStatus">If it can't find other nodes, paste one's address</small></div>
+        <input id="peerInput" class="field" placeholder="/ip4/…/tcp/17999/p2p/…" spellcheck="false" autocomplete="off" aria-label="A peer's address">
+        <button>Add</button>
+      </form>
     </div>
   </details>
 
-  <footer>Your node checks every block itself and passes them on to others. Closing this window stops it cleanly.</footer>
+  <footer>Closing this window closes Doorway.</footer>
 
 <script src="resolver.js"></script>
 <script>
@@ -151,6 +176,7 @@
 
   function show(dot, headline, detail, progress) {
     $("dot").className = "dot " + dot;
+    $("statusBox").className = "status " + dot;
     $("headline").textContent = headline;
     $("detail").textContent = detail || "";
     $("bar").hidden = progress == null;
@@ -170,33 +196,33 @@
     if (s.rpc) { rpc = s.rpc; $("rpc").textContent = rpc; }
     $("failActions").hidden = s.phase !== "failed";
 
-    if (s.phase === "failed") return show("bad", "The node isn't running", s.message);
-    if (s.phase === "stopping") return show("busy", "Stopping…", s.message && !s.message.endsWith("…") ? s.message : "Saving everything before it closes. This can take a moment.", s.progress);
-    if (s.phase === "stopped") return show("", "Stopped", "");
+    if (s.phase === "failed") return show("bad", "Something went wrong", s.message);
+    if (s.phase === "stopping") return show("busy", "Closing…", s.message && !s.message.endsWith("…") ? s.message : "Saving everything before it closes. This can take a moment.", s.progress);
+    if (s.phase === "stopped") return show("", "Closed", "");
     // the node says what it's doing while it starts (a rebuild after an unclean stop, with how far)
     if (s.phase === "starting") return s.message
-      ? show("busy", "Rebuilding its copy…", s.message, s.progress)
-      : show("busy", "Starting…", "Checking its copy of the network. This usually takes a few seconds.");
+      ? show("busy", "Getting ready…", s.message, s.progress)
+      : show("busy", "Getting ready…", "Checking its copy of the network. This usually takes a few seconds.");
 
     const h = await health();
-    if (!h) return show("busy", "Starting…", "Waiting for the node to answer.");
+    if (!h) return show("busy", "Getting ready…", "Waiting for its node to answer.");
     $("height").textContent = fmt(h.height);
     $("peers").textContent = fmt(h.peer_count);
     const best = h.best_peer_height;
     const note = s.phase === "elsewhere" ? "\n" + s.message : "";
-    if (!h.peer_count) return show("busy", "Looking for other nodes…", "It needs at least one to sync with. Check that this computer is online. If it stays like this, ask someone who runs a node for its address and add it below." + note);
-    if (best == null) return show("busy", "Connected", "Asking the other nodes how far the network is." + note);
+    if (!h.peer_count) return show("busy", "Looking for the network…", "Check that this computer is online. If it stays like this, add a peer under Settings." + note);
+    if (best == null) return show("busy", "Connecting…", "Asking the network how far it is." + note);
     if (best > h.height + 1) {
-      return show("busy", "Syncing", `Block ${fmt(h.height)} of ${fmt(best)}. Each one is checked here before it's kept.` + note, h.height / best);
+      return show("busy", `Catching up ${Math.floor(100 * h.height / best)}%`, `Block ${fmt(h.height)} of ${fmt(best)}. Each one is checked here before it's kept.` + note, h.height / best);
     }
-    show("ok", "Up to date", `Following the network with ${h.peer_count === 1 ? "1 other node" : fmt(h.peer_count) + " other nodes"}.` + note);
+    show("ok", "Ready", "" + note);
   }
 
   $("copy").onclick = async () => {
     try { await navigator.clipboard.writeText(rpc); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1500); } catch {}
   };
   $("folder").onclick = $("log").onclick = () => invoke("open_data_folder");
-  $("retry").onclick = async () => { show("busy", "Starting…", ""); $("failActions").hidden = true; try { await invoke("restart"); } catch {} tick(); };
+  $("retry").onclick = async () => { show("busy", "Getting ready…", ""); $("failActions").hidden = true; try { await invoke("restart"); } catch {} tick(); };
 
   (async () => {
     try { $("autostart").checked = await invoke("plugin:autostart|is_enabled"); } catch {}
@@ -325,7 +351,7 @@
         ${x.carried || x.names.length ? `<button data-open="${i}">Open</button>` : ""}
         <label class="switch" title="Help keep it up"><input type="checkbox" data-help="${i}" ${x.helping ? "checked" : ""}><i></i></label>
       </div>`;
-    }).join("") : `<p class="hint">Sites you open by name show up here.</p>`;
+    }).join("") : `<div class="empty">Sites you open show up here.</div>`;
     $("sites").querySelectorAll("[data-open]").forEach(b => b.onclick = async () => {
       const x = list[+b.dataset.open];
       if (x.carried) invoke("plugin:opener|open_url", { url: await invoke("site_url") });

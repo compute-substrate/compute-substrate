@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Compute Substrate Node",
+  "productName": "Doorway",
   "version": "0.1.0",
   "identifier": "network.computesubstrate.node",
   "build": {
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Compute Substrate Node",
+        "title": "Doorway",
         "width": 460,
         "height": 680,
         "minWidth": 380,
@@ -39,8 +39,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "A Compute Substrate node on your own computer",
-    "longDescription": "Runs a Compute Substrate node: it keeps a full copy of the network, checks every block itself, and lets apps on this computer use it.",
+    "shortDescription": "Open .csd sites, checked on your own computer",
+    "longDescription": "Doorway opens sites named on Compute Substrate, from your own computer: it finds them through the network, fetches them from any door, and checks every byte before your browser shows them. It runs a node to do it.",
     "category": "Utility",
     "macOS": {
       "minimumSystemVersion": "11.0",

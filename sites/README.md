@@ -14,7 +14,7 @@ connections can't.
 - **What it checks:** every block against its address, and that every block reachable from the root
   is there, before keeping anything. Readers check again themselves, so a door is trusted with
   nothing.
-- **Where sites come from:** whoever has one gives it to the doors. The Compute Substrate Node app
+- **Where sites come from:** whoever has one gives it to the doors. Doorway
   does this by itself for every site it opens, so a site its author opens once reaches every door
   the app knows.
 
