@@ -31,8 +31,13 @@ const MAX_SOLVETIME = BigInt(12 * 120);
 const TWO_256 = BigInt("0x1" + "0".repeat(64));
 const POW_LIMIT_BITS = 0x1e00ffff;
 const INITIAL_BITS = 0x1e00ffff;
-// at most this many headers above the newest anchor are checked in full (about four weeks of blocks)
-const MAX_TAIL = 20_000;
+// How far past its newest anchor a client will check, from scratch: every header since, about 170
+// bytes each (100,000 blocks is about 4.5 months, and 17 MB the first time). A returning visitor
+// goes much less far: it remembers anchors of its own (below).
+const MAX_TAIL = 100_000;
+// Anchors a client learns itself, from headers it checked in full, are kept this many blocks behind
+// the tip, so a reorganisation can't leave one on a dead branch
+const LEARN_DEPTH = 200;
 
 // ── headers ─────────────────────────────────────────────────────────────────
 export type Header = { version: number; prev: Hex; merkle: Hex; time: bigint; bits: number; nonce: number; hash: Hex };
@@ -154,9 +159,42 @@ export type Verified = {
   depth: number;
 };
 
-export function lightClient(base: string, opts: { fetch?: typeof fetch; anchors?: Anchors } = {}) {
+// Where a client keeps the anchors it learned: the browser's storage when there is one. Each entry
+// extends the anchors it was learned from, and is used only on top of exactly those.
+export type AnchorStore = { get(key: string): string | null; set(key: string, value: string): void };
+const browserStore = (): AnchorStore | null => {
+  try {
+    const ls = (globalThis as any).localStorage;
+    if (!ls) return null;
+    return { get: k => { try { return ls.getItem(k); } catch { return null; } }, set: (k, v) => { try { ls.setItem(k, v); } catch {} } };
+  } catch { return null; }
+};
+
+// The anchors a client kept from an earlier visit, if they extend exactly these shipped ones
+export function storedAnchors(shipped: Anchors, raw: string | null): string[] {
+  try {
+    const j = JSON.parse(raw ?? "null");
+    if (j && j.every === shipped.every && j.base === shipped.hashes[shipped.hashes.length - 1] && Array.isArray(j.hashes) && j.hashes.every((h: unknown) => typeof h === "string" && /^0x[0-9a-f]{64}$/.test(h))) return j.hashes as string[];
+  } catch {}
+  return [];
+}
+// New anchors from headers checked in full: one every `every` blocks past the current newest
+// anchor, up to LEARN_DEPTH below the tip. `hs` are the checked headers, the first at height `from`.
+export function anchorsToLearn(every: number, newestAnchor: number, hs: { hash: string }[], from: number, tip: number, depth = LEARN_DEPTH): string[] {
+  const out: string[] = [];
+  for (let h = newestAnchor + every; h <= tip - depth && h >= from && h - from < hs.length; h += every) out.push(hs[h - from].hash);
+  return out;
+}
+
+export function lightClient(base: string, opts: { fetch?: typeof fetch; anchors?: Anchors; store?: AnchorStore | null } = {}) {
   const f = opts.fetch ?? fetch;
-  const anchors = opts.anchors ?? ANCHORS;
+  const shipped = opts.anchors ?? ANCHORS;
+  // The release's anchors, extended by any this client checked and kept on an earlier visit: then
+  // it only checks the headers since its own newest one, so it never falls behind for good
+  const store = opts.store === undefined ? browserStore() : opts.store;
+  const KEY = `csd.anchors.${GENESIS_HASH.slice(2, 14)}`;
+  const learned = storedAnchors(shipped, store?.get(KEY) ?? null);
+  const anchors: Anchors = { every: shipped.every, hashes: [...shipped.hashes, ...learned] };
   const at = (h: number): Hex | null => (h % anchors.every === 0 && h / anchors.every < anchors.hashes.length ? anchors.hashes[h / anchors.every] as Hex : null);
   const top = (anchors.hashes.length - 1) * anchors.every;
   const url = (p: string) => `${base.replace(/\/$/, "")}${p}`;
@@ -207,9 +245,22 @@ export function lightClient(base: string, opts: { fetch?: typeof fetch; anchors?
         if (more.length < 2000) break;
       }
       if (reorg) { tail = null; continue; }
-      return { height: t.from + t.hs.length - 1, hash: t.hs[t.hs.length - 1].hash };
+      const tipNow = t.from + t.hs.length - 1;
+      learn(t, tipNow);
+      return { height: tipNow, hash: t.hs[t.hs.length - 1].hash };
     }
     throw new Error("BAD_CHAIN: the node's chain keeps changing under us");
+  };
+
+  // Every header past the newest anchor was just checked in full (proof-of-work, difficulty, links),
+  // so the block hashes at each multiple of `every` are as good as shipped anchors: keep those that
+  // are well behind the tip, for the next visit
+  const learnedNow = [...learned];
+  const learn = (t: { from: number; hs: Header[] }, tipNow: number) => {
+    if (!store) return;
+    const fresh = anchorsToLearn(anchors.every, (shipped.hashes.length - 1 + learnedNow.length) * anchors.every, t.hs, t.from, tipNow);
+    learnedNow.push(...fresh);
+    if (fresh.length) store.set(KEY, JSON.stringify({ every: anchors.every, base: shipped.hashes[shipped.hashes.length - 1], hashes: learnedNow }));
   };
 
   // Below the newest anchor: the stretch of up to `every` headers between two anchors, linked by

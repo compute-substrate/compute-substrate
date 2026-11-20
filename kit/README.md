@@ -70,12 +70,13 @@ visitor's own computer, checked byte for byte.
 
 ## Checks it relies on
 
-The light client carries a list of block hashes (`src/anchors.json`, one every 1000 blocks, now up to
-block 143,000), made from a full check of every header since the start of the network. Records newer
-than the newest anchor are checked by verifying every header since it, up to 20,000 blocks past it
-(about four weeks); further than that it refuses rather than download too much. So the list needs
-refreshing now and then: newer versions of this package carry newer anchors, or pass your own with
-`lightClient(node, { anchors })`, made from a fully synced node.
+The light client carries a list of block hashes (`src/anchors.json`, one every 1000 blocks), made from
+a full check of every header since the start of the network. Records newer than the newest anchor are
+checked by verifying every header since it: proof-of-work, difficulty and links. As it does that, it
+keeps a block hash every 1000 blocks of its own in the browser's storage, so the next visit starts from
+there. Nobody has to keep the list fresh for returning visitors. A first visit on an old version checks
+up to 100,000 blocks past the shipped anchors (about 4.5 months), and refuses beyond that rather than
+download too much; newer versions of the package carry newer anchors.
 
 Lifted from [Commonplace](https://github.com/intervalplace/commonplace), one example of an app on the
 network, which uses the same code. MIT licensed.

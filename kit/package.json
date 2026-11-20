@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "node build.mjs && tsc -p tsconfig.json",
-    "test": "tsx test/kit.test.mts"
+    "test": "tsx test/kit.test.mts && tsx test/anchors.test.mts"
   },
   "dependencies": {
     "@noble/curves": "1.9.1",
