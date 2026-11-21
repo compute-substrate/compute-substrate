@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Directory</title>
+<meta name="description" content="Every site a .csd name points to, ranked by the people who recommend them. Nobody keeps the list.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root { --bg: #fbf7f0; --card: #fffdf9; --ink: #2a2620; --muted: #8b8276; --line: #ece4d6; --accent: #2e6b5a; --accent-soft: #e3efe9; --warm: #c98a1c; --warm-soft: #f8ead0; --bad: #a24a3a;
+    --display: ui-rounded, "SF Pro Rounded", "Nunito", -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #171512; --card: #201d19; --ink: #f1ece4; --muted: #9a9184; --line: #2f2a24; --accent: #7cc4ad; --accent-soft: #1f302a; --warm: #f0b44c; --warm-soft: #33291a; --bad: #e08a78; color-scheme: dark; } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 48px max(18px, env(safe-area-inset-right)) 72px max(18px, env(safe-area-inset-left)); }
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 26px; }
+  h1 { margin: 0; font: 700 34px/1.1 var(--display); letter-spacing: -0.01em; display: flex; align-items: center; gap: 12px; }
+  h1 img { width: 40px; height: 40px; }
+  .lede { margin: 8px 0 0; color: var(--muted); max-width: 520px; }
+  .tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .tabs { display: flex; background: var(--line); border-radius: 999px; padding: 3px; }
+  .tabs button { border: 0; background: none; font: 600 14px var(--display); color: var(--muted); padding: 7px 14px; border-radius: 999px; cursor: pointer; }
+  .tabs button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  input[type=search] { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 8px 14px; width: 200px; outline: none; }
+  input[type=search]:focus { border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .card a.open { display: flex; gap: 12px; align-items: center; color: inherit; text-decoration: none; min-width: 0; }
+  .card a.open:hover b { color: var(--accent); }
+  .face { width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center; font: 700 22px/1 var(--display); color: #fff; overflow: hidden; flex: none; }
+  .face img { width: 100%; height: 100%; object-fit: cover; }
+  .card b { display: block; font: 650 16px/1.25 var(--display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card small { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; }
+  .count { color: var(--muted); font: 600 14px var(--display); display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+  .count svg { width: 14px; height: 14px; color: #e0584a; }
+  .rec { border: 1px solid var(--line); background: none; color: var(--ink); font: 600 13px var(--display); border-radius: 999px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+  .rec:hover { border-color: var(--accent); }
+  .rec[disabled] { cursor: default; color: var(--muted); }
+  .rec[disabled]:hover { border-color: var(--line); }
+  .empty { color: var(--muted); padding: 30px 0; }
+  .sheet { margin: 0 0 20px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+  .sheet .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .sheet button { font: 600 14px var(--display); border: 0; border-radius: 999px; padding: 8px 14px; background: var(--accent); color: #fff; cursor: pointer; }
+  .sheet button.quiet { background: var(--line); color: var(--ink); }
+  .sheet small { color: var(--muted); }
+  #status:empty { display: none; }
+  #status { margin: 0 0 18px; padding: 10px 14px; background: var(--accent-soft); border-radius: 12px; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+  footer a, footer button.link { color: var(--muted); }
+  button.link { background: none; border: 0; padding: 0; font: inherit; text-decoration: underline; cursor: pointer; }
+  code { font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  @media (max-width: 520px) { h1 { font-size: 28px; } input[type=search] { width: 100%; } .tools { width: 100%; } .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1><img src="icon.svg" alt="">Directory</h1>
+      <p class="lede">Every site a .csd name points to, ranked by the people who recommend them. Nobody keeps this list: it's read from the network, and every site is checked against its address.</p>
+    </div>
+    <div class="tools">
+      <div class="tabs" role="group" aria-label="Order">
+        <button id="byRec" aria-pressed="true">Recommended</button>
+        <button id="byNew" aria-pressed="false">New</button>
+      </div>
+      <input type="search" id="q" placeholder="Search" aria-label="Search sites">
+    </div>
+  </header>
+
+  <p id="status" aria-live="polite"></p>
+
+  <div class="sheet" id="needCsd" hidden>
+    <p style="margin:0"><strong>Recommending costs a little CSD</strong> <small>(0.05, or 0.25 to be the first for a site), and your key here has none yet.</small></p>
+    <div class="row"><button id="freeInvite">Take a free invite</button><small id="freeSaid">someone left these for newcomers</small></div>
+    <div class="row"><button class="quiet" id="buyUsdc">Buy with 1 USDC</button><small id="buySaid">from your Ethereum wallet, no gas</small></div>
+    <small>Or send CSD to your key here: <button class="link" id="copyAddr">copy its address</button></small>
+  </div>
+
+  <section class="grid" id="grid" aria-live="polite"><p class="empty">Reading the network…</p></section>
+
+  <footer>
+    <span id="howOpen"></span>
+    <span>Each recommendation is a record on Compute Substrate, signed by a key kept in this browser (<button class="link" id="keyBtn">back it up</button>). A key counts once per site.</span>
+    <span>Reading through <code id="node"></code>. Add <code>?node=…</code> to read through your own.</span>
+  </footer>
+</main>
+<script type="module" src="page.js"></script>
+</body>
+</html>

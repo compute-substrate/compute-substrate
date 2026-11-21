@@ -102,3 +102,38 @@ export async function carRoot(bytes: Uint8Array): Promise<string> {
   if (roots.length !== 1) throw new Error("That .car doesn't have exactly one root, so it isn't one site.");
   return roots[0].toV1().toString();
 }
+
+// One file of a site from a .car that holds only it and the folders on the way to it (a door's
+// /sites/<cid>.car?path=…), checked the same way: every block against its address, and the path
+// from the site's own root.
+export async function fileFromCar(bytes: Uint8Array, root: string, path: string): Promise<Uint8Array> {
+  const car = await CarReader.fromBytes(bytes);
+  const blocks = new Map<string, Uint8Array>();
+  const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+  for await (const b of car.blocks()) {
+    if (b.cid.multihash.code !== sha256.code) throw new Error("a block uses a hash the app doesn't check");
+    const d = await sha256.digest(b.bytes);
+    if (!same(d.digest, b.cid.multihash.digest)) throw new Error("a block doesn't match its address");
+    blocks.set(b.cid.toV1().toString(), b.bytes);
+  }
+  const block = (cid: any) => { const b = blocks.get(cid.toV1().toString()); if (!b) throw new Error("incomplete"); return b; };
+  let cur: any = CID.parse(root);
+  for (const seg of path.split("/").filter(Boolean)) {
+    const node = dagPb.decode(block(cur)), fs = UnixFS.unmarshal(node.Data!);
+    if (fs.type !== "directory") throw new Error("not a folder");
+    const l = node.Links.find(x => x.Name === seg);
+    if (!l) throw new Error("no such file");
+    cur = l.Hash;
+  }
+  const fileBytes = (cid: any): Uint8Array => {
+    const b = block(cid);
+    if (cid.code === 0x55) return b;
+    const node = dagPb.decode(b), fs = UnixFS.unmarshal(node.Data!);
+    if (fs.type !== "file" && fs.type !== "raw") throw new Error("expected a file");
+    const parts = [fs.data ?? new Uint8Array(), ...node.Links.map(l => fileBytes(l.Hash))];
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
+  return fileBytes(cur);
+}

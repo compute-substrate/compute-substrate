@@ -1,0 +1,8 @@
+{
+  "name": "csd-directory",
+  "private": true,
+  "description": "Every site a .csd name points to, ranked by the people who recommend them. A static site: build, then publish out/ with Doorway.",
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

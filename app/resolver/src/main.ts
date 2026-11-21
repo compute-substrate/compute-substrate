@@ -34,7 +34,7 @@ const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 // sha256("compute-substrate-mainnet"), the node's CHAIN_ID_HASH
 const CHAIN_ID = hex("0x1b17c7b04d05394674ca2c8e24f7433e251a1973cac2000c7b60966546e0b875");
 
-function hex(h: string): Uint8Array {
+export function hex(h: string): Uint8Array {
   const s = h.replace(/^0x/, "");
   const b = new Uint8Array(s.length / 2);
   for (let i = 0; i < b.length; i++) b[i] = parseInt(s.slice(2 * i, 2 * i + 2), 16);
@@ -86,7 +86,7 @@ export function signer(tx: Tx): string | null {
   return toHex(ripemd160(sha256(s.slice(66, 99))));
 }
 
-async function getJson(url: string, ms = 15_000) {
+export async function getJson(url: string, ms = 15_000) {
   const r = await fetch(url, { signal: AbortSignal.timeout(ms) });
   if (!r.ok && r.status !== 404) throw new Error(`${new URL(url).host} answered ${r.status}`);
   return r.status === 404 ? null : r.json();
@@ -102,12 +102,15 @@ export function eventOf(id: string, tx: Tx, height: number, pos: number) {
   return null;
 }
 
-// The network's whole CairnX history, from this computer's node, kept while the app runs
-let history: { to: number; events: any[] } = { to: ACTIVATION_HEIGHT - 1, events: [] };
-async function allEvents(tip: number): Promise<any[]> {
+// The network's whole CairnX history, from a node (this computer's, unless said), kept while the
+// app runs
+const histories = new Map<string, { to: number; events: any[] }>();
+export async function allEvents(tip: number, base = NODE): Promise<any[]> {
+  let history = histories.get(base);
+  if (!history) histories.set(base, history = { to: ACTIVATION_HEIGHT - 1, events: [] });
   for (let from = history.to + 1; from <= tip; from += 2000) {
-    const j = await getJson(`${NODE}/events/${encodeURIComponent("cairnx:v1")}/${from}/2000`);
-    if (!j?.ok) throw new Error("Cairn's server didn't answer, and your node can't list the names' history (it needs a newer node).");
+    const j = await getJson(`${base}/events/${encodeURIComponent("cairnx:v1")}/${from}/2000`);
+    if (!j?.ok) throw new Error("Cairn's server didn't answer, and the node can't list the names' history (it needs a newer node).");
     for (const e of j.events) { const ev = eventOf(e.txid, parseTx(hex(e.tx_raw)), e.height, e.pos); if (ev) history.events.push(ev); }
     history.to = Math.min(tip, from + 1999);
   }
@@ -222,5 +225,6 @@ export async function lookup(input: string, opts: { doors?: string[] } = {}): Pr
   return { name, via, owner: st.owner, page: addr, node: via, open: `${COMMONPLACE}/?node=${encodeURIComponent(via)}#/p/${addr}` };
 }
 
-export { fetchSite, carRoot, filesFromCar } from "./site";
+export { fetchSite, carRoot, filesFromCar, fileFromCar } from "./site";
+export { listSites, siteFace, DIRECTORY } from "./directory";
 export { packFolder } from "./pack";

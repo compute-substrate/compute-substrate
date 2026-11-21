@@ -262,6 +262,15 @@ fn handle(mut req: tiny_http::Request, door: &Door) {
     }
     match req.method() {
         Get | Head => match fs::read(&file) {
+            // ?path=index.html: just that file, with the folders on the way to it (at most 1 MB)
+            Ok(b) if req.url().contains("?path=") => {
+                let want = req.url().split("?path=").nth(1).unwrap_or("").split('&').next().unwrap_or("");
+                let want = percent_decode(want);
+                match car::path_car(&b, car::parse_cid(&cid).unwrap(), &want, 1 << 20) {
+                    Ok(Some(part)) => respond(req, door, 200, part, "application/vnd.ipld.car"),
+                    _ => text(req, door, 404, "That site has no such file, or it's over 1 MB."),
+                }
+            }
             Ok(b) => {
                 let head = *req.method() == Head;
                 respond(req, door, 200, if head { vec![] } else { b }, "application/vnd.ipld.car")
@@ -382,5 +391,38 @@ mod tests {
         // a different site's address: refused
         let other = car::parse_cid("bafybeicnb2kolu7wllsf7mn4lmkbz36jwww7gtave57s7cwzwsdz6l2y7q").unwrap();
         assert!(car::check(&bytes, other).is_err());
+        // one file of it, as a .car of its own: much smaller, and only for files that are there
+        let part = car::path_car(&bytes, root, "index.html", 1 << 20).unwrap().unwrap();
+        assert!(part.len() < bytes.len() / 4);
+        assert!(car::path_car(&bytes, root, "nothing-here.html", 1 << 20).unwrap().is_none());
+        assert!(car::path_car(&bytes, root, "_next", 1 << 20).unwrap().is_none());
+        assert!(car::path_car(&bytes, root, "index.html", 10).unwrap().is_none());
+        if let Ok(out) = std::env::var("TEST_OUT") {
+            fs::write(out, &part).unwrap();
+        }
     }
+
+    #[test]
+    fn decodes_paths() {
+        assert_eq!(percent_decode("icon%2Fa%20b.png"), "icon/a b.png");
+        assert_eq!(percent_decode("a%2"), "a%2");
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

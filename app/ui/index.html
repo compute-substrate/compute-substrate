@@ -156,6 +156,12 @@
     </div>
   </div>
   <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up for everyone, with no server.</p>
+  <div id="discoverBox" hidden>
+    <h2 style="margin-top:22px">Discover</h2>
+    <p class="hint" style="margin:-4px 4px 10px">Sites people recommend. Nobody keeps this list: it's read from the network.</p>
+    <div id="discover" class="tiles"></div>
+    <button class="hint" id="discoverMore" hidden style="background:none;border:0;cursor:pointer;text-decoration:underline;margin-top:8px">Show all</button>
+  </div>
 
   <details class="settings" id="settingsBox">
     <summary>Settings</summary>
@@ -563,6 +569,42 @@
   };
   renderSites();
   setInterval(renderSites, 60000);
+  // Discover: every site a name points to, most recommended first (the directory, read here too)
+  let discoverAll = false, discovered = [];
+  const faceOf = new Map();
+  async function renderDiscover() {
+    let kept = [];
+    try { kept = (await invoke("kept_sites")).flatMap(x => x.names); } catch {}
+    const list = discovered.filter(s => !kept.includes(s.name));
+    $("discoverBox").hidden = !list.length;
+    const shown = discoverAll ? list : list.slice(0, 8);
+    $("discoverMore").hidden = discoverAll || list.length <= 8;
+    $("discover").innerHTML = shown.map(s => {
+      const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name, n = s.recommenders.length;
+      return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.name)}" title="Open ${esc(s.name)}.csd">
+        <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
+        <b>${esc(title)}</b><small>${esc(s.name)}.csd${n ? `, ${n} ♥` : ""}</small>
+      </div>`;
+    }).join("");
+    $("discover").querySelectorAll("[data-name]").forEach(t => {
+      t.onclick = () => openName(t.dataset.name);
+      t.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openName(t.dataset.name); } };
+    });
+  }
+  $("discoverMore").onclick = () => { discoverAll = true; renderDiscover(); };
+  async function discover() {
+    try {
+      discovered = (await CsdResolver.listSites(await readingNode())).sites;
+      await renderDiscover();
+      const doors = await doorList();
+      for (const s of discovered.filter(s => !faceOf.has(s.cid)).slice(0, 40)) {
+        faceOf.set(s.cid, await CsdResolver.siteFace(s.cid, doors).catch(() => ({})));
+        renderDiscover();
+      }
+    } catch {}
+  }
+  setTimeout(discover, 1500);
+  setInterval(discover, 10 * 60_000);
   listen("node-changed", tick);
   tick();
   setInterval(tick, 3000);

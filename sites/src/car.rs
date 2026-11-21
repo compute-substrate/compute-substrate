@@ -143,3 +143,99 @@ pub fn check(car: &[u8], root: Cid) -> Result<usize, String> {
     }
     Ok(bytes)
 }
+
+// A dag-pb node's links with their names (Links = field 2: Hash = 1, Name = 2)
+fn named_links(node: &[u8]) -> Result<Vec<(String, Cid)>, String> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < node.len() {
+        let tag = varint(node, &mut at)?;
+        match tag & 7 {
+            0 => {
+                varint(node, &mut at)?;
+            }
+            2 => {
+                let len = varint(node, &mut at)? as usize;
+                let body = node.get(at..at + len).ok_or("truncated")?;
+                at += len;
+                if tag >> 3 == 2 {
+                    let (mut p, mut name, mut cid) = (0, String::new(), None);
+                    while p < body.len() {
+                        let t = varint(body, &mut p)?;
+                        match t & 7 {
+                            0 => {
+                                varint(body, &mut p)?;
+                            }
+                            2 => {
+                                let l = varint(body, &mut p)? as usize;
+                                let v = body.get(p..p + l).ok_or("truncated")?;
+                                p += l;
+                                match t >> 3 {
+                                    1 => { let mut q = 0; cid = Some(cid_bytes(v, &mut q)?); }
+                                    2 => name = String::from_utf8_lossy(v).into_owned(),
+                                    _ => {}
+                                }
+                            }
+                            _ => return Err("bad link".into()),
+                        }
+                    }
+                    if let Some(c) = cid { out.push((name, c)); }
+                }
+            }
+            _ => return Err("bad dag-pb node".into()),
+        }
+    }
+    Ok(out)
+}
+
+// One file of a kept site, as a small .car of its own: the folders on the way to it and the file's
+// blocks, under the site's root. A reader checks it the same way (each block against its address, the
+// path from the root), so a page can show a site's title and icon without the whole site.
+// None when the path isn't a file in the site, or it's bigger than `max` bytes.
+pub fn path_car(car: &[u8], root: Cid, path: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
+    let mut at = 0;
+    let hlen = varint(car, &mut at)? as usize;
+    let header_end = at.checked_add(hlen).filter(|&a| a <= car.len()).ok_or("truncated header")?;
+    let header = &car[..header_end];
+    at = header_end;
+    let mut blocks: HashMap<Cid, (usize, usize, usize)> = HashMap::new(); // section start, data start, end
+    while at < car.len() {
+        let start = at;
+        let len = varint(car, &mut at)? as usize;
+        let end = at.checked_add(len).filter(|&e| e <= car.len()).ok_or("truncated block")?;
+        let mut p = at;
+        let cid = cid_bytes(car, &mut p)?;
+        blocks.insert(cid, (start, p, end));
+        at = end;
+    }
+    let mut out = header.to_vec();
+    let mut add = |c: &Cid, out: &mut Vec<u8>| -> Result<(), String> {
+        let &(s, _, e) = blocks.get(c).ok_or("the site is incomplete")?;
+        out.extend_from_slice(&car[s..e]);
+        if out.len() > max { Err("too big".into()) } else { Ok(()) }
+    };
+    let mut cur = root;
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        if cur.codec != DAG_PB { return Ok(None); }
+        if add(&cur, &mut out).is_err() { return Ok(None); }
+        let &(_, d, e) = blocks.get(&cur).ok_or("the site is incomplete")?;
+        match named_links(&car[d..e])?.into_iter().find(|(n, _)| n == seg) {
+            Some((_, c)) => cur = c,
+            None => return Ok(None),
+        }
+    }
+    // the file: every block under it
+    let (mut seen, mut todo) = (HashSet::new(), vec![cur]);
+    while let Some(c) = todo.pop() {
+        if !seen.insert(c) { continue; }
+        if add(&c, &mut out).is_err() { return Ok(None); }
+        if c.codec == DAG_PB {
+            let &(_, d, e) = blocks.get(&c).ok_or("the site is incomplete")?;
+            let ls = named_links(&car[d..e])?;
+            // a folder isn't a file
+            if c == cur && ls.iter().any(|(n, _)| !n.is_empty()) { return Ok(None); }
+            todo.extend(ls.into_iter().map(|(_, c)| c));
+        }
+    }
+    Ok(Some(out))
+}
