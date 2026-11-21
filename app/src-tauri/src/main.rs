@@ -441,14 +441,17 @@ fn waiting_page(name: &str) -> String {
 }
 
 fn serve_names(app: tauri::AppHandle) {
-    let server = [80u16, 8800].into_iter().find_map(|p| tiny_http::Server::http(("127.0.0.1", p)).ok().map(|s| (p, s)));
-    let Some((port, server)) = server else {
+    // Port 80, so the address has no number. macOS lets an ordinary app use it only when listening
+    // on every address, not on 127.0.0.1 alone, so that's tried too, and anything not from this
+    // computer is turned away (route_name). Else 8800, on this computer only.
+    let tries: [(&str, u16); 3] = [("127.0.0.1", 80), ("0.0.0.0", 80), ("127.0.0.1", 8800)];
+    let Some((host, port, server)) = tries.into_iter().find_map(|(h, p)| tiny_http::Server::http((h, p)).ok().map(|s| (h, p, s))) else {
         eprintln!("[names] can't listen on port 80 or 8800");
         return;
     };
     let _ = NAMES_PORT.set(port);
     // browsers may reach *.localhost over IPv6 too
-    if let Ok(v6) = tiny_http::Server::http(("::1", port)) {
+    if let Ok(v6) = tiny_http::Server::http((if host == "0.0.0.0" { "::" } else { "::1" }, port)) {
         let app = app.clone();
         std::thread::spawn(move || for req in v6.incoming_requests() { route_name(&app, req) });
     }
@@ -458,6 +461,11 @@ fn serve_names(app: tauri::AppHandle) {
 }
 
 fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
+    // this computer only, however the server listens
+    if !req.remote_addr().is_some_and(|a| a.ip().is_loopback() || a.ip().to_canonical().is_loopback()) {
+        let _ = req.respond(tiny_http::Response::empty(403));
+        return;
+    }
     let host = req.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().to_string()).unwrap_or_default();
     let Some(name) = name_of_host(&host) else {
         let _ = req.respond(tiny_http::Response::from_string("Open a .csd name as http://<name>.localhost").with_status_code(404));
