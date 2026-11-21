@@ -64,6 +64,12 @@
       <button id="sign">Post</button>
     </div>
     <p id="status" aria-live="polite"></p>
+    <div class="panel" id="needCsd" hidden>
+      <p><strong>Posting costs a little CSD</strong> <span class="small">(0.25 a post), and your writing key has none yet. Your post waits here while you get some:</span></p>
+      <div class="row"><button id="freeInvite">Take a free invite</button><span class="small" id="freeSaid">someone left these for newcomers</span></div>
+      <div class="row"><button id="buyUsdc">Buy with 1 USDC</button><span class="small" id="buySaid">from your Ethereum wallet, no gas</span></div>
+      <p class="small">Or send CSD to your writing key: <button class="link" id="needAddr">copy its address</button></p>
+    </div>
     <div class="panel" id="panel" hidden>
       <p class="small">A key kept in this browser writes your entries. Each one costs 0.25 CSD. Send CSD to it from any wallet:</p>
       <div class="row"><code id="addr" style="flex:1"></code><button class="link" id="copy">Copy</button></div>
@@ -121,11 +127,41 @@
     try {
       await net.write(me.signer(net), TOPIC, text);
       $("text").value = "";
+      $("needCsd").hidden = true;
       say("Posted. It shows up in about two minutes.");
       setTimeout(load, 130_000);
-    } catch (e) { say(String(e.message ?? e)); }
+    } catch (e) {
+      // no CSD yet: the ways to get some, right here, with the post kept in the box
+      if (/Not enough CSD/.test(String(e.message))) { say(""); $("needCsd").hidden = false; }
+      else say(String(e.message ?? e));
+    }
     showKey();
   };
+  // getting CSD at the moment it's needed
+  const ready = msg => { say(msg); setTimeout(() => { showKey(); }, 130_000); };
+  $("freeInvite").onclick = async () => {
+    $("freeSaid").textContent = "Looking…";
+    try {
+      const open = await openInvites(net, INVITES);
+      if (!open.length) { $("freeSaid").textContent = "None left right now."; return; }
+      const pick = open[Math.floor(Math.random() * open.length)];
+      const r = await claimInvite(net, pick.code, me.address);
+      $("freeSaid").textContent = "Taken.";
+      ready(`${r.csd} CSD is on its way. Press Post again in about two minutes.`);
+    } catch (e) { $("freeSaid").textContent = String(e.message ?? e); }
+  };
+  $("buyUsdc").onclick = async () => {
+    try {
+      // the top-up carries an Ethereum library, so it's loaded only now
+      const { topUpWithUsdc, topUpError } = await import("./compute-substrate-topup.js");
+      try {
+        await topUpWithUsdc(net, me, 1, step => { $("buySaid").textContent = step; });
+        $("buySaid").textContent = "Bought.";
+        ready("The CSD arrives a few minutes after the market maker's lock. Press Post again then.");
+      } catch (e) { $("buySaid").textContent = topUpError(e); }
+    } catch (e) { $("buySaid").textContent = "Couldn't load the market: " + String(e.message ?? e); }
+  };
+  $("needAddr").onclick = () => navigator.clipboard?.writeText(me.address).then(() => { $("needAddr").textContent = "copied"; });
   const useInvite = async link => {
     say("Taking the invite…");
     try { const r = await claimInvite(net, link, me.address); say(`${r.csd} CSD is on its way to your writing key. You can write once it's in a block, in about two minutes.`); setTimeout(showKey, 130_000); }

@@ -67,6 +67,23 @@ There's no server deciding who gets one. The codes are public and first come, fi
 each one small: the most anyone can take is what you listed. The template does both, with a button
 for anyone to leave invites for the next person.
 
+## Paying in dollars
+
+For someone with USDC and no CSD, `compute-substrate/topup` buys a little CSD onto their writing key
+through the open CSD/USDC market: their Ethereum wallet signs two messages, with no transaction and
+no gas, a market maker sends the CSD, and a contract on Ethereum pays the maker only once that
+payment is proven on Compute Substrate. Nobody holds anyone's money in between, and nobody runs
+the market: anyone can make offers on it.
+
+```js
+const { topUpWithUsdc, topUpError } = await import("compute-substrate/topup");  // loaded only when needed
+await topUpWithUsdc(net, me, 1, step => show(step));   // 1 USDC; the CSD arrives within minutes
+```
+
+It's a separate file because it carries an Ethereum library. The template loads it only when
+someone presses *Buy with 1 USDC*: posting with no CSD shows the three ways to get some right there
+(a free invite, USDC, or sending CSD), and the post waits in its box meanwhile.
+
 ## The API
 
 | | |

@@ -1,6 +1,6 @@
 {
   "name": "compute-substrate",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Build on Compute Substrate: read any topic from any node, check every record against the proof-of-work yourself, and write records signed by your own key or a wallet. No server, no account.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./topup": {
+      "types": "./dist/topup.d.ts",
+      "import": "./dist/topup.js"
     }
   },
   "files": [
@@ -22,7 +26,9 @@
   },
   "dependencies": {
     "@noble/curves": "1.9.1",
-    "@noble/hashes": "1.8.0"
+    "@noble/hashes": "1.8.0",
+    "viem": "2.57.17",
+    "@intervalplace/aon-sdk": "0.1.0"
   },
   "devDependencies": {
     "esbuild": "0.25.10",
