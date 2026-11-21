@@ -47,6 +47,7 @@
   .entry p { white-space: pre-wrap; overflow-wrap: anywhere; }
   .meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
   .ok { color: var(--accent); }
+  .entry.pending p { color: var(--muted); }
   .bad { color: var(--bad); }
 </style>
 </head>
@@ -116,9 +117,11 @@
     try {
       const entries = await net.read(TOPIC, { limit: 100 }); // each one checked; anything that doesn't prove is left out
       $("list").innerHTML = entries.length ? entries.map(e => `
-        <article class="entry">
+        <article class="entry${e.pending ? " pending" : ""}">
           <p>${esc(e.text)}</p>
-          <div class="meta"><span>${short(e.author)}</span><span>${new Date(e.time * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span><span class="ok" title="Written by its author, and in a block with the network's proof-of-work above it">✓ checked</span></div>
+          <div class="meta"><span>${short(e.author)}</span>${e.pending
+            ? `<span>On its way: in a block within about two minutes</span>`
+            : `<span>${new Date(e.time * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span><span class="ok" title="Written by its author, and in a block with the network's proof-of-work above it">✓ checked</span>`}</div>
         </article>`).join("") : `<p class="muted">No entries yet. Be the first.</p>`;
     } catch (e) { $("list").innerHTML = `<p class="bad">Couldn't read the network: ${esc(String(e.message ?? e))}</p>`; }
   }
@@ -131,7 +134,8 @@
       await net.write(me.signer(net), TOPIC, text);
       $("text").value = "";
       $("needCsd").hidden = true;
-      say("Posted. It shows up in about two minutes.");
+      say("");
+      load(); // shown at once, as on its way
       setTimeout(load, 130_000);
     } catch (e) {
       // no CSD yet: the ways to get some, right here, with the post kept in the box

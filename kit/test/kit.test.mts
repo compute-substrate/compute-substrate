@@ -5,7 +5,7 @@ import { connect, keySigner, newKey, signerOf, deserializeTx, hexToBytes, txid, 
 let failures = 0;
 const ok = (c: unknown, what: string) => { console.log(`${c ? "ok  " : "FAIL"} ${what}`); if (!c) failures++; };
 
-let submitted: any = null;
+let submitted: any = null, landed = false;
 const key = newKey();
 const fakeFetch = (async (u: string, init?: any) => {
   const url = new URL(String(u));
@@ -14,7 +14,8 @@ const fakeFetch = (async (u: string, init?: any) => {
   if (url.pathname.startsWith("/utxos/")) return json({ utxos: [{ txid: "0x" + "11".repeat(32), vout: 0, value: "100000000" }] });
   if (url.pathname.startsWith("/proposals/")) return json({ proposals: [
     { proposal_id: "0x" + "aa".repeat(32), height: 10, time: 1, domain: "guestbook.example", payload_hash: "0x00", uri: "older" },
-    { proposal_id: "0x" + "bb".repeat(32), height: 20, time: 2, domain: "guestbook.example", payload_hash: "0x00", uri: "newer" } ] });
+    { proposal_id: "0x" + "bb".repeat(32), height: 20, time: 2, domain: "guestbook.example", payload_hash: "0x00", uri: "newer" },
+    ...(landed ? [{ proposal_id: "0x" + "cc".repeat(32), height: 30, time: 3, domain: "guestbook.example", payload_hash: "0x00", uri: "hello" }] : []) ] });
   if (url.pathname === "/tx/submit") { submitted = JSON.parse(init.body).tx; return json({ ok: true, txid: "0x" + "cc".repeat(32) }); }
   return json({ ok: false }, 404);
 }) as unknown as typeof fetch;
@@ -32,6 +33,12 @@ ok(id === "0x" + "cc".repeat(32), "write returns the node's txid");
 ok(submitted?.app?.Propose?.domain === "guestbook.example" && submitted.app.Propose.uri === "hello", "the transaction carries the record");
 const fee = submitted && BigInt(submitted.outputs.reduce((s: number, o: any) => s - Number(o.value), 100000000));
 ok(fee === MIN_FEE_PROPOSE, "it pays the network's fee for a proposal, and the rest comes back as change");
+// what was just written shows at once, as on its way, until it's in a block
+const after = await net.read("guestbook.example", { check: false });
+ok(after[0].text === "hello" && after[0].pending && after[0].id === id && after.length === 3, "a record just written is read first, as pending");
+landed = true;
+const later = await net.read("guestbook.example", { check: false });
+ok(later.filter(e => e.id === id).length === 1 && !later.find(e => e.id === id)!.pending, "once it's in a block it's read once, from the block");
 let threw = false;
 try { await net.write(me, "guestbook.example", "x".repeat(600)); } catch { threw = true; }
 ok(threw, "text over 512 bytes is refused before anything is sent");

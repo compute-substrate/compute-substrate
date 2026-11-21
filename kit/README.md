@@ -56,6 +56,13 @@ records and attestations only, never a payment, and nothing over 1 CSD; `me.door
 `backup()`, `restore()` and `forget()` point to Doorway's Settings. The welcome and the USDC top-up
 work with it as they are.
 
+## Two minutes, without the wait
+
+A record is in the network once it's in a block, about two minutes after it's sent. `read()`
+doesn't make people wait for that: what this browser just wrote comes first, with `pending: true`,
+until the block has it (then it's read from the block, checked, like everything else). Show it
+dimmed, or "on its way", as the template does.
+
 ## A welcome, so writing just works
 
 Writing costs a little CSD, but the person writing needn't be the one who pays, any more than a

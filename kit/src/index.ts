@@ -29,7 +29,25 @@ export type Entry = {
   text: string;       // its uri: up to 512 bytes, as the app wrote it
   height: number;     // the block it's in
   time: number;       // the block's time, in seconds
+  // written from this browser a moment ago and not in a block yet (about two minutes): show it,
+  // marked as on its way; `height` is then the block it's expected in, `time` when it was sent
+  pending?: boolean;
 };
+
+// Records this browser wrote that aren't in a block yet, per topic, so `read` can show them at once.
+// Kept in the browser's storage (when there is one) so a reload doesn't lose them; dropped once
+// they're in a block, or after a day.
+const PENDING_FOR = 86_400_000;
+const pendingStore = {
+  key: (d: string) => `csd.pending.${d}`,
+  get(d: string): (Entry & { author: Hex; at: number })[] {
+    try { return JSON.parse((globalThis as any).localStorage?.getItem(this.key(d)) ?? "[]").filter((x: any) => Date.now() - x.at < PENDING_FOR); } catch { return []; }
+  },
+  set(d: string, xs: (Entry & { author: Hex; at: number })[]) {
+    try { xs.length ? (globalThis as any).localStorage?.setItem(this.key(d), JSON.stringify(xs)) : (globalThis as any).localStorage?.removeItem(this.key(d)); } catch {}
+  },
+};
+const memPending = new Map<string, (Entry & { author: Hex; at: number })[]>();
 export type Checked = { ok: true; author: Hex; height: number; depth: number } | { ok: false; reason: string };
 
 // Something that can sign and send a record: your own key, or a wallet
@@ -56,16 +74,20 @@ export function connect(opts: { node?: string; fetch?: typeof fetch; anchors?: A
     check,
     // A topic's newest records (at most `limit`, newest first), as the node lists them. With
     // { check: true } each is proven too, and those that don't prove are left out.
+    // Records this browser just wrote come first, with `pending: true`, until they're in a block.
     async read(domain: string, o: { limit?: number; check?: boolean } = {}): Promise<(Entry & { author?: Hex })[]> {
       const rows = (await api.proposalsIn(domain, o.limit ?? 200)).map(p => ({ id: p.proposal_id.toLowerCase() as Hex, domain: p.domain ?? domain, text: p.uri ?? "", height: Number(p.height), time: Number(p.time) }))
         .sort((a, b) => b.height - a.height);
-      if (o.check === false) return rows;
       const out: (Entry & { author?: Hex })[] = [];
-      for (let i = 0; i < rows.length; i += 6) {
+      if (o.check === false) out.push(...rows);
+      else for (let i = 0; i < rows.length; i += 6) {
         const got = await Promise.all(rows.slice(i, i + 6).map(async r => ({ r, c: await check(r.id) })));
         for (const { r, c } of got) if (c.ok) out.push({ ...r, author: c.author });
       }
-      return out;
+      const landed = new Set(rows.map(r => r.id));
+      const waiting = [...(memPending.get(domain) ?? pendingStore.get(domain))].filter(p => !landed.has(p.id) && Date.now() - p.at < PENDING_FOR);
+      memPending.set(domain, waiting); pendingStore.set(domain, waiting);
+      return [...waiting.map(({ at: _, ...p }) => p), ...out];
     },
     // Write a record under `domain`. `text` is what readers get (up to 512 bytes); put anything
     // larger elsewhere (IPFS, Arweave) and write its address, with its hash as `payloadHash`.
@@ -74,7 +96,12 @@ export function connect(opts: { node?: string; fetch?: typeof fetch; anchors?: A
       if (!text || utf8(text).length > MAX_URI_BYTES) throw new Error(`A record's text is 1 to ${MAX_URI_BYTES} bytes.`);
       const t = await api.tip();
       const payloadHash = o.payloadHash ? hexToBytes(o.payloadHash) : sha256d(utf8(text));
-      return signer.send({ kind: "propose", domain, payloadHash, uri: text, expiresEpoch: BigInt(Math.floor(t.height / EPOCH_LEN)) + KEEP_EPOCHS }, o.fee ?? MIN_FEE_PROPOSE);
+      const id = (await signer.send({ kind: "propose", domain, payloadHash, uri: text, expiresEpoch: BigInt(Math.floor(t.height / EPOCH_LEN)) + KEEP_EPOCHS }, o.fee ?? MIN_FEE_PROPOSE)).toLowerCase() as Hex;
+      // shown by `read` at once, as on its way, until it's in a block
+      const p = { id, domain, text, height: t.height + 1, time: Math.floor(Date.now() / 1000), pending: true, author: signer.address.toLowerCase() as Hex, at: Date.now() };
+      const waiting = [p, ...(memPending.get(domain) ?? pendingStore.get(domain))];
+      memPending.set(domain, waiting); pendingStore.set(domain, waiting);
+      return id;
     },
     // Attest to a record: a signed number on it. What the number means is up to your app (a like,
     // a vote, a check that holds or fails).
