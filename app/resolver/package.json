@@ -1,9 +1,10 @@
 {
   "name": "csd-app-resolver",
   "private": true,
-  "description": "Opens .csd names (web+csd: links) through the app's own node; bundled into app/ui/resolver.js",
+  "description": "Opens .csd names (web+csd: links) through the app's own node, or the doors while it catches up; bundled into app/ui/resolver.js. Uses the kit (../../kit) for the light client.",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js"
+    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js",
+    "test": "esbuild test/door.test.mts --bundle --platform=node --format=esm --outfile=test/.out.mjs --log-level=warning && node test/.out.mjs"
   },
   "dependencies": {
     "@inversealtruism/cairnx-core": "0.2.4",

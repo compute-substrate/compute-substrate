@@ -4,10 +4,16 @@
 // The names are Cairn's (CNS, by InverseAltruism): an on-chain convention on Compute Substrate whose
 // rules and reference resolver are @inversealtruism/cairnx-core. This only reads them:
 //   1. Cairn's server lists the transactions in the name's history (hints, not trusted). When it
-//      doesn't answer, the app reads the network's whole CairnX history from its own node instead
+//      doesn't answer, the app reads the network's whole CairnX history instead
 //      (`/events/cairnx:v1/...`), so names keep working without Cairn's server.
 //   2. Each one is read from THIS computer's own node, which has checked every block itself, and
 //      must hash to its txid; its signer is the key whose signature is on it.
+//      Until that node has caught up (the first minutes after installing, or after a long time
+//      off), each one is read through the doors instead, and proven the way a light client proves
+//      it (the kit's light.ts): its merkle branch leads to a block header, and that header is on
+//      the network's heaviest chain, by the anchors this release carries and the proof-of-work of
+//      every header since. Its author is the owner of the coin it spends. So a door can't invent
+//      or alter a record; to keep it from leaving one out, the history is asked of two doors.
 //   3. The events are replayed through cairnx-core's own resolver.
 // What a name points to: its profile's `contenthash` (ipfs://<CIDv1>, a site), `url` (a link), else
 // its address's page.
@@ -15,6 +21,8 @@ import { resolve, paidToFromOutputs, RESERVED_NAMES, ACTIVATION_HEIGHT } from "@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha2";
 import { ripemd160 } from "@noble/hashes/legacy";
+import { lightClient, type Verified } from "../../../kit/src/light";
+import { bytesToHex } from "../../../kit/src/core";
 
 let NODE = "http://127.0.0.1:8789";
 // which node names are read through (the app uses its own; a door, its own RPC)
@@ -78,14 +86,14 @@ export function signer(tx: Tx): string | null {
   return toHex(ripemd160(sha256(s.slice(66, 99))));
 }
 
-async function getJson(url: string) {
-  const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+async function getJson(url: string, ms = 15_000) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(ms) });
   if (!r.ok && r.status !== 404) throw new Error(`${new URL(url).host} answered ${r.status}`);
   return r.status === 404 ? null : r.json();
 }
 
 // a transaction as the resolver's event; it must hash to its id
-function eventOf(id: string, tx: Tx, height: number, pos: number) {
+export function eventOf(id: string, tx: Tx, height: number, pos: number) {
   if (toHex(sha256d(tx.stripped)) !== id.toLowerCase()) throw new Error("A record didn't match its id.");
   const who = signer(tx) ?? "0x" + "0".repeat(40);
   const paidTo = paidToFromOutputs(tx.outputs.map(o => ({ addr: o.addr, value: Number(o.value) })));
@@ -106,15 +114,89 @@ async function allEvents(tip: number): Promise<any[]> {
   return history.events;
 }
 
-export type Opened = { name: string; open?: string; why?: string; owner?: string };
+// ── through the doors, while this computer's node catches up ────────────────
+// Whether this computer's own node has caught up with the network: then it's the one to read.
+export async function ownNodeReady(): Promise<boolean> {
+  try {
+    const h = await getJson(`${NODE}/health`, 4_000);
+    return !!h && h.peer_count > 0 && h.best_peer_height != null && h.best_peer_height <= h.height + 1;
+  } catch { return false; }
+}
+// The doors that answer, highest first (each one only ever a source of things to check)
+async function answering(doors: string[]): Promise<string[]> {
+  const r = await Promise.all(doors.map(async d => {
+    try { const t = await getJson(`${d}/tip`, 6_000); return Number.isSafeInteger(t?.height) ? { d, h: t.height as number } : null; } catch { return null; }
+  }));
+  return r.filter((x): x is { d: string; h: number } => !!x).sort((a, b) => b.h - a.h).map(x => x.d);
+}
+type Light = ReturnType<typeof lightClient>;
+const lights = new Map<string, Light>();
+const light = (door: string) => { let l = lights.get(door); if (!l) { l = lightClient(door); lights.set(door, l); } return l; };
+// a record proven through a door, as the resolver's event
+export function eventOfVerified(v: Verified) {
+  const who = (v.author ?? "0x" + "0".repeat(40)).toLowerCase();
+  const paidTo = paidToFromOutputs(v.tx.outputs.map(o => ({ addr: o.addr20.toLowerCase(), value: Number(o.value) })));
+  const id = v.txid.toLowerCase(), a = v.tx.app;
+  if (a.kind === "propose") return { kind: "propose", id, proposer: who, uri: a.uri, payloadHash: bytesToHex(a.payloadHash).toLowerCase(), expiresEpoch: Number(a.expiresEpoch), height: v.height, pos: v.index, paidTo };
+  if (a.kind === "attest") return { kind: "attest", txid: id, proposalId: a.proposalId.toLowerCase(), attester: who, score: a.score, confidence: a.confidence, height: v.height, pos: v.index, paidTo };
+  return null;
+}
+const proven = new Map<string, Promise<any>>();
+const prove = (l: Light, txid: string) => {
+  const k = txid.toLowerCase().replace(/^0x/, "");
+  let p = proven.get(k);
+  if (!p) { p = l.checkTx(("0x" + k) as any).then(eventOfVerified); p.catch(() => proven.delete(k)); proven.set(k, p); }
+  return p;
+};
+async function inBatches<T, R>(xs: T[], n: number, f: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(xs.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, xs.length) }, async () => { while (i < xs.length) { const k = i++; out[k] = await f(xs[k]); } }));
+  return out;
+}
+// the network's whole CairnX history, listed by up to two doors (a record either lists counts), each
+// record proven
+let doorHistory: { to: number; ids: Set<string> } = { to: ACTIVATION_HEIGHT - 1, ids: new Set() };
+async function allEventsThrough(doors: string[], l: Light, tip: number): Promise<any[]> {
+  const from0 = doorHistory.to + 1;
+  let listed = 0;
+  for (const d of doors.slice(0, 2)) {
+    try {
+      for (let from = from0; from <= tip; from += 2000) {
+        const j = await getJson(`${d}/events/${encodeURIComponent("cairnx:v1")}/${from}/2000`);
+        if (!j?.ok) throw new Error("no history");
+        for (const e of j.events) doorHistory.ids.add(String(e.txid).toLowerCase().replace(/^0x/, ""));
+      }
+      listed++;
+    } catch {}
+  }
+  if (!listed) throw new Error("Neither Cairn's server nor the doors could list the names' history right now. Try again in a minute.");
+  doorHistory.to = tip;
+  return (await inBatches([...doorHistory.ids], 8, id => prove(l, id))).filter(Boolean);
+}
 
-export async function lookup(input: string): Promise<Opened> {
+export type Opened = { name: string; open?: string; why?: string; owner?: string; page?: string; node?: string; via?: string };
+
+// `doors`: where to read while this computer's node is still catching up
+export async function lookup(input: string, opts: { doors?: string[] } = {}): Promise<Opened> {
   const name = input.trim().toLowerCase().replace(/^web\+csd:(\/\/)?/, "").replace(/\.csd$/, "").replace(/\/+$/, "");
   if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name." };
-  const tip = (await getJson(`${NODE}/tip`))?.height ?? 0;
+  const own = await ownNodeReady();
+  const doors = own ? [] : await answering(opts.doors ?? []);
+  if (!own && !doors.length) {
+    // nothing else answers: this computer's node, however far it has got
+    if (!(await getJson(`${NODE}/tip`, 4_000).catch(() => null))) throw new Error("Can't reach the network right now. Is this computer online?");
+  }
+  const via = doors.length ? doors[0] : NODE;
+  const l = doors.length ? light(doors[0]) : null;
+  const tip = l ? (await l.syncTail()).height : (await getJson(`${NODE}/tip`))?.height ?? 0;
   let events: any[];
   const h = await getJson(`${CAIRN}/trade/api/cairnx/name-history/${encodeURIComponent(name)}`).catch(() => undefined);
-  if (h && Array.isArray(h.events) && h.scopedReplaySufficient) {
+  if (h && Array.isArray(h.events) && h.scopedReplaySufficient && l) {
+    events = (await inBatches(h.events.map((e: any) => String(e.txid)), 6, id => prove(l, id).catch(err => {
+      throw new Error(/NOT_FOUND/.test(String(err?.message)) ? "A door doesn't have one of this name's records yet. Try again in a minute." : `One of this name's records didn't check out (${err?.message ?? err}).`);
+    }))).filter(Boolean);
+  } else if (h && Array.isArray(h.events) && h.scopedReplaySufficient) {
     events = [];
     for (const e of h.events) {
       const p = await getJson(`${NODE}/proof/tx/${String(e.txid).replace(/^0x/, "")}`);
@@ -127,16 +209,17 @@ export async function lookup(input: string): Promise<Opened> {
   } else {
     // Cairn's server didn't answer (or its list can't decide this name alone): the whole history,
     // from this computer's own node
-    events = await allEvents(tip);
+    events = l ? await allEventsThrough(doors, l, tip) : await allEvents(tip);
   }
   const st = resolve(events, tip).names[name];
-  if (!st || st.expired || st.pending) return { name, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
+  if (!st || st.expired || st.pending) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
   const p = st.profile ?? {};
   const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(p["contenthash"] ?? "")?.[1];
-  if (ipfs) return { name, owner: st.owner, open: `ipfs://${ipfs}` };
-  if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, owner: st.owner, open: p["url"] };
+  if (ipfs) return { name, via, owner: st.owner, open: `ipfs://${ipfs}` };
+  if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, via, owner: st.owner, open: p["url"] };
+  // no site or link: its holder's page, in the Commonplace this app carries, read where this was
   const addr = (st.addr ?? st.owner).toLowerCase();
-  return { name, owner: st.owner, open: `${COMMONPLACE}/?node=${encodeURIComponent(NODE)}#/p/${addr}` };
+  return { name, via, owner: st.owner, page: addr, node: via, open: `${COMMONPLACE}/?node=${encodeURIComponent(via)}#/p/${addr}` };
 }
 
 export { fetchSite, carRoot, filesFromCar } from "./site";

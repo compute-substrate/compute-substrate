@@ -11,9 +11,9 @@ checked here before it's kept.
 
 ## Download
 
-- **macOS** (Apple Silicon and Intel): [Doorway-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.1/Doorway-macOS.dmg).
+- **macOS** (Apple Silicon and Intel): [Doorway-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/Doorway-macOS.dmg).
   Open it and drag Doorway to Applications.
-- **Windows**: [Doorway-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.1/Doorway-Windows-setup.exe).
+- **Windows**: [Doorway-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/Doorway-Windows-setup.exe).
 
 Newer versions, with their checksums, are on
 [Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
@@ -38,6 +38,11 @@ After that it opens normally.
   which can take a moment).
 - Each time it starts, the node rebuilds its copy of the network's state from the blocks it already
   has, so nothing half-written carries over; the window shows how far it's got. Then it catches up.
+- Works within seconds of the first launch. Until its own node has caught up, it reads through the
+  doors instead, and checks every answer the way the kit's light client does: each record's place
+  in a block, and that block's place on the network's heaviest chain, by the anchors this release
+  carries and the proof-of-work of every header since. Settings shows how far the node has got;
+  once it's caught up, everything is read from it.
 - Shows how far it has synced, and how many other nodes it's connected to.
 - *Start when I log in* keeps your node running in the background after a restart.
 - The node's data lives in the app's own folder (*Show* opens it):
@@ -67,7 +72,7 @@ registers itself for those links.
   signature.
 - **Resolving:** it replays them through Cairn's own resolver (`@inversealtruism/cairnx-core`).
 - **Opening:** it goes where the name points: the link in its profile's `url`, or else its holder's
-  page on Commonplace, read through your node. When the profile points to a site (`contenthash`,
+  page on Commonplace, read through your node (or the doors, while it catches up). When the profile points to a site (`contenthash`,
   `ipfs://…`), the app opens it from this computer:
   - It downloads the site from an IPFS gateway and checks every block against the address the name
     points to, so a gateway can refuse to send it but can't change it. It keeps the checked copy in

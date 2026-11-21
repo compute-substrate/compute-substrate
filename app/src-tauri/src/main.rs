@@ -864,10 +864,25 @@ fn name_answer(sites: tauri::State<'_, Sites>, name: String, go: Option<String>,
 }
 
 #[tauri::command]
-fn site_url() -> String {
+fn site_url(node: Option<String>) -> String {
     // localhost rather than 127.0.0.1: browsers treat it as a secure origin, which wallets and
-    // passkeys need. Reading goes through this computer's own node.
-    format!("{}/?node={}", names_origin("commonplace"), "http%3A%2F%2F127.0.0.1%3A8789")
+    // passkeys need. Reading goes through this computer's own node, or until it has caught up, a
+    // door (an https address; Commonplace checks everything it reads either way).
+    format!("{}/?node={}", names_origin("commonplace"), url_encode(&reading_node(node.as_deref())))
+}
+
+// the node handed to Commonplace: an https door, or else this computer's own
+fn reading_node(node: Option<&str>) -> String {
+    let own = format!("http://{RPC}");
+    match node.map(|n| n.trim().trim_end_matches('/')) {
+        Some(n) if n == own => own,
+        Some(n) if n.starts_with("https://") && n.len() < 200 && n[8..].chars().all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c)) && !n[8..].is_empty() => n.to_string(),
+        _ => own,
+    }
+}
+
+fn url_encode(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 #[tauri::command]
@@ -1037,6 +1052,16 @@ mod tests {
         assert!(!valid_peer("--rpc 0.0.0.0:8789"));
     }
 
+    #[test]
+    fn commonplace_reads_a_door_or_this_computer() {
+        assert_eq!(reading_node(None), "http://127.0.0.1:8789");
+        assert_eq!(reading_node(Some("https://csd.aon.network/")), "https://csd.aon.network");
+        assert_eq!(reading_node(Some("https://1-2-3-4.sslip.io")), "https://1-2-3-4.sslip.io");
+        assert_eq!(reading_node(Some("http://evil.example")), "http://127.0.0.1:8789");
+        assert_eq!(reading_node(Some("https://a.b/x?y")), "http://127.0.0.1:8789");
+        assert_eq!(url_encode("http://127.0.0.1:8789"), "http%3A%2F%2F127.0.0.1%3A8789");
+    }
+
     fn get(port: u16, path: &str) -> (u16, String) {
         use std::io::{Read, Write};
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -1079,7 +1104,8 @@ mod tests {
         assert_eq!(get(port, "/"), (200, "v2".into()));
         assert!(valid_cid("bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs44"));
         assert!(!valid_cid("../bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs"));
-        assert_eq!(doors(), vec!["https://csd.aon.network".to_string()]);
+        assert_eq!(doors()[0], "https://csd.aon.network");
+        assert!(doors().iter().all(|d| d.starts_with("https://")));
         assert_eq!(name_of_host("commonplace.localhost"), Some("commonplace".into()));
         assert_eq!(b64(b"Man"), "TWFu");
         assert_eq!(b64(b"Ma"), "TWE=");

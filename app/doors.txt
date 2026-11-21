@@ -1,3 +1,5 @@
 # Doors this app reads sites from and gives sites to: public nodes running a site store
 # (sites/, csd-sites), as https base URLs, one per line. Anyone can run one: docs/public-node.md.
 https://csd.aon.network
+https://151-240-121-186.sslip.io
+https://151-240-121-187.sslip.io

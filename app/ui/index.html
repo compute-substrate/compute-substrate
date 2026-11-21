@@ -174,6 +174,7 @@
         <div><b id="height">–</b><span>blocks checked</span></div>
         <div><b id="peers">–</b><span>connected nodes</span></div>
       </div>
+      <p class="hint" id="syncNote" hidden></p>
       <div class="row">
         <div>Apps on this computer can use it at<small><code id="rpc">http://127.0.0.1:8789</code></small></div>
         <button id="copy">Copy</button>
@@ -199,8 +200,26 @@
   const $ = id => document.getElementById(id);
   const fmt = n => Number(n).toLocaleString();
   let rpc = "http://127.0.0.1:8789";
+  // Until this computer's node has caught up, names and Commonplace read through the doors instead
+  // (every answer still checked here), so the app works from the first seconds
+  let ownReady = false, doorsUp = null;
+  async function doorsAnswer() {
+    if (doorsUp && Date.now() - doorsUp.at < 60_000) return doorsUp.ok;
+    const ok = (await Promise.all((await doorList()).slice(0, 6).map(async d => {
+      try { const r = await fetch(d + "/tip", { signal: AbortSignal.timeout(6000) }); return r.ok; } catch { return false; }
+    }))).some(Boolean);
+    doorsUp = { at: Date.now(), ok };
+    return ok;
+  }
+  // the node Commonplace reads: this computer's, once it has caught up; until then a door that answers
+  async function readingNode() {
+    if (ownReady) return rpc;
+    for (const d of await doorList()) { try { const r = await fetch(d + "/tip", { signal: AbortSignal.timeout(6000) }); if (r.ok) return d; } catch {} }
+    return rpc;
+  }
+  async function commonplaceUrl() { return invoke("site_url", { node: await readingNode() }); }
 
-  function show(dot, headline, detail, progress) {
+  function showState(dot, headline, detail, progress) {
     $("dot").className = "dot " + dot;
     $("statusBox").className = "status " + dot;
     $("headline").textContent = headline;
@@ -216,11 +235,29 @@
     } catch { return null; }
   }
 
+  // While this computer's node gets going, the app is ready anyway when the doors answer: its own
+  // progress goes in Settings, quietly
   async function tick() {
+    const r = await nodeTick();
+    ownReady = r === "ready";
+    $("syncNote").hidden = ownReady || !r;
+    if (ownReady || !r || r === "hold") return;
+    if (await doorsAnswer()) {
+      $("syncNote").textContent = typeof r === "string" ? lastDetail || "This computer's copy of the network is getting ready." : `This computer's copy of the network is catching up (${Math.floor(r * 100)}%). Until it has, everything is read through the doors and checked here.`;
+      show("ok", "Ready", "");
+    }
+  }
+  let lastDetail = "";
+  async function nodeTick() {
     let s;
-    try { s = await invoke("node_state"); } catch (e) { return; }
+    try { s = await invoke("node_state"); } catch (e) { return null; }
     if (s.rpc) { rpc = s.rpc; $("rpc").textContent = rpc; }
     $("failActions").hidden = s.phase !== "failed";
+    const show = (dot, headline, detail, progress) => {
+      lastDetail = detail ? String(detail).split("\n")[0] : "";
+      showState(dot, headline, detail, progress);
+      return dot === "ok" ? "ready" : dot === "bad" || /^Clos/.test(headline) ? "hold" : progress != null && /^Catching up/.test(headline) ? progress : "busy";
+    };
 
     if (s.phase === "failed") return show("bad", "Something went wrong", s.message);
     if (s.phase === "stopping") return show("busy", "Closing…", s.message && !s.message.endsWith("…") ? s.message : "Saving everything before it closes. This can take a moment.", s.progress);
@@ -241,8 +278,9 @@
     if (best > h.height + 1) {
       return show("busy", `Catching up ${Math.floor(100 * h.height / best)}%`, `Block ${fmt(h.height)} of ${fmt(best)}. Each one is checked here before it's kept.` + note, h.height / best);
     }
-    show("ok", "Ready", "" + note);
+    return show("ok", "Ready", "" + note);
   }
+  const show = showState;
 
   $("copy").onclick = async () => {
     try { await navigator.clipboard.writeText(rpc); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1500); } catch {}
@@ -263,7 +301,9 @@
     const st = $("nameStatus");
     st.textContent = `Looking up ${input.replace(/^web\+csd:(\/\/)?/, "")}…`;
     try {
-      const r = await CsdResolver.lookup(input);
+      const r = await CsdResolver.lookup(input, { doors: await doorList() });
+      // no site or link: its holder's page in Commonplace, read where the name was
+      if (r.page) r.open = `${await invoke("site_url", { node: r.node })}#/p/${r.page}`;
       if (!r.open) { st.textContent = r.why; if (!show) invoke("name_answer", { name: r.name, why: r.why }).catch(() => {}); return; }
       let url = r.open;
       const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(r.open)?.[1];
@@ -330,7 +370,9 @@
     const shipped = await invoke("doors").catch(() => []);
     let announced = [];
     try {
-      const r = await fetch(`${rpc}/proposals/${encodeURIComponent(DOOR_TOPIC)}/200`, { signal: AbortSignal.timeout(10_000) });
+      // read through this computer's node once it has caught up, else through a shipped door
+      const from = ownReady ? rpc : shipped[0] ?? rpc;
+      const r = await fetch(`${from}/proposals/${encodeURIComponent(DOOR_TOPIC)}/200`, { signal: AbortSignal.timeout(10_000) });
       const j = await r.json();
       announced = (j.proposals ?? []).sort((a, b) => Number(b.height) - Number(a.height)).map(p => String(p.uri ?? "").trim().replace(/\/+$/, ""))
         .filter(u => { try { const x = new URL(u); return x.protocol === "https:" && !x.username && !x.search && !x.hash && x.pathname === "/" && !privateHost(x.hostname); } catch { return false; } });
@@ -387,7 +429,7 @@
     $("publishTile").onclick = () => $("publishFolder").click();
     const open = async i => {
       const x = list[i];
-      if (x.carried && !x.names.length) invoke("plugin:opener|open_url", { url: await invoke("site_url") });
+      if (x.carried && !x.names.length) invoke("plugin:opener|open_url", { url: await commonplaceUrl() });
       else if (x.names[0]) openName(x.names[0]);
     };
     $("sites").querySelectorAll("[data-open]").forEach(t => {
@@ -447,7 +489,7 @@
     pending.name = name; pending.until = Date.now() + 60 * 60_000;
     $("publishStatus").textContent = "Opening your name's page. Approve the change there in Cairn Wallet.";
     await openName("commonplace", false).catch(() => {}); // the newest Commonplace, for its name page
-    const base = await invoke("site_url");
+    const base = await commonplaceUrl();
     await invoke("plugin:opener|open_url", { url: `${base}#/n/${name}/site/${pending.cid}` });
     publishTick();
   };
