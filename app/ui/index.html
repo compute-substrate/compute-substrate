@@ -184,15 +184,6 @@
     <button class="hint" id="discoverMore" hidden style="background:none;border:0;cursor:pointer;text-decoration:underline;margin-top:8px">Show all</button>
   </div>
 
-  <div class="ask" id="ask" hidden role="dialog" aria-modal="true" aria-labelledby="askTitle">
-    <div>
-      <h3 id="askTitle"></h3>
-      <p class="what" id="askWhat"></p>
-      <p class="hint" style="margin:0" id="askBal"></p>
-      <label><input type="checkbox" id="askAlways"> <span id="askAlwaysText"></span></label>
-      <div class="btns"><button id="askNo">Decline</button><button id="askYes">Allow</button></div>
-    </div>
-  </div>
 
   <div class="ask" id="keepDlg" hidden role="dialog" aria-modal="true" aria-labelledby="keepTitle">
     <div>
@@ -233,6 +224,14 @@
         <label class="switch"><input type="checkbox" id="autostart" aria-label="Start when I log in"><i></i></label>
       </div>
       <div class="row">
+        <div>Show Doorway in the menu bar<small id="trayNote">Its icon opens this window or quits. Without it, closing this window quits, and opening Doorway again brings it back.</small></div>
+        <label class="switch"><input type="checkbox" id="tray" aria-label="Show Doorway in the menu bar"><i></i></label>
+      </div>
+      <div class="row">
+        <div>Quit Doorway<small>Sites stop opening by name until you start it again</small></div>
+        <button id="quit">Quit</button>
+      </div>
+      <div class="row">
         <div>Open sites in your browser<small>Any name works as <code>name.localhost</code>, like <code>commonplace.localhost</code></small></div>
       </div>
       <div class="row">
@@ -265,7 +264,7 @@
     </div>
   </details>
 
-  <footer>Closing this window closes Doorway.</footer>
+  <footer id="closeNote">Closing this window keeps Doorway running in the menu bar.</footer>
 
 <script src="resolver.js"></script>
 <script>
@@ -362,7 +361,23 @@
   $("folder").onclick = $("log").onclick = () => invoke("open_data_folder");
   $("retry").onclick = async () => { show("busy", "Getting ready…", ""); $("failActions").hidden = true; try { await invoke("restart"); } catch {} tick(); };
 
+  // Windows calls it the tray
+  const where = /Win/.test(navigator.platform) ? "the tray" : "the menu bar";
+  if (where !== "the menu bar") {
+    $("tray").closest(".row").querySelector("div").firstChild.textContent = "Show Doorway in the tray";
+    $("trayNote").textContent = $("trayNote").textContent.replace("the menu bar", "the tray");
+  }
+  const closeNote = on => { $("closeNote").textContent = on ? `Closing this window keeps Doorway running in ${where}.` : "Closing this window quits Doorway."; };
   (async () => {
+    try { const on = await invoke("tray_shown"); $("tray").checked = on; closeNote(on); } catch {}
+    $("tray").onchange = async e => { try { await invoke("set_tray", { on: e.target.checked }); closeNote(e.target.checked); } catch { e.target.checked = !e.target.checked; } };
+    $("quit").onclick = () => invoke("quit_app");
+    // the very first launch: start at login from now on, and show a site working, in the browser
+    try {
+      if (await invoke("first_run")) {
+        setTimeout(async () => { try { await invoke("plugin:opener|open_url", { url: await commonplaceUrl() }); } catch {} }, 1500);
+      }
+    } catch {}
     try { $("autostart").checked = await invoke("plugin:autostart|is_enabled"); } catch {}
     $("autostart").onchange = async e => {
       try { await invoke(e.target.checked ? "plugin:autostart|enable" : "plugin:autostart|disable"); }
@@ -767,11 +782,13 @@
   };
 
   const asks = [];
+  let replyTo = null;
+  listen("ask-reply", e => replyTo && replyTo(e.payload ?? {}));
   listen("site-ask", e => { asks.push(e.payload); if (asks.length === 1) nextAsk(); });
   async function nextAsk() {
     const a = asks[0];
     if (!a) return;
-    const done = (ok, error) => { invoke("answer_ask", { id: a.id, ok, error }).catch(() => {}); asks.shift(); $("ask").hidden = true; nextAsk(); };
+    const done = (ok, error) => { invoke("answer_ask", { id: a.id, ok, error }).catch(() => {}); asks.shift(); nextAsk(); };
     try {
       if (!wallet) await loadWallet();
       if (a.kind === "prove") return done(W.prove(wallet.key, a.body?.authHash), null);
@@ -787,21 +804,22 @@
       };
       // allowed without asking, within its day's budget
       if (allowed()[a.site] && !W.isKeep(ask) && spentToday(a.site) + csd <= BUDGET) return go();
-      $("askTitle").textContent = W.isKeep(ask) ? `${a.site}.csd asks to keep a site up` : `${a.site}.csd asks to write`;
-      $("askAlways").closest("label").hidden = W.isKeep(ask);
-      $("askWhat").textContent = W.describe(ask);
+      // the person decides, in the small approval window (ask.html), on top of whatever they're doing
       const bal = $("walletBal").textContent;
-      $("askBal").textContent = /^[\d.]+$/.test(bal) ? `Your key holds ${bal} CSD.` : "";
-      $("askAlways").checked = false;
-      $("askAlwaysText").textContent = `Allow ${a.site}.csd without asking, up to ${BUDGET} CSD a day`;
-      $("ask").hidden = false;
-      $("askYes").focus();
-      $("askYes").onclick = () => {
-        if ($("askAlways").checked) { const m = allowed(); m[a.site] = { since: Date.now(), spent: [] }; store.set("doorway.allowed", m); }
-        $("ask").hidden = true;
-        go();
-      };
-      $("askNo").onclick = () => done(null, "Declined in Doorway.");
+      const reply = await new Promise(resolve => {
+        replyTo = r => { if (r.id === a.id || r.closed) resolve(r); };
+        invoke("show_ask", { ask: {
+          id: a.id,
+          title: W.isKeep(ask) ? `${a.site}.csd asks to keep a site up` : `${a.site}.csd asks to write`,
+          what: W.describe(ask),
+          balance: /^[\d.]+$/.test(bal) ? `Your key holds ${bal} CSD.` : "",
+          always: W.isKeep(ask) ? "" : `Allow ${a.site}.csd without asking, up to ${BUDGET} CSD a day`,
+        } }).catch(() => resolve({ allow: false }));
+      });
+      replyTo = null;
+      if (!reply.allow) return done(null, "Declined in Doorway.");
+      if (reply.always && !W.isKeep(ask)) { const m = allowed(); m[a.site] = { since: Date.now(), spent: [] }; store.set("doorway.allowed", m); }
+      go();
     } catch (err) { done(null, String(err && err.message || err)); }
   }
   loadWallet().then(welcomeOnce).catch(() => {});

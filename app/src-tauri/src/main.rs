@@ -636,13 +636,6 @@ fn doorway_request(app: &tauri::AppHandle, mut req: tiny_http::Request, name: St
             asks.waiting.lock().unwrap().insert(id, tx);
             let kind = if path.ends_with("prove") { "prove" } else { "write" };
             let _ = app.emit("site-ask", serde_json::json!({ "id": id, "site": name, "kind": kind, "body": body }));
-            if kind == "write" {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.unminimize();
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-            }
             std::thread::spawn(move || {
                 let answer = rx.recv_timeout(Duration::from_secs(300)).unwrap_or_else(|_| Err("Nobody answered in Doorway.".into()));
                 asks.waiting.lock().unwrap().remove(&id);
@@ -697,6 +690,152 @@ fn wallet_set(app: tauri::AppHandle, key: String, address: String) -> Result<(),
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
     fs::rename(&tmp, &file).map_err(|e| e.to_string())
+}
+
+// ── The small approval window ───────────────────────────────────────────────
+// A site's ask is decided in the main window's script (allowed without asking, or not); when the
+// person has to decide, it shows here, small and on top, and the answer goes back to the main window.
+#[derive(Default)]
+struct AskShown(Mutex<Option<serde_json::Value>>);
+
+#[tauri::command]
+fn show_ask(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, ask: serde_json::Value) -> Result<(), String> {
+    *shown.0.lock().unwrap() = Some(ask.clone());
+    if let Some(w) = app.get_webview_window("ask") {
+        let _ = app.emit_to("ask", "ask-show", ask);
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, "ask", tauri::WebviewUrl::App("ask.html".into()))
+        .title("Doorway")
+        .inner_size(400.0, 260.0)
+        .resizable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .always_on_top(true)
+        .center()
+        .focused(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ask_current(shown: tauri::State<'_, AskShown>) -> Option<serde_json::Value> {
+    shown.0.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn ask_reply(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, reply: serde_json::Value) {
+    *shown.0.lock().unwrap() = None;
+    let _ = app.emit_to("main", "ask-reply", reply);
+    if let Some(w) = app.get_webview_window("ask") {
+        let _ = w.hide();
+    }
+}
+
+// ── Living in the menu bar ──────────────────────────────────────────────────
+// Doorway runs in the background: closing its window hides it, and the menu bar icon (the tray on
+// Windows) opens it again or quits. The icon can be turned off in Settings; opening Doorway again
+// then shows the window.
+const NO_TRAY: &str = "no-tray";
+const FIRST_RUN_DONE: &str = "first-run-done";
+
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+fn quit(app: &tauri::AppHandle) {
+    let node = app.state::<Arc<Node>>().inner().clone();
+    if node.child.lock().unwrap().is_none() {
+        app.exit(0);
+        return;
+    }
+    // the node stops cleanly first, and the window says so while it does
+    show_main(app);
+    node.set("stopping", "Stopping the node…");
+    let _ = app.emit("node-changed", ());
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        stop(&node);
+        handle.exit(0);
+    });
+}
+
+fn data_flag(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join(name))
+}
+
+fn make_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let open = MenuItem::with_id(app, "open", "Open Doorway", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit Doorway", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit_item])?;
+    let mut b = TrayIconBuilder::with_id("doorway").tooltip("Doorway").menu(&menu).show_menu_on_left_click(cfg!(target_os = "macos"));
+    if let Some(icon) = app.default_window_icon() {
+        b = b.icon(icon.clone());
+    }
+    b.on_menu_event(|app, e| match e.id.as_ref() {
+        "open" => show_main(app),
+        "quit" => quit(app),
+        _ => {}
+    })
+    .on_tray_icon_event(|tray, e| {
+        // on Windows a click opens the window; the menu is on the right button
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+            if !cfg!(target_os = "macos") {
+                show_main(tray.app_handle());
+            }
+        }
+    })
+    .build(app)?;
+    let on = !data_flag(app, NO_TRAY).is_some_and(|f| f.exists());
+    if let Some(t) = app.tray_by_id("doorway") {
+        let _ = t.set_visible(on);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn tray_shown(app: tauri::AppHandle) -> bool {
+    !data_flag(&app, NO_TRAY).is_some_and(|f| f.exists())
+}
+
+#[tauri::command]
+fn set_tray(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    let f = data_flag(&app, NO_TRAY).ok_or("no data folder")?;
+    if on { let _ = fs::remove_file(&f); } else { fs::write(&f, b"").map_err(|e| e.to_string())?; }
+    if let Some(t) = app.tray_by_id("doorway") {
+        let _ = t.set_visible(on);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    quit(&app);
+}
+
+// The first launch: Doorway starts at login from then on (it can be switched off in Settings),
+// and the window opens a site in the browser to show it working. True only the first time.
+#[tauri::command]
+fn first_run(app: tauri::AppHandle) -> bool {
+    let Some(f) = data_flag(&app, FIRST_RUN_DONE) else { return false };
+    if f.exists() {
+        return false;
+    }
+    let _ = fs::create_dir_all(f.parent().unwrap());
+    let _ = fs::write(&f, b"");
+    use tauri_plugin_autostart::ManagerExt;
+    let _ = app.autolaunch().enable();
+    true
 }
 
 fn percent_decode(s: &str) -> String {
@@ -1188,7 +1327,8 @@ fn main() {
         .manage(node.clone())
         .manage(Sites::default())
         .manage(Arc::new(Asks::default()))
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url])
+        .manage(AskShown::default())
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run])
         .setup({
             let node = node.clone();
             move |app| {
@@ -1208,6 +1348,12 @@ fn main() {
                     }
                 }
                 serve_known_sites(app.handle(), &app.state::<Sites>());
+                // on macOS, a menu bar app: no Dock icon, nothing in the way
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                if let Err(e) = make_tray(app.handle()) {
+                    eprintln!("[app] no menu bar icon: {e}");
+                }
                 {
                     let h = app.handle().clone();
                     std::thread::spawn(move || serve_names(h));
@@ -1218,19 +1364,20 @@ fn main() {
         .on_window_event({
             let node = node.clone();
             move |window, event| {
-                // Closing the window quits the app, but first the node stops cleanly; the window
-                // stays up saying so until it has.
+                // Closing the window keeps Doorway running in the background, in the menu bar; with
+                // the icon turned off, closing quits (the node stopping cleanly first). The small
+                // approval window closing is a "no".
                 if let WindowEvent::CloseRequested { api, .. } = event {
-                    if node.child.lock().unwrap().is_some() {
+                    let app = window.app_handle();
+                    if window.label() == "ask" {
                         api.prevent_close();
-                        let node = node.clone();
-                        let handle = window.app_handle().clone();
-                        node.set("stopping", "Stopping the node…");
-                        let _ = handle.emit("node-changed", ());
-                        std::thread::spawn(move || {
-                            stop(&node);
-                            handle.exit(0);
-                        });
+                        ask_reply(app.clone(), app.state::<AskShown>(), serde_json::json!({ "closed": true }));
+                    } else if tray_shown(app.clone()) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else if node.child.lock().unwrap().is_some() {
+                        api.prevent_close();
+                        quit(app);
                     }
                 }
             }
