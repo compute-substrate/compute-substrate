@@ -56,9 +56,8 @@
   .pulse.beat { animation: beat 1.2s ease-out 1; }
   @keyframes beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
 
-  section.part { display: grid; grid-template-columns: 220px 1fr; gap: 40px; padding-block: 64px; border-bottom: 1px solid var(--line); }
+  section.part { padding-block: 64px; border-bottom: 1px solid var(--line); }
   .part > div { min-width: 0; }
-  .part h2 { font: 400 15px/1.4 var(--sans); color: var(--faint); margin: 6px 0 0; letter-spacing: 0.02em; }
   .part h3 { font: 400 clamp(28px, 3.4vw, 40px)/1.15 var(--serif); margin: 0 0 14px; letter-spacing: -0.01em; max-width: 20ch; text-wrap: balance; }
   .part p { margin: 0 0 14px; color: var(--soft); max-width: 38em; }
   .part .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
@@ -81,7 +80,7 @@
     .live { grid-template-columns: 1fr 1fr; }
     .live > div:nth-child(3) { padding-left: 0; border-left: 0; }
     .live > div:nth-child(n+3) { border-top: 1px solid var(--line); }
-    section.part { grid-template-columns: 1fr; gap: 6px; padding-block: 44px; }
+    section.part { padding-block: 44px; }
     .facts { grid-template-columns: 1fr; }
     nav.links { display: none; }
   }
@@ -112,7 +111,6 @@
   </section>
 
   <section class="part" id="open">
-    <h2>Open sites</h2>
     <div>
       <h3>Type a name, get a site.</h3>
       <p>Doorway is a small app for your computer. Type a name like <b>commonplace</b> and it opens the site, from whichever doors have it, checked byte by byte against the address its name points to. Every name gets its own address on your computer, <code>commonplace.localhost</code>, in your normal browser.</p>
@@ -125,7 +123,6 @@
   </section>
 
   <section class="part" id="keep">
-    <h2>Keep them up</h2>
     <div>
       <h3>A site lasts as long as anyone thinks it should.</h3>
       <p>On the web, a page dies the day one person stops paying for it. Here, anyone can keep any site up, a year at a time, for 0.25 CSD a year: the doors keep it until its time runs out, whether or not a name still points to it. Years stack, anyone can add more, and anyone can check how long a site is kept from the network itself.</p>
@@ -134,7 +131,6 @@
   </section>
 
   <section class="part" id="build">
-    <h2>Build on it</h2>
     <div>
       <h3>A whole app is one page.</h3>
       <p>No server, no database, no accounts. The kit reads a topic from any door and checks every record in the browser; writing is signed by a key the page keeps, or by Doorway's. Publish the folder with Doorway and point a name at it.</p>
@@ -152,7 +148,6 @@ const entries = await net.read("guestbook.example");   // each one checked</code
   </section>
 
   <section class="part" id="door">
-    <h2>Run a door</h2>
     <div>
       <h3>One command, on any small server.</h3>
       <p>A door serves the network to browsers and keeps the sites names point to and people keep up. It needs no domain and no approval: it announces itself on the network, and Doorway finds it.</p>
@@ -162,12 +157,11 @@ const entries = await net.read("guestbook.example");   // each one checked</code
   </section>
 
   <section class="part">
-    <h2>Why it holds</h2>
     <div class="facts">
       <div><b>Nothing to trust</b><p>Every page and record is checked on your own computer, against its address and the network's proof-of-work. A door can refuse to answer; it can't change a byte.</p></div>
       <div><b>No accounts</b><p>You are a key. Nobody can lock you out, and nobody needs your email.</p></div>
       <div><b>No owner</b><p>Anyone can run a node or a door, and none of them is special. The rules are the code everyone runs.</p></div>
-      <div><b>Writing costs a stamp</b><p>Each record costs a little CSD, the network's unit, like a stamp. Spam doesn't pay, so nobody has to moderate it away.</p></div>
+      <div><b>Writing costs a stamp</b><p>Each record costs a little CSD, the network's unit. Spam doesn't pay, so nobody has to moderate it away.</p></div>
     </div>
   </section>
 
