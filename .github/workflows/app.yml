@@ -120,10 +120,24 @@ jobs:
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
+      # Signed with a Developer ID and notarized by Apple when the repository has these secrets (then
+      # macOS opens it without asking); without them it's built unsigned, as before.
       - name: Build the app (macOS)
         if: matrix.name == 'macos'
         working-directory: app/src-tauri
-        run: cargo tauri build --target universal-apple-darwin --bundles dmg
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          AID: ${{ secrets.APPLE_ID }}
+          APW: ${{ secrets.APPLE_PASSWORD }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ]; then
+            export APPLE_CERTIFICATE="$CERT" APPLE_CERTIFICATE_PASSWORD="$CERT_PASSWORD" APPLE_SIGNING_IDENTITY="$IDENTITY"
+            export APPLE_ID="$AID" APPLE_PASSWORD="$APW" APPLE_TEAM_ID="$TEAM"
+          fi
+          cargo tauri build --target universal-apple-darwin --bundles dmg
 
       - name: Build the app (Windows)
         if: matrix.name == 'windows'
