@@ -779,7 +779,12 @@ fn make_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit Doorway", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit_item])?;
     let mut b = TrayIconBuilder::with_id("doorway").tooltip("Doorway").menu(&menu).show_menu_on_left_click(cfg!(target_os = "macos"));
-    if let Some(icon) = app.default_window_icon() {
+    // a plain doorway, drawn in the menu bar's own color on macOS; the app's icon on Windows
+    if cfg!(target_os = "macos") {
+        if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png")) {
+            b = b.icon(icon).icon_as_template(true);
+        }
+    } else if let Some(icon) = app.default_window_icon() {
         b = b.icon(icon.clone());
     }
     b.on_menu_event(|app, e| match e.id.as_ref() {
