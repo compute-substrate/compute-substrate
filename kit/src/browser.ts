@@ -12,7 +12,7 @@
 import { EPOCH_LEN, MIN_FEE_PROPOSE, SEND_FEE, buildAppTx, buildSendTx, buildSplitTx, bytesToHex, hexToBytes, keyFromPrivate, sha256d, utf8, type CsdKey, type Hex } from "./core";
 
 type Net = { api: { utxos: (a: Hex) => Promise<{ txid: Hex; vout: number; value: bigint }[]>; submit: (tx: any) => Promise<Hex>; tip: () => Promise<{ height: number }>; proposalsIn: (d: string, limit?: number) => Promise<{ uri?: string; height: number | bigint }[]> } };
-type Signer = { address: Hex; send: (app: any, fee: bigint) => Promise<Hex> };
+type Signer = { address: Hex; send: (app: any, fee: bigint, o?: { burn?: bigint }) => Promise<Hex> };
 
 const store = {
   get(k: string): string | null { try { return localStorage.getItem(k); } catch { return null; } },
@@ -66,7 +66,7 @@ export async function doorwayKey(): Promise<BrowserKey | null> {
     const held = () => { throw new Error("Doorway keeps this key: back it up or change it in Doorway's Settings."); };
     return {
       slot: "doorway", address: address as Hex, kept: true, doorway: true,
-      signer: () => ({ address: address as Hex, send: async (app, fee) => String((await post("/.doorway/write", { app, fee })).txid).toLowerCase() as Hex }),
+      signer: () => ({ address: address as Hex, send: async (app, fee, o = {}) => String((await post("/.doorway/write", { app, fee, burn: o.burn ?? 0n })).txid).toLowerCase() as Hex }),
       backup: held, restore: held, forget: held,
       prove: authHash => post("/.doorway/prove", { authHash }),
     };
@@ -87,10 +87,11 @@ export function browserKey(app = "csd"): BrowserKey {
     kept,
     signer: (net) => ({
       address: key.addr20,
-      async send(app, fee) {
+      async send(app, fee, o = {}) {
         const utxos = await net.api.utxos(key.addr20);
-        if (utxos.reduce((s, u) => s + u.value, 0n) < fee) throw new Error(`Not enough CSD at ${key.addr20}: writing this costs ${Number(fee) / 1e8} CSD.`);
-        return (await net.api.submit(buildAppTx(utxos, key, app, fee))).toLowerCase() as Hex;
+        const burn = o.burn ?? 0n;
+        if (utxos.reduce((s, u) => s + u.value, 0n) < fee + burn) throw new Error(`Not enough CSD at ${key.addr20}: writing this costs ${Number(fee + burn) / 1e8} CSD.`);
+        return (await net.api.submit(burn ? buildSplitTx(utxos, key, [{ to: ("0x" + "00".repeat(20)) as Hex, value: burn }], fee, app) : buildAppTx(utxos, key, app, fee))).toLowerCase() as Hex;
       },
     }),
     backup: () => priv,

@@ -150,7 +150,9 @@ fn other_doors(node: &str, given: &[String], me: Option<&str>) -> Vec<String> {
 // checked like any site given to this door.
 fn fill(door: &Door, node: &str, given: &[String], me: Option<&str>) {
     let ix = door.index.lock().unwrap();
-    let mut want: Vec<String> = ix.current.values().map(|(c, _)| c.clone()).collect();
+    let tip = ix.tip;
+    let mut want: Vec<String> = ix.current.values().map(|(c, _)| c.clone())
+        .chain(ix.kept.iter().filter(|(_, &u)| u > tip).map(|(c, _)| c.clone())).collect();
     drop(ix);
     want.sort();
     want.dedup();
@@ -194,16 +196,20 @@ fn follow(node: String, door: Arc<Door>, given: Vec<String>, me: Option<String>)
             Ok(()) => {}
             Err(e) => eprintln!("[sites] {e}"),
         }
+        if let Err(e) = index::catch_up_keeps(&node, &mut ix) {
+            eprintln!("[sites] {e}");
+        }
         // forget long-dropped sites
         let tip = ix.tip;
         ix.dropped.retain(|_, h| *h + index::GRACE_BLOCKS > tip);
+        ix.kept.retain(|_, u| *u > tip);
         save_index(&door.dir, &ix);
         *door.index.lock().unwrap() = ix;
         if let Some(f) = &door.deny_file {
             *door.deny.lock().unwrap() = Deny::read(f);
         }
         for (cid, _) in kept(&door.dir) {
-            let why = if door.denied(&cid) { Some("on the deny list") } else if !door.index.lock().unwrap().wanted(&cid) { Some("no name points to it any more") } else { None };
+            let why = if door.denied(&cid) { Some("on the deny list") } else if !door.index.lock().unwrap().wanted(&cid) { Some("no name points to it, and nobody keeps it") } else { None };
             if let Some(why) = why {
                 eprintln!("[sites] dropping {cid}: {why}");
                 let _ = fs::remove_file(car_path(&door.dir, &cid));
@@ -245,7 +251,7 @@ fn handle(mut req: tiny_http::Request, door: &Door) {
         let ix = door.index.lock().unwrap();
         let body = serde_json::json!({
             "ok": true,
-            "sites": ks.iter().map(|(c, n)| serde_json::json!({ "cid": c, "bytes": n })).collect::<Vec<_>>(),
+            "sites": ks.iter().map(|(c, n)| serde_json::json!({ "cid": c, "bytes": n, "kept_until": ix.kept.get(c) })).collect::<Vec<_>>(),
             "names_read_to": ix.next.saturating_sub(1),
             "tip": ix.tip,
         });
@@ -282,7 +288,7 @@ fn handle(mut req: tiny_http::Request, door: &Door) {
                 return text(req, door, 200, "This door has it already.");
             }
             if !door.index.lock().unwrap().wanted(&cid) {
-                return text(req, door, 403, "No .csd name points to this site, so this door doesn't keep it. Point a name to it first (its site, ipfs://<cid>), and give it again once that record is in a block.");
+                return text(req, door, 403, "No .csd name points to this site, and nobody has paid to keep it, so this door doesn't keep it. Point a name to it (its site, ipfs://<cid>), or write a keep record for it (csd.keep), and give it again once that record is in a block.");
             }
             let mut body = Vec::new();
             if req.as_reader().take(MAX_SITE as u64 + 1).read_to_end(&mut body).is_err() {
@@ -400,6 +406,53 @@ mod tests {
         if let Ok(out) = std::env::var("TEST_OUT") {
             fs::write(out, &part).unwrap();
         }
+    }
+
+    #[test]
+    fn keep_records_keep_a_site_for_years() {
+        use index::{YEAR_BLOCKS, PER_YEAR};
+        let site = "bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24";
+        let mut ix = Index { tip: 150_000, ..Default::default() };
+        assert!(!ix.wanted(site));
+        ix.keep(site, 0, 150_000); // a year
+        assert_eq!(ix.kept[site], 150_000 + YEAR_BLOCKS);
+        ix.keep(site, 4 * PER_YEAR, 150_010); // four more burned, plus its own: five, after the first
+        assert_eq!(ix.kept[site], 150_000 + 6 * YEAR_BLOCKS);
+        ix.tip = 150_000 + 6 * YEAR_BLOCKS - 1;
+        assert!(ix.wanted(site));
+        ix.tip += 1;
+        assert!(!ix.wanted(site));
+        // run out: a new record starts from its own block
+        ix.keep(site, 0, ix.tip + 50);
+        assert_eq!(ix.kept[site], ix.tip + 50 + YEAR_BLOCKS);
+        // what a keep record says
+        assert_eq!(index::keep_site(&format!("ipfs://{site}")).as_deref(), Some(site));
+        assert!(index::keep_site("ipfs://nope").is_none());
+    }
+
+    #[test]
+    fn reads_what_a_record_burns() {
+        // version, one input (36 bytes, a 99-byte signature script), two outputs (one to the zero
+        // address), locktime, a proposal
+        let mut t = Vec::new();
+        t.extend(1u32.to_le_bytes());
+        t.extend(1u64.to_le_bytes());
+        t.extend([7u8; 36]);
+        let mut script = vec![64u8]; script.extend([1u8; 64]); script.push(33); script.push(2); script.extend([3u8; 32]);
+        t.extend((script.len() as u64).to_le_bytes()); t.extend(&script);
+        t.extend(2u64.to_le_bytes());
+        t.extend(75_000_000u64.to_le_bytes()); t.extend([0u8; 20]);
+        t.extend(10u64.to_le_bytes()); t.extend([9u8; 20]);
+        t.extend(0u32.to_le_bytes());
+        t.extend(1u32.to_le_bytes());
+        t.extend(8u64.to_le_bytes()); t.extend(b"csd.keep");
+        t.extend([0u8; 32]);
+        let uri = b"ipfs://bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24";
+        t.extend((uri.len() as u64).to_le_bytes()); t.extend(uri);
+        t.extend(5u64.to_le_bytes());
+        let r = index::parse_record(&t).unwrap();
+        assert_eq!(r.burned, 75_000_000);
+        assert!(r.uri.starts_with("ipfs://"));
     }
 
     #[test]

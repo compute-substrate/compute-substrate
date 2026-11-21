@@ -63,6 +63,15 @@ doesn't make people wait for that: what this browser just wrote comes first, wit
 until the block has it (then it's read from the block, checked, like everything else). Show it
 dimmed, or "on its way", as the template does.
 
+## Keeping a site up, for years
+
+A site lives on the doors while a name points to it. To keep one up longer, with or without a name,
+anyone can pay to keep it: `await net.keep(signer, cid, years)` writes a record under `csd.keep`
+naming the site, a year for the record's fee (0.25 CSD) and a year for every 0.25 CSD it burns (sends
+to the all-zero address, which nobody can spend). Years stack, and anyone can add more to any site.
+`await net.kept()` reads how long every site is kept, from the records alone, so a page can say
+"kept up until 2051" and anyone can check it. Doors keep every site with time left.
+
 ## A welcome, so writing just works
 
 Writing costs a little CSD, but the person writing needn't be the one who pays, any more than a

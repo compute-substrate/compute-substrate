@@ -22,13 +22,13 @@
   ],
   "scripts": {
     "build": "node build.mjs && tsc -p tsconfig.json",
-    "test": "tsx test/kit.test.mts && tsx test/anchors.test.mts && tsx test/author.test.mts && tsx test/browser.test.mts"
+    "test": "tsx test/kit.test.mts && tsx test/anchors.test.mts && tsx test/author.test.mts && tsx test/browser.test.mts && tsx test/keep.test.mts"
   },
   "dependencies": {
+    "@intervalplace/aon-sdk": "0.1.0",
     "@noble/curves": "1.9.1",
     "@noble/hashes": "1.8.0",
-    "viem": "2.57.17",
-    "@intervalplace/aon-sdk": "0.1.0"
+    "viem": "2.57.17"
   },
   "devDependencies": {
     "esbuild": "0.25.10",

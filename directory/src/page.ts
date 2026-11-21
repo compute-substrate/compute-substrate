@@ -1,7 +1,7 @@
 // The directory's page: the list (app/resolver/src/directory.ts), and recommending, signed by a
 // key kept in this browser (the kit's browserKey), with the usual ways to get the little CSD it costs.
 import { listSites, siteFace, DIRECTORY, type Listed } from "../../app/resolver/src/directory";
-import { connect, writingKey, claimInvite, openInvites, welcome } from "../../kit/src/index";
+import { connect, writingKey, claimInvite, openInvites, welcome, heightToDate } from "../../kit/src/index";
 
 // Doors: public nodes anyone runs (docs/public-node.md). The page reads through the first that
 // answers, and fetches each site's title and icon from any of them; everything is checked here.
@@ -34,6 +34,10 @@ let sites: Listed[] = [];
 let order: "rec" | "new" = "rec";
 const mine = new Set<string>(); // recommended from here, before the next block shows it
 const faces = new Map<string, { title?: string; icon?: string }>();
+// how long each site is kept up (kit/src/keep.ts): its address -> the block, and the tip
+let kept: { tip: number; until: Map<string, number> } = { tip: 0, until: new Map() };
+const lifeOf = (cid: string) => { const u = kept.until.get(cid); return u && u > kept.tip ? heightToDate(u, kept.tip).getFullYear() : null; };
+let keeping: string | null = null, keepYears = 10;
 
 function render() {
   const q = (($("q") as HTMLInputElement).value || "").trim().toLowerCase();
@@ -52,12 +56,14 @@ function render() {
         <span style="min-width:0"><b>${esc(title)}</b><small>${esc(s.name)}.csd</small></span>
       </a>
       <div class="foot">
-        <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}</span>
+        <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}${lifeOf(s.cid) ? `<span class="life" title="Kept up on the doors until ${lifeOf(s.cid)}, name or not">until ${lifeOf(s.cid)}</span>` : ""}</span>
         <span class="acts">
           <button class="rec quiet" data-share="${esc(s.name)}" title="Share a link to it">Share</button>
+          <button class="rec quiet" data-keep="${esc(s.cid)}" title="Keep it up for years, name or not">Keep</button>
           <button class="rec" data-name="${esc(s.name)}" ${done ? "disabled" : ""}>${done ? "Recommended" : "Recommend"}</button>
         </span>
       </div>
+      ${keeping === s.cid ? keepPanel(s) : ""}
     </article>`;
   }).join("");
 }
@@ -85,11 +91,23 @@ async function share(s: Listed) {
   try { await navigator.clipboard.writeText(url); say(`Link copied: ${url}`); } catch { say(url); }
 }
 
+// adding years to a site: anyone can, for any site (kit/src/keep.ts)
+function keepPanel(s: Listed) {
+  const from = lifeOf(s.cid) ?? new Date().getFullYear();
+  const choices = [...new Set([1, 10, 25, Math.max(1, 2100 - from)])];
+  return `<div class="keep">
+    <small>${lifeOf(s.cid) ? `Kept up until ${lifeOf(s.cid)}.` : "Nobody keeps it up yet: it stays only while its name points to it."} Anyone can add time, and the doors keep it until it runs out, name or not.</small>
+    <div class="years">${choices.map(y => `<button class="rec" data-years="${y}" aria-pressed="${y === keepYears}">${from + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("")}</div>
+    <div class="row"><small>Until ${from + keepYears}, for ${(keepYears * 0.25).toLocaleString()} CSD. The first 0.25 pays for the record; the rest is burned.</small><button class="rec go" data-keepgo="${esc(s.cid)}">Keep it</button></div>
+  </div>`;
+}
+
 async function load() {
   try {
     if (!net) { net = connect({ node: await pickNode() }); $("node").textContent = net.node; }
-    const r = await listSites(net.node);
+    const [r, k] = await Promise.all([listSites(net.node), net.kept().catch(() => kept)]);
     sites = r.sites;
+    kept = k;
     if (opening) return openWanted();
     render();
     // faces, a few at a time, each remembered once it's read
@@ -106,6 +124,29 @@ async function load() {
 $("grid").addEventListener("click", async e => {
   const sh = (e.target as HTMLElement).closest("button[data-share]") as HTMLButtonElement | null;
   if (sh) { const s = sites.find(x => x.name === sh.dataset.share); if (s) share(s); return; }
+  const t = e.target as HTMLElement;
+  const kb = t.closest("button[data-keep]") as HTMLButtonElement | null;
+  if (kb) { keeping = keeping === kb.dataset.keep ? null : kb.dataset.keep!; render(); return; }
+  const yb = t.closest("button[data-years]") as HTMLButtonElement | null;
+  if (yb) { keepYears = Number(yb.dataset.years); render(); return; }
+  const go = t.closest("button[data-keepgo]") as HTMLButtonElement | null;
+  if (go) {
+    const cid = go.dataset.keepgo!, years = keepYears;
+    go.disabled = true;
+    say("Keeping it…");
+    try {
+      await net.keep(me.signer(net as any), cid, years);
+      $("needCsd").hidden = true;
+      say(`Done. It's kept up for ${years} more year${years === 1 ? "" : "s"}, from the next block, in about two minutes.`);
+      keeping = null; render();
+      setTimeout(load, 130_000);
+    } catch (err: any) {
+      go.disabled = false;
+      if (/Not enough CSD/.test(String(err?.message))) { say(`That needs ${(years * 0.25).toLocaleString()} CSD.`); $("needCsd").hidden = false; }
+      else say(String(err?.message ?? err));
+    }
+    return;
+  }
   const b = (e.target as HTMLElement).closest("button.rec") as HTMLButtonElement | null;
   if (!b || b.disabled) return;
   const s = sites.find(x => x.name === b.dataset.name);

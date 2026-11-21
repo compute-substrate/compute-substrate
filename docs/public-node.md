@@ -169,6 +169,10 @@ The site store, [`csd-sites`](../sites/README.md), runs beside the node:
   `ipfs://<CID>`), read from this machine's own node, and for 30 days after. Writing that record
   costs CSD, so nobody can fill your disk with sites no name points to. Up to 64 MB a site, 20 GB in
   all unless you set `--max-gb`.
+- **Or someone keeps it:** a site anyone has paid to keep, with a record under `csd.keep` naming it
+  (`ipfs://<CID>`), until that time runs out: a year a record, and a year for every 0.25 CSD it
+  burns. So a site can outlive its name. The records cost their writers CSD, so nobody can fill your
+  disk for nothing; a door that's full takes nothing more.
 - **Where sites come from:** whoever has one gives it to the doors. Doorway
   does it by itself for every site it opens, from behind any router, since it only connects out.
 - **From other doors:** every 10 minutes it copies, from the other announced doors, any site a name

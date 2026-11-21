@@ -209,7 +209,7 @@ pub fn path_car(car: &[u8], root: Cid, path: &str, max: usize) -> Result<Option<
         at = end;
     }
     let mut out = header.to_vec();
-    let mut add = |c: &Cid, out: &mut Vec<u8>| -> Result<(), String> {
+    let add = |c: &Cid, out: &mut Vec<u8>| -> Result<(), String> {
         let &(s, _, e) = blocks.get(c).ok_or("the site is incomplete")?;
         out.extend_from_slice(&car[s..e]);
         if out.len() > max { Err("too big".into()) } else { Ok(()) }

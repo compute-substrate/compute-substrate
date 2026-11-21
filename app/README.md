@@ -63,6 +63,13 @@ no special place there; anyone can build others over the same records.
   tied to the address a page is served from, so a passkey made on `localhost` is a different key from
   one made on commonplace.place.
 
+### Keeping a site up for years
+
+A site stays on the doors while a name points to it. The hourglass on a site keeps it up for longer,
+a year at a time, whether or not a name still points to it: 0.25 CSD a year, from your key. Anyone can
+add time to any site, so a site lasts as long as anyone thinks it should. A site that's kept shows
+until when ("until 2051"), here and in the directory, and anyone can check that from the network.
+
 ### Your key
 
 Doorway keeps one key for you, so you have one balance and one backup for every site you open

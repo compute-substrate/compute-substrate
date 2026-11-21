@@ -110,7 +110,15 @@
   .ask .btns { display: flex; gap: 10px; justify-content: flex-end; }
   .ask .btns button { border: 0; border-radius: 999px; padding: 10px 18px; font: 600 14px var(--display); cursor: pointer; }
   .ask #askYes { background: var(--accent); color: #fff; }
-  .ask #askNo { background: var(--line); color: var(--ink); }
+  .ask #askNo, .ask #keepNo { background: var(--line); color: var(--ink); }
+  .ask #keepYes { background: var(--accent); color: #fff; }
+  .years { display: flex; gap: 8px; flex-wrap: wrap; }
+  .years button { border-radius: 999px; padding: 8px 14px; font: 600 13px var(--display); }
+  .years button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .tile .life { color: var(--accent); }
+  .tile .keep { right: auto; left: 8px; opacity: 0; }
+  .tile .keep.on { color: var(--accent); opacity: 1; }
+  .tile:hover .keep, .tile .keep:focus-visible { opacity: 1; }
   .group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin-top: 8px; }
   .group h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 2px; }
   .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 6px; }
@@ -167,7 +175,7 @@
       <p class="hint" id="publishOther"><a href="#" id="publishCarLink">Have a .car file instead? Choose it</a></p>
     </div>
   </div>
-  <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up for everyone, with no server.</p>
+  <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up from this computer. The hourglass keeps it up for years, on the doors, and anyone can add time.</p>
   <div id="discoverBox" hidden>
     <h2 style="margin-top:22px">Discover</h2>
     <p class="hint" style="margin:-4px 4px 10px">Sites people recommend, with a star. Nobody keeps this list: it's read from the network.</p>
@@ -183,6 +191,17 @@
       <p class="hint" style="margin:0" id="askBal"></p>
       <label><input type="checkbox" id="askAlways"> <span id="askAlwaysText"></span></label>
       <div class="btns"><button id="askNo">Decline</button><button id="askYes">Allow</button></div>
+    </div>
+  </div>
+
+  <div class="ask" id="keepDlg" hidden role="dialog" aria-modal="true" aria-labelledby="keepTitle">
+    <div>
+      <h3 id="keepTitle"></h3>
+      <p class="hint" style="margin:0" id="keepNow"></p>
+      <p style="font-size:14px;margin:0">Anyone can keep any site up, a year at a time: the doors keep it until its time runs out, with or without a name. Add time for it:</p>
+      <div class="years" id="keepYears"></div>
+      <p class="hint" style="margin:0" id="keepSaid"></p>
+      <div class="btns"><button id="keepForget" class="link" style="margin-right:auto;background:none;border:0;color:var(--muted);text-decoration:underline;padding:0;font:inherit;font-size:13px">Forget it on this computer</button><button id="keepNo">Close</button><button id="keepYes">Keep it</button></div>
     </div>
   </div>
 
@@ -477,8 +496,9 @@
       return `<div class="tile" role="button" tabindex="0" data-open="${i}" title="Open ${esc(title)}">
         <span class="face" style="${x.icon ? "" : `background:${tint(x.cid)}`}">${face}</span>
         <b>${esc(title)}</b>${name && name !== title.toLowerCase().replace(/\s+/g, "") ? `<small>${esc(name)}</small>` : ""}
+        ${lifeOf(x.cid) ? `<small class="life">until ${lifeOf(x.cid)}</small>` : ""}
+        <button class="heart keep${lifeOf(x.cid) ? " on" : ""}" data-keep="${i}" title="${lifeOf(x.cid) ? `Kept up until ${lifeOf(x.cid)}. Add time` : "Keep it up for years, with or without a name"}" aria-label="Keep it up">${HOURGLASS}</button>
         <button class="heart${x.helping ? " on" : ""}" data-help="${i}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${x.helping}">${x.helping ? HEART : HEART_OFF}</button>
-        ${x.carried ? "" : `<button class="forget" data-forget="${i}">Forget</button>`}
       </div>`;
     }).join("") + `<button class="tile add" id="publishTile"><span class="face">+</span><b>Publish</b><small>your own site</small></button>`;
     $("publishTile").onclick = () => $("publishFolder").click();
@@ -491,19 +511,16 @@
       t.onclick = e => { if (!e.target.closest("button")) open(+t.dataset.open); };
       t.onkeydown = e => { if ((e.key === "Enter" || e.key === " ") && e.target === t) { e.preventDefault(); open(+t.dataset.open); } };
     });
+    $("sites").querySelectorAll("[data-keep]").forEach(b => b.onclick = e => { e.stopPropagation(); const x = list[+b.dataset.keep]; keepDialog(x.cid, x.title || x.names[0] || "this site", x.carried ? null : async () => {
+      await invoke("forget_site", { cid: x.cid }).catch(() => {});
+      onDoors.delete(x.cid);
+      renderSites();
+    }); });
     $("sites").querySelectorAll("[data-help]").forEach(b => b.onclick = async e => {
       e.stopPropagation();
       const x = list[+b.dataset.help], on = !x.helping;
       await invoke("set_helping", { cid: x.cid, on }).catch(() => {});
       if (on) { onDoors.delete(x.cid); renderSites(); await seed(x.cid); }
-      renderSites();
-    });
-    $("sites").querySelectorAll("[data-forget]").forEach(b => b.onclick = async e => {
-      e.stopPropagation();
-      const x = list[+b.dataset.forget];
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Sure?"; b.style.opacity = 1; return; }
-      await invoke("forget_site", { cid: x.cid }).catch(() => {});
-      onDoors.delete(x.cid);
       renderSites();
     });
     // the sites you help with go to any door that lacks them: a few seconds in, then every 6 hours
@@ -617,6 +634,55 @@
   // Sites ask at their own address (/.doorway/...), Doorway's server passes the ask here, and it's
   // signed only once allowed. "Allow without asking" is per site, up to 1 CSD a day.
   const W = CsdResolver.wallet;
+  // ── keeping sites up, for years: anyone can, for any site (kit/src/keep.ts) ──
+  const HOURGLASS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  let keptInfo = null;
+  const yearOf = h => keptInfo ? W.heightToDate(h, keptInfo.tip).getFullYear() : null;
+  const lifeOf = cid => { const u = keptInfo?.until.get(cid); return u && u > keptInfo.tip ? yearOf(u) : null; };
+  async function refreshKept() { try { keptInfo = await W.kept(await readingNode()); renderSites(); renderDiscover(); } catch {} }
+  setTimeout(refreshKept, 2000);
+  setInterval(refreshKept, 10 * 60_000);
+  function keepDialog(cid, title, forget) {
+    $("keepForget").hidden = !forget;
+    $("keepForget").textContent = "Forget it on this computer";
+    $("keepForget").onclick = async () => {
+      if ($("keepForget").dataset.sure !== "1") { $("keepForget").dataset.sure = "1"; $("keepForget").textContent = "Sure? Forget it"; return; }
+      $("keepForget").dataset.sure = "";
+      $("keepDlg").hidden = true;
+      await forget();
+    };
+    const now = lifeOf(cid);
+    const fromYear = now ?? new Date().getFullYear();
+    const choices = [1, 10, 25, Math.max(1, 2100 - fromYear)].filter((v, i, a) => a.indexOf(v) === i);
+    let years = choices[1] ?? 1;
+    $("keepTitle").textContent = `Keep ${title} up`;
+    $("keepNow").textContent = now ? `Kept up until ${now}.` : "Nobody keeps it up yet: it stays only while a name points to it.";
+    const show = () => {
+      $("keepYears").innerHTML = choices.map(y => `<button data-y="${y}" aria-pressed="${y === years}">${fromYear + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("");
+      $("keepYears").querySelectorAll("[data-y]").forEach(b => b.onclick = () => { years = +b.dataset.y; show(); });
+      $("keepSaid").textContent = `Until ${fromYear + years}, for ${(years * 0.25).toLocaleString()} CSD from your key${/^[\d.]+$/.test($("walletBal").textContent) ? ` (it holds ${$("walletBal").textContent})` : ""}. The first 0.25 pays for the record; the rest is burned, so nobody gets it.`;
+    };
+    show();
+    $("keepDlg").hidden = false;
+    $("keepNo").onclick = () => { $("keepDlg").hidden = true; };
+    $("keepYes").onclick = async () => {
+      $("keepYes").disabled = true;
+      $("keepSaid").textContent = "Keeping it…";
+      try {
+        if (!wallet) await loadWallet();
+        const node = await readingNode();
+        const tip = (await (await fetch(node + "/tip")).json()).height;
+        await W.send(node, wallet.key, W.keepAsk(cid, years, tip));
+        $("keepSaid").textContent = `Done. It's kept up until ${fromYear + years}, from the next block, in about two minutes.`;
+        setTimeout(refreshKept, 130_000);
+        setTimeout(showBalance, 3000);
+      } catch (err) {
+        const m = String(err && err.message || err);
+        $("keepSaid").textContent = /Not enough CSD/.test(m) ? `That needs ${(years * 0.25).toLocaleString()} CSD, and your key has less. Add some under Settings, Your key.` : m;
+      }
+      $("keepYes").disabled = false;
+    };
+  }
   const STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" fill="currentColor"/></svg>';
   const STAR_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
   const recommended = () => store.get("doorway.recommended") ?? [];
@@ -678,7 +744,7 @@
       if (!wallet) await loadWallet();
       if (a.kind === "prove") return done(W.prove(wallet.key, a.body?.authHash), null);
       const ask = W.readAsk(a.body);
-      const csd = Number(ask.fee) / 1e8;
+      const csd = Number(ask.fee + ask.burn) / 1e8;
       const go = async () => {
         try {
           const txid = await W.send(await readingNode(), wallet.key, ask);
@@ -688,8 +754,9 @@
         } catch (err) { done(null, String(err && err.message || err)); }
       };
       // allowed without asking, within its day's budget
-      if (allowed()[a.site] && spentToday(a.site) + csd <= BUDGET) return go();
-      $("askTitle").textContent = `${a.site}.csd asks to write`;
+      if (allowed()[a.site] && !W.isKeep(ask) && spentToday(a.site) + csd <= BUDGET) return go();
+      $("askTitle").textContent = W.isKeep(ask) ? `${a.site}.csd asks to keep a site up` : `${a.site}.csd asks to write`;
+      $("askAlways").closest("label").hidden = W.isKeep(ask);
       $("askWhat").textContent = W.describe(ask);
       const bal = $("walletBal").textContent;
       $("askBal").textContent = /^[\d.]+$/.test(bal) ? `Your key holds ${bal} CSD.` : "";
@@ -724,7 +791,7 @@
       const tip = mine ? "You recommend it" : `Recommend it, for ${s.listing ? "0.05" : "0.25"} CSD`;
       return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.name)}" title="Open ${esc(s.name)}.csd">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <b>${esc(title)}</b><small>${esc(s.name)}.csd${n ? `, ${n} ★` : ""}</small>
+        <b>${esc(title)}</b><small>${esc(s.name)}.csd${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeOf(s.cid)}</small>` : ""}
         <button class="heart star${mine ? " on" : ""}" data-rec="${esc(s.name)}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${mine}" ${mine ? "disabled" : ""}>${mine ? STAR : STAR_OFF}</button>
       </div>`;
     }).join("");

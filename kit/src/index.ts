@@ -9,13 +9,15 @@
 //
 // What a record means is up to your app: the network only guarantees who wrote what, and when.
 
-import { MIN_FEE_ATTEST, MIN_FEE_PROPOSE, EPOCH_LEN, MAX_URI_BYTES, MAX_DOMAIN_BYTES, buildAppTx, bytesToHex, hexToBytes, keyFromPrivate, node, sha256d, utf8,
+import { MIN_FEE_ATTEST, MIN_FEE_PROPOSE, EPOCH_LEN, MAX_URI_BYTES, MAX_DOMAIN_BYTES, buildAppTx, buildSplitTx, bytesToHex, hexToBytes, keyFromPrivate, node, sha256d, utf8,
   type AppPayload, type Hex } from "./core";
 import { lightClient, type Anchors } from "./light";
 import { cairnConnect, cairnSubmit, discoverCairn, type CairnProvider } from "./cairn";
 
 export * from "./core";
 export { lightClient, GENESIS_HASH, type Verified } from "./light";
+export { keepRecord, keptSites, keepCost, heightToDate, KEEP_TOPIC, BURN, YEAR_BLOCKS, PER_YEAR, MAX_YEARS } from "./keep";
+import { keepRecord, keptSites, BURN } from "./keep";
 export { discoverCairn, type CairnProvider } from "./cairn";
 export { browserKey, writingKey, doorwayKey, claimInvite, inviteKeyFrom, makeInvites, openInvites, welcome, INVITES_MAX, WELCOME_TOPIC, type BrowserKey } from "./browser";
 
@@ -51,7 +53,8 @@ const memPending = new Map<string, (Entry & { author: Hex; at: number })[]>();
 export type Checked = { ok: true; author: Hex; height: number; depth: number } | { ok: false; reason: string };
 
 // Something that can sign and send a record: your own key, or a wallet
-export type Signer = { address: Hex; send: (app: AppPayload, fee: bigint) => Promise<Hex> };
+// `burn`: CSD also sent to the all-zero address, which nobody can spend (keeping a site, keep.ts)
+export type Signer = { address: Hex; send: (app: AppPayload, fee: bigint, o?: { burn?: bigint }) => Promise<Hex> };
 
 export function connect(opts: { node?: string; fetch?: typeof fetch; anchors?: Anchors } = {}) {
   const base = (opts.node ?? PUBLIC_NODE).replace(/\/$/, "");
@@ -105,6 +108,13 @@ export function connect(opts: { node?: string; fetch?: typeof fetch; anchors?: A
     },
     // Attest to a record: a signed number on it. What the number means is up to your app (a like,
     // a vote, a check that holds or fails).
+    // Keep a site up for `years` (see keep.ts): anyone can, for any site, name or not
+    async keep(signer: Signer, cid: string, years = 1): Promise<Hex> {
+      const r = keepRecord(cid, years, (await api.tip()).height);
+      return signer.send(r.app, r.fee, { burn: r.burn });
+    },
+    // Every site someone keeps, and until which block
+    kept: () => keptSites(api as any),
     attest(signer: Signer, id: Hex, score: number, o: { confidence?: number; fee?: bigint } = {}): Promise<Hex> {
       return signer.send({ kind: "attest", proposalId: id, score, confidence: o.confidence ?? 1 }, o.fee ?? MIN_FEE_ATTEST);
     },
@@ -126,10 +136,11 @@ export function keySigner(net: Network, privateKey: Hex): Signer {
   const key = keyFromPrivate(hexToBytes(privateKey));
   return {
     address: key.addr20,
-    async send(app, fee) {
+    async send(app, fee, o = {}) {
       const utxos = await net.api.utxos(key.addr20);
-      if (utxos.reduce((s, u) => s + u.value, 0n) < fee) throw new Error(`Not enough CSD at ${key.addr20}: writing this costs ${Number(fee) / 1e8} CSD.`);
-      return (await net.api.submit(buildAppTx(utxos, key, app, fee))).toLowerCase() as Hex;
+      const burn = o.burn ?? 0n;
+      if (utxos.reduce((s, u) => s + u.value, 0n) < fee + burn) throw new Error(`Not enough CSD at ${key.addr20}: writing this costs ${Number(fee + burn) / 1e8} CSD.`);
+      return (await net.api.submit(burn ? buildSplitTx(utxos, key, [{ to: BURN, value: burn }], fee, app) : buildAppTx(utxos, key, app, fee))).toLowerCase() as Hex;
     },
   };
 }
@@ -145,5 +156,5 @@ export async function cairnSigner(timeoutMs = 4000): Promise<Signer> {
     if (found) stop();
   });
   const address = await cairnConnect(provider);
-  return { address, send: (app, fee) => cairnSubmit(provider, app, fee) };
+  return { address, send: (app, fee, o) => { if (o?.burn) throw new Error("Cairn Wallet keeps a site a year at a time."); return cairnSubmit(provider, app, fee); } };
 }

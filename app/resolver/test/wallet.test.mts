@@ -16,6 +16,11 @@ ok(refused({ app: { kind: "send", to: "0x00" }, fee: "25000000" }), "anything bu
 ok(refused({ app: { ...rec, uri: "x".repeat(513) }, fee: "25000000" }), "a record over 512 bytes: refused");
 ok(wallet.readAsk({ app: { kind: "attest", proposalId: "0x" + "ab".repeat(32), score: 1 }, fee: "5000000" }).app.kind === "attest", "an attestation is read");
 
+const keep = { kind: "propose", domain: "csd.keep", uri: "ipfs://bafybeih4sszbxx3lao542tqhzwa37uk2clof5vxddvtbpqqp5nyaidsh24", payloadHash: "0x" + "11".repeat(32), expiresEpoch: "1" };
+ok(wallet.readAsk({ app: keep, fee: "25000000", burn: "250000000" }).burn === 250_000_000n, "keeping a site may burn whole years");
+ok(refused({ app: rec, fee: "25000000", burn: "25000000" }), "nothing else may burn");
+ok(refused({ app: keep, fee: "25000000", burn: "1000" }), "only whole years");
+ok(refused({ app: keep, fee: "25000000", burn: String(1000n * 25_000_000n) }), "at most 1000 years");
 const { key, address } = wallet.newKey();
 ok(wallet.addressOf(key) === address, "a key's address");
 const authHash = "0x" + "22".repeat(32);
