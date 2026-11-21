@@ -58,6 +58,8 @@
   .heart:hover { background: var(--bg); }
   .heart svg { width: 17px; height: 17px; }
   .heart.on { color: #e0584a; }
+  .heart.star.on { color: var(--warm); }
+  .heart[disabled] { cursor: default; }
   .forget { position: absolute; top: 10px; left: 10px; font-size: 11px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; opacity: 0; transition: opacity .15s; }
   .tile:hover .forget, .forget:focus-visible { opacity: 1; }
   .tile.add { border: 1.5px dashed var(--line); background: transparent; box-shadow: none; color: var(--muted); justify-content: center; }
@@ -168,8 +170,9 @@
   <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up for everyone, with no server.</p>
   <div id="discoverBox" hidden>
     <h2 style="margin-top:22px">Discover</h2>
-    <p class="hint" style="margin:-4px 4px 10px">Sites people recommend. Nobody keeps this list: it's read from the network.</p>
+    <p class="hint" style="margin:-4px 4px 10px">Sites people recommend, with a star. Nobody keeps this list: it's read from the network.</p>
     <div id="discover" class="tiles"></div>
+    <p class="hint" id="discoverNote" style="margin:8px 4px 0"></p>
     <button class="hint" id="discoverMore" hidden style="background:none;border:0;cursor:pointer;text-decoration:underline;margin-top:8px">Show all</button>
   </div>
 
@@ -614,6 +617,9 @@
   // Sites ask at their own address (/.doorway/...), Doorway's server passes the ask here, and it's
   // signed only once allowed. "Allow without asking" is per site, up to 1 CSD a day.
   const W = CsdResolver.wallet;
+  const STAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" fill="currentColor"/></svg>';
+  const STAR_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+  const recommended = () => store.get("doorway.recommended") ?? [];
   let wallet = null;
   const DAY = 86_400_000, BUDGET = 1;
   const store = { get(k) { try { return JSON.parse(localStorage.getItem(k) ?? "null"); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
@@ -712,15 +718,42 @@
     const shown = discoverAll ? list : list.slice(0, 8);
     $("discoverMore").hidden = discoverAll || list.length <= 8;
     $("discover").innerHTML = shown.map(s => {
-      const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name, n = s.recommenders.length;
+      const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name;
+      const mine = !!wallet && (s.recommenders.includes(wallet.address) || recommended().includes(s.name));
+      const n = s.recommenders.length + (mine && !s.recommenders.includes(wallet.address) ? 1 : 0);
+      const tip = mine ? "You recommend it" : `Recommend it, for ${s.listing ? "0.05" : "0.25"} CSD`;
       return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.name)}" title="Open ${esc(s.name)}.csd">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <b>${esc(title)}</b><small>${esc(s.name)}.csd${n ? `, ${n} ♥` : ""}</small>
+        <b>${esc(title)}</b><small>${esc(s.name)}.csd${n ? `, ${n} ★` : ""}</small>
+        <button class="heart star${mine ? " on" : ""}" data-rec="${esc(s.name)}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${mine}" ${mine ? "disabled" : ""}>${mine ? STAR : STAR_OFF}</button>
       </div>`;
     }).join("");
     $("discover").querySelectorAll("[data-name]").forEach(t => {
-      t.onclick = () => openName(t.dataset.name);
-      t.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openName(t.dataset.name); } };
+      t.onclick = e => { if (!e.target.closest("button")) openName(t.dataset.name); };
+      t.onkeydown = e => { if ((e.key === "Enter" || e.key === " ") && e.target === t) { e.preventDefault(); openName(t.dataset.name); } };
+    });
+    // recommending, with Doorway's own key: a second press confirms, since it costs a little CSD
+    $("discover").querySelectorAll("[data-rec]").forEach(b => b.onclick = async e => {
+      e.stopPropagation();
+      const s = discovered.find(x => x.name === b.dataset.rec);
+      if (!s || !wallet) return;
+      const cost = s.listing ? "0.05" : "0.25";
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = `Press the star again to recommend ${s.name}.csd, for ${cost} CSD.`; return; }
+      b.disabled = true;
+      $("discoverNote").textContent = `Recommending ${s.name}.csd…`;
+      try {
+        const node = await readingNode();
+        const tip = (await (await fetch(node + "/tip")).json()).height;
+        await W.send(node, wallet.key, W.recommendAsk(s, tip));
+        const r = recommended(); r.push(s.name); store.set("doorway.recommended", r);
+        $("discoverNote").textContent = `You recommend ${s.name}.csd. It counts from the next block, in about two minutes.`;
+        renderDiscover();
+        setTimeout(showBalance, 3000);
+      } catch (err) {
+        b.disabled = false; b.dataset.sure = "";
+        const m = String(err && err.message || err);
+        $("discoverNote").textContent = /Not enough CSD/.test(m) ? `Recommending costs ${cost} CSD, and your key has too little. Add some in Settings, under Your key (copy its address and send CSD to it).` : m;
+      }
     });
   }
   $("discoverMore").onclick = () => { discoverAll = true; renderDiscover(); };

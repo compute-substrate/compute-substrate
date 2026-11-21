@@ -2,7 +2,8 @@
 // write at their own address (/.doorway/write on <name>.localhost); the window shows what's asked,
 // and signs only once it's allowed. The key never reaches a site.
 import { connect, claimInvite, openInvites } from "../../../kit/src/index";
-import { buildAppTx, bytesToHex, concat, hexToBytes, keyFromPrivate, utf8, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
+import { buildAppTx, bytesToHex, concat, hexToBytes, keyFromPrivate, sha256d, utf8, EPOCH_LEN, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
+import { DIRECTORY } from "./directory";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3";
 
@@ -84,4 +85,11 @@ export function describe(ask: Ask): string {
   if (ask.app.kind === "propose") return `Write "${ask.app.uri.length > 140 ? ask.app.uri.slice(0, 140) + "…" : ask.app.uri}" under ${ask.app.domain}, for ${csd}`;
   if (ask.app.kind === "attest") return `Attest ${ask.app.score} to record ${ask.app.proposalId.slice(0, 10)}…, for ${csd}`;
   return csd;
+}
+
+// Recommending a site in the directory: the first recommendation is a record naming it, the rest
+// attest to that record (see directory.ts)
+export function recommendAsk(site: { name: string; listing: string | null }, tip: number): Ask {
+  if (site.listing) return { app: { kind: "attest", proposalId: site.listing as Hex, score: 1, confidence: 1 }, fee: MIN_FEE_ATTEST };
+  return { app: { kind: "propose", domain: DIRECTORY, uri: site.name, payloadHash: sha256d(utf8(site.name)), expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE };
 }
