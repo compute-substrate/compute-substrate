@@ -107,11 +107,14 @@ export async function claimInvite(net: Net, linkOrCode: string, to: Hex): Promis
 // what was listed.
 
 const toCode = (k: Uint8Array) => btoa(String.fromCharCode(...k)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-export const INVITES_MAX = 10; // codes per listing: they share one record's 512 bytes
+export const INVITES_MAX = 10;
+// The welcome pool every app shares: invites anyone leaves for newcomers to any app. Whoever fills it
+// helps every app's newcomers at once. (Commonplace uses it too.)
+export const WELCOME_TOPIC = "csd.welcome"; // codes per listing: they share one record's 512 bytes
 
 // Split `each` CSD per invite, `count` times, off a key you hold, and list them under `topic`. Each
 // invite also carries the fee for moving it on, so it arrives whole. Returns the invite links' codes.
-export async function makeInvites(net: Net, privateKey: Hex | BrowserKey, o: { topic: string; count: number; each: number }): Promise<string[]> {
+export async function makeInvites(net: Net, privateKey: Hex | BrowserKey, o: { topic?: string; count: number; each: number }): Promise<string[]> {
   const n = Math.floor(o.count);
   if (n < 1 || n > INVITES_MAX) throw new Error(`From 1 to ${INVITES_MAX} invites at a time.`);
   const maker = keyFromPrivate(hexToBytes(typeof privateKey === "string" ? privateKey : privateKey.backup()));
@@ -120,7 +123,7 @@ export async function makeInvites(net: Net, privateKey: Hex | BrowserKey, o: { t
   const value = BigInt(Math.round(o.each * 1e8)) + SEND_FEE;
   const uri = `invites:${codes.join(",")}`;
   const t = await net.api.tip();
-  const app = { kind: "propose" as const, domain: o.topic, payloadHash: sha256d(utf8(uri)), uri, expiresEpoch: BigInt(Math.floor(t.height / EPOCH_LEN)) + 10_000_000n };
+  const app = { kind: "propose" as const, domain: o.topic ?? WELCOME_TOPIC, payloadHash: sha256d(utf8(uri)), uri, expiresEpoch: BigInt(Math.floor(t.height / EPOCH_LEN)) + 10_000_000n };
   const tx = buildSplitTx(await net.api.utxos(maker.addr20), maker, keys.map(k => ({ to: keyFromPrivate(k).addr20, value })), MIN_FEE_PROPOSE, app);
   await net.api.submit(tx);
   return codes;
@@ -128,7 +131,7 @@ export async function makeInvites(net: Net, privateKey: Hex | BrowserKey, o: { t
 
 // The invites listed under `topic` that still hold CSD, newest first. (Commonplace's own listings,
 // `cp:invites:…`, read the same way.)
-export async function openInvites(net: Net, topic: string): Promise<{ code: string; csd: number }[]> {
+export async function openInvites(net: Net, topic: string = WELCOME_TOPIC): Promise<{ code: string; csd: number }[]> {
   const ps = [...(await net.api.proposalsIn(topic, 200))].sort((a, b) => Number(b.height) - Number(a.height));
   const codes = [...new Set(ps.flatMap(p => /^(?:[a-z0-9.]+:)?invites:([A-Za-z0-9_,-]+)$/.exec(p.uri ?? "")?.[1].split(",").slice(0, INVITES_MAX) ?? []))].slice(0, 100);
   const held = await Promise.all(codes.map(async code => {
@@ -142,7 +145,7 @@ export async function openInvites(net: Net, topic: string): Promise<{ code: stri
 // A newcomer's welcome: when this writing key has never held anything, take one of the open invites
 // under `topic` onto it (a random one, so newcomers arriving together don't all reach for the same).
 // Once per browser. Returns what's on its way, or null when there was nothing to do or take.
-export async function welcome(net: Net, me: BrowserKey, topic: string): Promise<{ csd: number; txid: Hex } | null> {
+export async function welcome(net: Net, me: BrowserKey, topic: string = WELCOME_TOPIC): Promise<{ csd: number; txid: Hex } | null> {
   const done = `${me.slot}.welcomed`;
   if (store.get(done) === me.address) return null;
   if ((await net.api.utxos(me.address)).length) { store.set(done, me.address); return null; }

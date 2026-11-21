@@ -83,9 +83,9 @@
 
   // Your app's topic: records in it are your app's data. Pick a name no one else uses.
   const TOPIC = "guestbook.example";
-  // Where invites for newcomers are listed. Fill it yourself (the "Welcome the next person" button,
-  // or makeInvites) and anyone new starts with a little CSD, so writing just works for them.
-  const INVITES = TOPIC + ".invites";
+  // Where invites for newcomers come from: the welcome pool every app on the network shares
+  // (csd.welcome). Anyone who leaves invites there, from any app, helps newcomers to all of them.
+  const INVITES = "csd.welcome";
 
   const $ = id => document.getElementById(id);
   const say = t => { $("status").textContent = t; };

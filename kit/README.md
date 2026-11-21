@@ -52,14 +52,15 @@ identity across apps, sign with a wallet instead (`cairnSigner()`).
 
 Writing costs a little CSD, but the person writing needn't be the one who pays, any more than a
 website's visitors pay for its hosting. `makeInvites()` splits some CSD into small invites and lists
-them under a topic of your app's. `welcome()` gives each new writing key one of them the first time
+them in the welcome pool every app shares (`csd.welcome`), or under a topic of your own. `welcome()`
+gives each new writing key one of them the first time
 it opens your page. For a newcomer, writing just works.
 
 ```js
 // you, once in a while (from any key holding CSD):
-await makeInvites(net, myKey, { topic: "guestbook.example.invites", count: 10, each: 1 });
+await makeInvites(net, myKey, { count: 10, each: 1 });
 // every visitor's page:
-await welcome(net, me, "guestbook.example.invites");   // takes one when this key has never held CSD
+await welcome(net, me);   // takes one when this key has never held CSD
 ```
 
 There's no server deciding who gets one. The codes are public and first come, first served, so keep

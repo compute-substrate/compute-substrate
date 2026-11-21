@@ -17,7 +17,7 @@ import { cairnConnect, cairnSubmit, discoverCairn, type CairnProvider } from "./
 export * from "./core";
 export { lightClient, GENESIS_HASH, type Verified } from "./light";
 export { discoverCairn, type CairnProvider } from "./cairn";
-export { browserKey, claimInvite, inviteKeyFrom, makeInvites, openInvites, welcome, INVITES_MAX, type BrowserKey } from "./browser";
+export { browserKey, claimInvite, inviteKeyFrom, makeInvites, openInvites, welcome, INVITES_MAX, WELCOME_TOPIC, type BrowserKey } from "./browser";
 
 export const PUBLIC_NODE = "https://csd.aon.network";
 // how long a record stays open for attestations: far beyond any reader's lifetime
