@@ -65,6 +65,9 @@ no special place there; anyone can build others over the same records.
 
 ### Keeping a site up for years
 
+Every site also has an address of its own that no change of name can take away:
+`http://<its CID>.localhost` opens it in Doorway (paste the CID, or `ipfs://…`, into *Where to?*).
+
 A site stays on the doors while a name points to it. The hourglass on a site keeps it up for longer,
 a year at a time, whether or not a name still points to it: 0.25 CSD a year, from your key. Anyone can
 add time to any site, so a site lasts as long as anyone thinks it should. A site that's kept shows

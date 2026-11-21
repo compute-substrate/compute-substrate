@@ -107,9 +107,9 @@ export function describe(ask: Ask): string {
 
 // Recommending a site in the directory: the first recommendation is a record naming it, the rest
 // attest to that record (see directory.ts)
-export function recommendAsk(site: { name: string; listing: string | null }, tip: number): Ask {
+export function recommendAsk(site: { key: string; listing: string | null }, tip: number): Ask {
   if (site.listing) return { app: { kind: "attest", proposalId: site.listing as Hex, score: 1, confidence: 1 }, fee: MIN_FEE_ATTEST, burn: 0n };
-  return { app: { kind: "propose", domain: DIRECTORY, uri: site.name, payloadHash: sha256d(utf8(site.name)), expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
+  return { app: { kind: "propose", domain: DIRECTORY, uri: site.key, payloadHash: sha256d(utf8(site.key)), expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
 }
 
 // Keeping a site, with Doorway's own key (the kit's keepRecord)

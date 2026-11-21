@@ -436,6 +436,68 @@ fn name_of_host(host: &str) -> Option<String> {
     ok.then_some(name)
 }
 
+// A site's address as a host: a CIDv1 fits in one label of a web address (at most 63 characters)
+fn site_of_host(host: &str) -> Option<String> {
+    let h = host.trim().to_ascii_lowercase();
+    let h = h.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h.to_string()).unwrap_or(h);
+    let label = h.strip_suffix(".localhost")?;
+    (label.len() <= 63 && valid_cid(label)).then(|| label.to_string())
+}
+
+// Sites opened by their address, so they're kept here though no name points to them
+const ADDRESSES: &str = "addresses.json";
+fn opened_by_address(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join(ADDRESSES)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn route_address(app: &tauri::AppHandle, req: tiny_http::Request, cid: String) {
+    if req.url().starts_with("/.doorway/") {
+        return doorway_request(app, req, cid.clone(), format!("{cid}.localhost"));
+    }
+    let Ok(dir) = sites_dir(app) else { return };
+    let root = Some(dir.join(&cid)).filter(|r| r.join("index.html").is_file())
+        .or_else(|| (carried_cid().as_deref() == Some(cid.as_str())).then(|| app.path().resource_dir().ok().map(|d| d.join("commonplace"))).flatten());
+    match root {
+        Some(r) => respond_from(req, &r),
+        None => {
+            // ask the window to fetch it (from the doors, checked against this address)
+            let _ = app.emit("want-site", cid.clone());
+            let _ = req.respond(tiny_http::Response::from_string(waiting_page(&format!("{}…", &cid[..12])))
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap())
+                .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap()));
+        }
+    }
+}
+
+// A site fetched by its address, put in place; its address on this computer
+#[tauri::command]
+fn site_ready(app: tauri::AppHandle, cid: String) -> Result<String, String> {
+    if !valid_cid(&cid) || cid.len() > 63 {
+        return Err("bad site address".into());
+    }
+    let dir = sites_dir(&app)?;
+    let part = dir.join(format!("{cid}.part"));
+    let done = dir.join(&cid);
+    if part.is_dir() {
+        let _ = fs::remove_dir_all(&done);
+        fs::rename(&part, &done).map_err(|e| e.to_string())?;
+    }
+    let mut list = opened_by_address(&dir);
+    if !list.contains(&cid) {
+        list.push(cid.clone());
+        let _ = fs::write(dir.join(ADDRESSES), serde_json::to_string_pretty(&list).unwrap());
+    }
+    Ok(format!("{}/", names_origin(&cid)))
+}
+
+#[tauri::command]
+fn address_url(cid: String) -> Result<String, String> {
+    if !valid_cid(&cid) || cid.len() > 63 {
+        return Err("bad site address".into());
+    }
+    Ok(format!("{}/", names_origin(&cid)))
+}
+
 fn waiting_page(name: &str) -> String {
     format!(r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name}.csd</title><meta http-equiv="refresh" content="2"><style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555}}</style><p>Opening <b>{name}.csd</b>…</p>"#)
 }
@@ -467,6 +529,10 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
         return;
     }
     let host = req.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().to_string()).unwrap_or_default();
+    // a site by its own address, <cid>.localhost: a link no change of name can take away
+    if let Some(cid) = site_of_host(&host) {
+        return route_address(app, req, cid);
+    }
     let Some(name) = name_of_host(&host) else {
         let _ = req.respond(tiny_http::Response::from_string("Open a .csd name as http://<name>.localhost").with_status_code(404));
         return;
@@ -709,7 +775,8 @@ fn serve_name(dir: &Path, sites: &Sites, name: &str, cid: &str) -> Result<u16, S
     if let Some(old) = map.get(name).map(|e| e.cid.clone()).filter(|o| o != cid) {
         let needed = map.iter().any(|(n, e)| n != name && e.cid == old)
             || carried_cid().as_deref() == Some(old.as_str())
-            || helping_map(dir).get(&old).copied().unwrap_or(false);
+            || helping_map(dir).get(&old).copied().unwrap_or(false)
+            || opened_by_address(dir).contains(&old);
         if !needed {
             let _ = fs::remove_dir_all(dir.join(&old));
             let _ = fs::remove_file(dir.join(format!("{old}.car")));
@@ -923,11 +990,13 @@ fn kept_sites(app: tauri::AppHandle, sites: tauri::State<'_, Sites>) -> Vec<Kept
     let carried = carried_cid();
     // Older versions left behind when a name moved on (before the app cleared them itself): no name
     // points to them, they aren't carried or hearted, and nothing serves them. They go.
+    let by_address = opened_by_address(&dir);
     let serving: Vec<PathBuf> = sites.served.lock().unwrap().values().map(|(_, r)| r.lock().unwrap().clone()).collect();
     if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.flatten() {
             let Some(c) = e.file_name().to_str().and_then(|n| n.strip_suffix(".car")).map(str::to_string) else { continue };
             let orphan = valid_cid(&c) && Some(&c) != carried.as_ref() && !names.values().any(|x| x.cid == c)
+                && !by_address.contains(&c)
                 && !help.get(&c).copied().unwrap_or(false) && !serving.contains(&dir.join(&c));
             if orphan {
                 let _ = fs::remove_dir_all(dir.join(&c));
@@ -986,6 +1055,9 @@ fn forget_site(app: tauri::AppHandle, cid: String) -> Result<(), String> {
     let mut map = load_site_map(&dir);
     map.retain(|_, e| e.cid != cid);
     let _ = fs::write(dir.join("sites.json"), serde_json::to_string_pretty(&map).unwrap());
+    let mut list = opened_by_address(&dir);
+    list.retain(|c| *c != cid);
+    let _ = fs::write(dir.join(ADDRESSES), serde_json::to_string_pretty(&list).unwrap());
     let mut h = helping_map(&dir);
     h.remove(&cid);
     let _ = fs::write(dir.join(HELPING), serde_json::to_string_pretty(&h).unwrap());
@@ -1116,7 +1188,7 @@ fn main() {
         .manage(node.clone())
         .manage(Sites::default())
         .manage(Arc::new(Asks::default()))
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url])
         .setup({
             let node = node.clone();
             move |app| {
@@ -1270,6 +1342,8 @@ mod tests {
         assert_eq!(doors()[0], "https://csd.aon.network");
         assert!(doors().iter().all(|d| d.starts_with("https://")));
         assert_eq!(name_of_host("commonplace.localhost"), Some("commonplace".into()));
+        assert_eq!(site_of_host("bafybeihhrzjeedodetbaewminhtwiiidheptuqn4zm4pklzvxy6f77vsh4.localhost:8800").as_deref(), Some("bafybeihhrzjeedodetbaewminhtwiiidheptuqn4zm4pklzvxy6f77vsh4"));
+        assert_eq!(site_of_host("commonplace.localhost"), None);
         assert_eq!(b64(b"Man"), "TWFu");
         assert_eq!(b64(b"Ma"), "TWE=");
         assert_eq!(b64(b"M"), "TQ==");

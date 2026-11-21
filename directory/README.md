@@ -4,7 +4,8 @@ Every site a `.csd` name points to, ranked by the people who recommend them. Nob
 list: the page reads it from the network through any door, and checks each site's title and icon
 against the site's own address. Doorway shows the same list under *Discover*.
 
-- **Listed:** any name whose profile points to a site (`contenthash`, `ipfs://<CID>`).
+- **Listed:** any name whose profile points to a site (`contenthash`, `ipfs://<CID>`), and any site
+  someone keeps up with no name (`csd.keep`), by its address; a recommendation names either.
 - **Recommended:** a record under the topic `csd.sites`. The first person to recommend a site
   writes a record whose text is its name (0.25 CSD); everyone after attests to that record
   (0.05 CSD). A key counts once per site. Recommending is signed by a key kept in the browser, with

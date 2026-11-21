@@ -24,7 +24,7 @@
   .tabs button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
   input[type=search] { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 8px 14px; width: 200px; outline: none; }
   input[type=search]:focus { border-color: var(--accent); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   .card a.open { display: flex; gap: 12px; align-items: center; color: inherit; text-decoration: none; min-width: 0; }
   .card a.open:hover b { color: var(--accent); }
@@ -32,8 +32,8 @@
   .face img { width: 100%; height: 100%; object-fit: cover; }
   .card b { display: block; font: 650 16px/1.25 var(--display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card small { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .card .foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; }
-  .acts { display: flex; gap: 6px; }
+  .card .foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; flex-wrap: wrap; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
   .rec.quiet { color: var(--muted); }
   .life { margin-left: 10px; color: var(--accent); font-size: 13px; }
   .keep { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -76,7 +76,7 @@
   <header>
     <div>
       <h1><img src="icon.svg" alt="">Directory</h1>
-      <p class="lede">Every site a .csd name points to, ranked by the people who recommend them. Nobody keeps this list: it's read from the network, and every site is checked against its address.</p>
+      <p class="lede">Every site on the network, whether a .csd name points to it or people keep it up, ranked by the people who recommend them. Nobody keeps this list: it's read from the network, and every site is checked against its address.</p>
     </div>
     <div class="tools">
       <div class="tabs" role="group" aria-label="Order">

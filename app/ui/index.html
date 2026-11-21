@@ -370,8 +370,39 @@
     };
   })();
 
+  // A site by its own address (ipfs://<cid>, or just the cid): http://<cid>.localhost, a link no
+  // change of name can take away. Fetched from the doors and checked against the address, once.
+  const CID_RE = /^(?:ipfs:\/\/)?(b[a-z2-7]{50,61})\/?$/;
+  async function fetchByAddress(cid) {
+    if (await invoke("site_kept", { cid })) return invoke("site_ready", { cid });
+    const { files, car } = await CsdResolver.fetchSite(cid, await doorList());
+    for (const [path, bytes] of files) await invoke("site_put", bytes, { headers: { "x-cid": cid, "x-path": encodeURIComponent(path) } });
+    await invoke("site_keep_car", car, { headers: { "x-cid": cid } }).catch(() => {});
+    return invoke("site_ready", { cid });
+  }
+  async function openAddress(cid, show = true) {
+    const st = $("nameStatus");
+    st.textContent = `Getting the site at ${cid.slice(0, 12)}… and checking it…`;
+    try {
+      const url = await fetchByAddress(cid);
+      st.textContent = show ? "Opening it" : "It's ready";
+      renderSites();
+      if (show) await invoke("plugin:opener|open_url", { url });
+    } catch (e) { st.textContent = `Couldn't get that site: ${String(e && e.message || e)}`; }
+  }
+  // the browser's waiting page asks again every few seconds: one fetch at a time per site
+  const fetching = new Set();
+  listen("want-site", async e => {
+    const cid = String(e.payload);
+    if (fetching.has(cid)) return;
+    fetching.add(cid);
+    try { await openAddress(cid, false); } finally { setTimeout(() => fetching.delete(cid), 30_000); }
+  });
+
   // .csd names (Cairn's name service): looked up through this computer's own node, then opened
   async function openName(input, show = true) {
+    const byAddress = CID_RE.exec(String(input).trim());
+    if (byAddress) return openAddress(byAddress[1], show);
     const st = $("nameStatus");
     st.textContent = `Looking up ${input.replace(/^web\+csd:(\/\/)?/, "")}…`;
     try {
@@ -506,6 +537,7 @@
       const x = list[i];
       if (x.carried && !x.names.length) invoke("plugin:opener|open_url", { url: await commonplaceUrl() });
       else if (x.names[0]) openName(x.names[0]);
+      else openAddress(x.cid);
     };
     $("sites").querySelectorAll("[data-open]").forEach(t => {
       t.onclick = e => { if (!e.target.closest("button")) open(+t.dataset.open); };
@@ -779,20 +811,21 @@
   const faceOf = new Map();
   async function renderDiscover() {
     let kept = [];
-    try { kept = (await invoke("kept_sites")).flatMap(x => x.names); } catch {}
-    const list = discovered.filter(s => !kept.includes(s.name));
+    let mineCids = [];
+    try { const ks = await invoke("kept_sites"); kept = ks.flatMap(x => x.names); mineCids = ks.map(x => x.cid); } catch {}
+    const list = discovered.filter(s => s.name ? !kept.includes(s.name) : !mineCids.includes(s.cid));
     $("discoverBox").hidden = !list.length;
     const shown = discoverAll ? list : list.slice(0, 8);
     $("discoverMore").hidden = discoverAll || list.length <= 8;
     $("discover").innerHTML = shown.map(s => {
-      const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name;
-      const mine = !!wallet && (s.recommenders.includes(wallet.address) || recommended().includes(s.name));
+      const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name || `${s.cid.slice(0, 10)}…`;
+      const mine = !!wallet && (s.recommenders.includes(wallet.address) || recommended().includes(s.key));
       const n = s.recommenders.length + (mine && !s.recommenders.includes(wallet.address) ? 1 : 0);
       const tip = mine ? "You recommend it" : `Recommend it, for ${s.listing ? "0.05" : "0.25"} CSD`;
-      return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.name)}" title="Open ${esc(s.name)}.csd">
+      return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.key)}" title="Open ${esc(s.name ? s.name + ".csd" : title)}">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <b>${esc(title)}</b><small>${esc(s.name)}.csd${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeOf(s.cid)}</small>` : ""}
-        <button class="heart star${mine ? " on" : ""}" data-rec="${esc(s.name)}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${mine}" ${mine ? "disabled" : ""}>${mine ? STAR : STAR_OFF}</button>
+        <b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeOf(s.cid)}</small>` : ""}
+        <button class="heart star${mine ? " on" : ""}" data-rec="${esc(s.key)}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${mine}" ${mine ? "disabled" : ""}>${mine ? STAR : STAR_OFF}</button>
       </div>`;
     }).join("");
     $("discover").querySelectorAll("[data-name]").forEach(t => {
@@ -802,18 +835,19 @@
     // recommending, with Doorway's own key: a second press confirms, since it costs a little CSD
     $("discover").querySelectorAll("[data-rec]").forEach(b => b.onclick = async e => {
       e.stopPropagation();
-      const s = discovered.find(x => x.name === b.dataset.rec);
+      const s = discovered.find(x => x.key === b.dataset.rec);
+      const label = s && (s.name ? `${s.name}.csd` : (faceOf.get(s.cid)?.title || "this site"));
       if (!s || !wallet) return;
       const cost = s.listing ? "0.05" : "0.25";
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = `Press the star again to recommend ${s.name}.csd, for ${cost} CSD.`; return; }
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = `Press the star again to recommend ${label}, for ${cost} CSD.`; return; }
       b.disabled = true;
-      $("discoverNote").textContent = `Recommending ${s.name}.csd…`;
+      $("discoverNote").textContent = `Recommending ${label}…`;
       try {
         const node = await readingNode();
         const tip = (await (await fetch(node + "/tip")).json()).height;
         await W.send(node, wallet.key, W.recommendAsk(s, tip));
-        const r = recommended(); r.push(s.name); store.set("doorway.recommended", r);
-        $("discoverNote").textContent = `You recommend ${s.name}.csd. It counts from the next block, in about two minutes.`;
+        const r = recommended(); r.push(s.key); store.set("doorway.recommended", r);
+        $("discoverNote").textContent = `You recommend ${label}. It counts from the next block, in about two minutes.`;
         renderDiscover();
         setTimeout(showBalance, 3000);
       } catch (err) {

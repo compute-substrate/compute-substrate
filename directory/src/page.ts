@@ -22,7 +22,8 @@ async function pickNode(): Promise<string> {
 
 // Opened from Doorway (this page at directory.localhost), sites open from this computer too
 const viaDoorway = location.hostname.endsWith(".localhost");
-const openUrl = (s: Listed) => viaDoorway ? `${location.protocol}//${s.name}.localhost${location.port ? ":" + location.port : ""}/` : `https://${s.cid}.ipfs.dweb.link/`;
+// named sites open by name; a site kept with no name, by its own address (Doorway serves both)
+const openUrl = (s: Listed) => viaDoorway ? `${location.protocol}//${s.name || s.cid}.localhost${location.port ? ":" + location.port : ""}/` : `https://${s.cid}.ipfs.dweb.link/`;
 $("howOpen").innerHTML = viaDoorway
   ? "Sites open from this computer, through Doorway, checked."
   : 'Sites open through an IPFS gateway. With <a href="https://github.com/compute-substrate/compute-substrate/tree/main/app#readme">Doorway</a> they open from your own computer at <code>name.localhost</code>, checked.';
@@ -42,25 +43,25 @@ let keeping: string | null = null, keepYears = 10;
 function render() {
   const q = (($("q") as HTMLInputElement).value || "").trim().toLowerCase();
   const list = sites
-    .filter(s => !q || s.name.includes(q) || (faces.get(s.cid)?.title ?? "").toLowerCase().includes(q))
+    .filter(s => !q || s.key.includes(q) || (faces.get(s.cid)?.title ?? "").toLowerCase().includes(q))
     .sort(order === "new" ? (a, b) => b.since - a.since : () => 0);
   if (!list.length) { $("grid").innerHTML = `<p class="empty">${sites.length ? "Nothing matches." : "No name points to a site yet."}</p>`; return; }
   $("grid").innerHTML = list.map(s => {
     const f = faces.get(s.cid) ?? {};
-    const title = f.title || s.name;
-    const done = mine.has(s.name) || s.recommenders.includes(me.address.toLowerCase());
-    const n = s.recommenders.length + (mine.has(s.name) && !s.recommenders.includes(me.address.toLowerCase()) ? 1 : 0);
+    const title = f.title || s.name || `${s.cid.slice(0, 10)}…`;
+    const done = mine.has(s.key) || s.recommenders.includes(me.address.toLowerCase());
+    const n = s.recommenders.length + (mine.has(s.key) && !s.recommenders.includes(me.address.toLowerCase()) ? 1 : 0);
     return `<article class="card">
       <a class="open" href="${esc(openUrl(s))}" target="_blank" rel="noopener">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${esc(f.icon)}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <span style="min-width:0"><b>${esc(title)}</b><small>${esc(s.name)}.csd</small></span>
+        <span style="min-width:0"><b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name, kept up by its address"}</small></span>
       </a>
       <div class="foot">
         <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}${lifeOf(s.cid) ? `<span class="life" title="Kept up on the doors until ${lifeOf(s.cid)}, name or not">until ${lifeOf(s.cid)}</span>` : ""}</span>
         <span class="acts">
-          <button class="rec quiet" data-share="${esc(s.name)}" title="Share a link to it">Share</button>
+          <button class="rec quiet" data-share="${esc(s.key)}" title="Share a link to it">Share</button>
           <button class="rec quiet" data-keep="${esc(s.cid)}" title="Keep it up for years, name or not">Keep</button>
-          <button class="rec" data-name="${esc(s.name)}" ${done ? "disabled" : ""}>${done ? "Recommended" : "Recommend"}</button>
+          <button class="rec" data-name="${esc(s.key)}" ${done ? "disabled" : ""}>${done ? "Recommended" : "Recommend"}</button>
         </span>
       </div>
       ${keeping === s.cid ? keepPanel(s) : ""}
@@ -75,7 +76,7 @@ let opening = wanted();
 if (opening) $("grid").innerHTML = `<p class="empty">Opening ${esc(opening)}.csd…</p>`;
 function openWanted() {
   if (!opening || !sites.length) return;
-  const s = sites.find(x => x.name === opening);
+  const s = sites.find(x => x.name === opening || x.key === opening || x.cid === opening);
   if (s) { location.replace(openUrl(s)); return; }
   say(`${opening}.csd doesn't point to a site.`);
   opening = "";
@@ -85,8 +86,8 @@ addEventListener("hashchange", () => { opening = wanted(); openWanted(); });
 // a link to a site: to this page with its name, which opens it (always its newest site); opened
 // through Doorway, where this page's address is only this computer's, a link to the site itself
 async function share(s: Listed) {
-  const url = viaDoorway ? `https://${s.cid}.ipfs.dweb.link/` : `${location.origin}${location.pathname}#${s.name}`;
-  const title = faces.get(s.cid)?.title || `${s.name}.csd`;
+  const url = viaDoorway || !s.name ? `https://${s.cid}.ipfs.dweb.link/` : `${location.origin}${location.pathname}#${s.name}`;
+  const title = faces.get(s.cid)?.title || (s.name ? `${s.name}.csd` : "A site");
   try { if ((navigator as any).share) { await (navigator as any).share({ title, url }); return; } } catch { return; }
   try { await navigator.clipboard.writeText(url); say(`Link copied: ${url}`); } catch { say(url); }
 }
@@ -123,7 +124,7 @@ async function load() {
 
 $("grid").addEventListener("click", async e => {
   const sh = (e.target as HTMLElement).closest("button[data-share]") as HTMLButtonElement | null;
-  if (sh) { const s = sites.find(x => x.name === sh.dataset.share); if (s) share(s); return; }
+  if (sh) { const s = sites.find(x => x.key === sh.dataset.share); if (s) share(s); return; }
   const t = e.target as HTMLElement;
   const kb = t.closest("button[data-keep]") as HTMLButtonElement | null;
   if (kb) { keeping = keeping === kb.dataset.keep ? null : kb.dataset.keep!; render(); return; }
@@ -149,17 +150,19 @@ $("grid").addEventListener("click", async e => {
   }
   const b = (e.target as HTMLElement).closest("button.rec") as HTMLButtonElement | null;
   if (!b || b.disabled) return;
-  const s = sites.find(x => x.name === b.dataset.name);
+  const s = sites.find(x => x.key === b.dataset.name);
   if (!s) return;
+  const label = s.name ? `${s.name}.csd` : (faces.get(s.cid)?.title || "this site");
   b.disabled = true;
-  say(`Recommending ${s.name}.csd…`);
+  say(`Recommending ${label}…`);
   try {
-    // the first recommendation for a site is a record naming it; the rest attest to that record
+    // the first recommendation for a site is a record naming it (its name, or its address); the
+    // rest attest to that record
     if (s.listing) await net.attest(me.signer(net as any), s.listing as any, 1);
-    else await net.write(me.signer(net as any), DIRECTORY, s.name);
-    mine.add(s.name);
+    else await net.write(me.signer(net as any), DIRECTORY, s.key);
+    mine.add(s.key);
     $("needCsd").hidden = true;
-    say(`Thanks. Your recommendation of ${s.name}.csd counts from the next block, in about two minutes.`);
+    say(`Thanks. Your recommendation of ${label} counts from the next block, in about two minutes.`);
     render();
     setTimeout(load, 130_000);
   } catch (err: any) {

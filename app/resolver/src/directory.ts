@@ -13,6 +13,8 @@
 import { resolve } from "@inversealtruism/cairnx-core";
 import { allEvents, getJson, hex, parseTx, signer } from "./main";
 import { fileFromCar } from "./site";
+import { connect } from "../../../kit/src/index";
+import { keptSites } from "../../../kit/src/keep";
 
 export const DIRECTORY = "csd.sites";
 // no directory record is older than this block
@@ -20,6 +22,9 @@ const DIRECTORY_FROM = 146_000;
 const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
 export type Listed = {
+  // what recommendations name: the .csd name, or for a site kept with no name, ipfs://<CID>
+  key: string;
+  // "" for a site kept with no name
   name: string;
   cid: string;
   owner: string;
@@ -28,6 +33,8 @@ export type Listed = {
   listing: string | null;
   // the block its name started pointing here (newest first, for "New")
   since: number;
+  // the block it's kept up until, when someone keeps it (kit/src/keep.ts)
+  keptUntil: number | null;
 };
 
 // Every site a name points to, read through `node` (this computer's own node, or a door)
@@ -35,7 +42,8 @@ export async function listSites(node: string): Promise<{ tip: number; sites: Lis
   const base = node.replace(/\/$/, "");
   const tip = Number((await getJson(`${base}/tip`))?.height);
   if (!Number.isSafeInteger(tip)) throw new Error("The node didn't say how far the network is.");
-  const [names, recs] = await Promise.all([allEvents(tip, base), recommendations(base, tip)]);
+  const [names, recs, kept] = await Promise.all([allEvents(tip, base), recommendations(base, tip), keptSites(apiOf(base)).catch(() => ({ tip, until: new Map<string, number>() }))]);
+  const until = (cid: string) => { const u = kept.until.get(cid); return u && u > tip ? u : null; };
   const state = resolve(names, tip).names as Record<string, any>;
   // when each name last set its profile's site, for "New"
   const setAt = new Map<string, number>();
@@ -49,11 +57,21 @@ export async function listSites(node: string): Promise<{ tip: number; sites: Lis
     const cid = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(st.profile?.["contenthash"] ?? "")?.[1];
     if (!cid) continue;
     const r = recs.get(name);
-    sites.push({ name, cid, owner: String(st.owner ?? ""), recommenders: r ? [...r.who] : [], listing: r?.listing ?? null, since: setAt.get(name) ?? Number(st.height ?? 0) });
+    sites.push({ key: name, name, cid, owner: String(st.owner ?? ""), recommenders: r ? [...r.who] : [], listing: r?.listing ?? null, since: setAt.get(name) ?? Number(st.height ?? 0), keptUntil: until(cid) });
+  }
+  // sites someone keeps up that no name points to (any more): listed by their address
+  const named = new Set(sites.map(x => x.cid));
+  for (const [cid, u] of kept.until) {
+    if (named.has(cid) || u <= tip) continue;
+    const key = `ipfs://${cid}`, r = recs.get(key);
+    sites.push({ key, name: "", cid, owner: "", recommenders: r ? [...r.who] : [], listing: r?.listing ?? null, since: 0, keptUntil: u });
   }
   sites.sort((a, b) => b.recommenders.length - a.recommenders.length || b.since - a.since || (a.name < b.name ? -1 : 1));
   return { tip, sites };
 }
+
+const apis = new Map<string, any>();
+const apiOf = (base: string) => { let a = apis.get(base); if (!a) apis.set(base, a = connect({ node: base }).api); return a; };
 
 // name -> who recommends it, and its first listing record
 const recCache = new Map<string, { to: number; byId: Map<string, string>; recs: Map<string, { listing: string; who: Set<string> }> }>();
@@ -69,8 +87,9 @@ async function recommendations(base: string, tip: number) {
       if (!who) continue;
       const id = String(e.txid).toLowerCase();
       if (tx.app.kind === "propose") {
+        // a .csd name, or a site's own address (for a site with no name)
         const name = String(tx.app.uri).trim().toLowerCase().replace(/\.csd$/, "");
-        if (!NAME_RE.test(name)) continue;
+        if (!NAME_RE.test(name) && !/^ipfs:\/\/b[a-z2-7]{50,100}$/.test(name)) continue;
         c.byId.set(id, name);
         const r = c.recs.get(name) ?? { listing: id, who: new Set<string>() };
         r.who.add(who.toLowerCase());
