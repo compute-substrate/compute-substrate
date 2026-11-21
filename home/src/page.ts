@@ -21,6 +21,22 @@ if (viaDoorway) {
   ($("getDoorway") as HTMLAnchorElement).href = "#open";
 }
 
+// This page never changes once it's published, so its download links follow Doorway's newest
+// release, read from GitHub as the page opens (else they go to Doorway's page, which lists them)
+const REPO = "compute-substrate/compute-substrate";
+async function newestDoorway() {
+  try {
+    const rs = await (await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, { signal: AbortSignal.timeout(8000) })).json();
+    const r = (rs as any[]).find(x => /^app-v/.test(x.tag_name) && !x.draft && !x.prerelease && x.assets?.some((a: any) => a.name === "Doorway-macOS.dmg"));
+    if (!r) return;
+    const base = `https://github.com/${REPO}/releases/download/${r.tag_name}`;
+    ($("dlMac") as HTMLAnchorElement).href = `${base}/Doorway-macOS.dmg`;
+    ($("dlWin") as HTMLAnchorElement).href = `${base}/Doorway-Windows-setup.exe`;
+    if (r.assets.some((a: any) => a.name === "door.sh")) $("doorCmd").textContent = `curl -fsSL ${base}/door.sh | bash`;
+  } catch {}
+}
+newestDoorway();
+
 async function firstDoor(): Promise<string> {
   const asked = new URLSearchParams(location.search).get("node");
   for (const d of asked ? [asked, ...DOORS] : DOORS) {
