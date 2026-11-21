@@ -1,0 +1,6 @@
+{
+  "name": "csd-home",
+  "private": true,
+  "description": "Compute Substrate's own front page, as a site on the network: build, then publish out/ with Doorway and keep it up.",
+  "scripts": { "build": "node build.mjs" }
+}

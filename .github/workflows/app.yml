@@ -215,14 +215,15 @@ jobs:
           pattern: door-*
           merge-multiple: true
           path: out
-      # the directory site, packed: publish it with Doorway (Publish, then choose this .car)
+      # the directory and the front page, packed: publish each with Doorway (Publish, then choose the .car)
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Build the directory
         run: |
-          (cd kit && npm ci) && (cd app/resolver && npm ci) && (cd directory && npm run build)
+          (cd kit && npm ci) && (cd app/resolver && npm ci) && (cd directory && npm run build) && (cd home && npm run build)
           npx --yes ipfs-car@3.1.0 pack directory/out --output out/directory.car
+          npx --yes ipfs-car@3.1.0 pack home/out --output out/home.car
       - name: The installer, for this release, and the checksums
         run: |
           sed "s/__TAG__/${GITHUB_REF_NAME}/" scripts/door.sh > out/door.sh

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Compute Substrate</title>
+<meta name="description" content="A network that keeps records and sites with no company in the middle. Every page is checked on your own computer, and anyone can keep a site up for years.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<!--
+  Compute Substrate's own front page, as a site on the network. It has no server: it comes from the
+  doors, checked against its address, and it's kept up by keep records anyone can add to. The
+  numbers on it are read from the network in the visitor's browser and checked there.
+-->
+<style>
+  :root {
+    --paper: #f4f1ea; --card: #fbf9f4; --ink: #16181d; --soft: #5d5f66; --faint: #8f8f93; --line: #dfdad0;
+    --signal: #e5602c; --signal-soft: #fbe3d6; --ok: #2e6b5a;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --paper: #121317; --card: #1a1c21; --ink: #efebe3; --soft: #a6a5a2; --faint: #75757a; --line: #2b2d33;
+    --signal: #ff7a45; --signal-soft: #3a2219; --ok: #7cc4ad; color-scheme: dark;
+  } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 17px/1.6 var(--sans); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
+  a { color: inherit; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  code, pre { font-family: var(--mono); font-size: 14px; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; padding-block: 22px; gap: 16px; }
+  .mark { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.01em; text-decoration: none; }
+  .mark img { width: 30px; height: 30px; }
+  nav.links { display: flex; gap: 22px; font-size: 15px; color: var(--soft); flex-wrap: wrap; }
+  nav.links a { text-decoration: none; } nav.links a:hover { color: var(--ink); }
+
+  .hero { padding-block: 72px 40px; }
+  h1 { font: 400 clamp(44px, 7.4vw, 92px)/1.02 var(--serif); letter-spacing: -0.02em; margin: 0; max-width: 11ch; text-wrap: balance; }
+  h1 em { font-style: italic; color: var(--signal); }
+  .lede { font-size: clamp(18px, 2vw, 21px); color: var(--soft); max-width: 36em; margin: 26px 0 0; }
+  .ctas { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 34px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 20px; border-radius: 999px; font-weight: 600; font-size: 15.5px; text-decoration: none; border: 1px solid var(--line); background: var(--card); }
+  .btn.main { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn:hover { border-color: var(--ink); }
+
+  /* the network, live: read and checked in this browser */
+  .live { margin-top: 56px; border-block: 1px solid var(--line); display: grid; grid-template-columns: repeat(4, 1fr); }
+  .live > div { padding: 18px 18px 18px 0; min-width: 0; }
+  .live > div + div { padding-left: 18px; border-left: 1px solid var(--line); }
+  .live b { display: block; font: 400 30px/1.15 var(--serif); font-variant-numeric: tabular-nums; }
+  .live span { color: var(--faint); font-size: 13.5px; }
+  .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 7px; vertical-align: 2px; }
+  .pulse.beat { animation: beat 1.2s ease-out 1; }
+  @keyframes beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
+
+  section.part { display: grid; grid-template-columns: 220px 1fr; gap: 40px; padding-block: 64px; border-bottom: 1px solid var(--line); }
+  .part > div { min-width: 0; }
+  .part h2 { font: 400 15px/1.4 var(--sans); color: var(--faint); margin: 6px 0 0; letter-spacing: 0.02em; }
+  .part h3 { font: 400 clamp(28px, 3.4vw, 40px)/1.15 var(--serif); margin: 0 0 14px; letter-spacing: -0.01em; max-width: 20ch; text-wrap: balance; }
+  .part p { margin: 0 0 14px; color: var(--soft); max-width: 38em; }
+  .part .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; overflow-x: auto; margin: 18px 0 0; line-height: 1.55; }
+  .copy { font: 600 13px var(--sans); border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 26px 40px; margin-top: 6px; }
+  .facts b { display: block; font-weight: 650; margin-bottom: 4px; }
+  .facts p { margin: 0; font-size: 15.5px; }
+
+  footer { padding-block: 48px 64px; display: flex; flex-direction: column; gap: 18px; }
+  .kept { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font: 400 22px/1.4 var(--serif); }
+  .kept button { font: 600 14px var(--sans); border: 0; border-radius: 999px; padding: 9px 16px; background: var(--signal); color: #fff; cursor: pointer; }
+  .kept button[disabled] { opacity: .6; cursor: default; }
+  #keepSaid { color: var(--soft); font-size: 15px; max-width: 40em; }
+  #keepSaid button { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+  .small { color: var(--faint); font-size: 14px; display: flex; gap: 18px; flex-wrap: wrap; }
+
+  @media (max-width: 760px) {
+    .hero { padding-block: 40px 24px; }
+    .live { grid-template-columns: 1fr 1fr; }
+    .live > div:nth-child(3) { padding-left: 0; border-left: 0; }
+    .live > div:nth-child(n+3) { border-top: 1px solid var(--line); }
+    section.part { grid-template-columns: 1fr; gap: 6px; padding-block: 44px; }
+    .facts { grid-template-columns: 1fr; }
+    nav.links { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="mark" href="#"><img src="icon.svg" alt="">Compute Substrate</a>
+    <nav class="links"><a href="#open">Open sites</a><a href="#keep">Keep them up</a><a href="#build">Build</a><a href="#door">Run a door</a></nav>
+  </header>
+
+  <section class="hero">
+    <h1>The web, kept by <em>everyone.</em></h1>
+    <p class="lede">Compute Substrate is a network that keeps records and sites with no company in the middle. Every page you open is checked on your own computer, nobody can quietly change what was written, and anyone can keep a site up for years.</p>
+    <div class="ctas">
+      <a class="btn main" id="getDoorway" href="https://github.com/compute-substrate/compute-substrate/tree/main/app#readme">Get Doorway</a>
+      <a class="btn" id="browse" href="https://github.com/compute-substrate/compute-substrate/tree/main/directory#readme">Browse sites</a>
+      <a class="btn" href="#build">Build on it</a>
+    </div>
+
+    <div class="live" aria-live="polite">
+      <div><b id="height">…</b><span><i class="pulse" id="pulse"></i><span id="heightSaid">reading the network</span></span></div>
+      <div><b id="doors">…</b><span>doors open, run by anyone</span></div>
+      <div><b id="sites">…</b><span>sites on the network</span></div>
+      <div><b id="until">…</b><span id="untilSaid">this page is kept up until</span></div>
+    </div>
+  </section>
+
+  <section class="part" id="open">
+    <h2>Open sites</h2>
+    <div>
+      <h3>Type a name, get a site.</h3>
+      <p>Doorway is a small app for your computer. Type a name like <b>commonplace</b> and it opens the site, from whichever doors have it, checked byte by byte against the address its name points to. Every name gets its own address on your computer, <code>commonplace.localhost</code>, in your normal browser.</p>
+      <p>It keeps one key for you, for every site, and asks before anything is written with it. The first time, it takes a little CSD someone left for newcomers, so writing just works.</p>
+      <div class="row">
+        <a class="btn main" href="https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/Doorway-macOS.dmg">Doorway for Mac</a>
+        <a class="btn" href="https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/Doorway-Windows-setup.exe">Doorway for Windows</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="part" id="keep">
+    <h2>Keep them up</h2>
+    <div>
+      <h3>A site lasts as long as anyone thinks it should.</h3>
+      <p>On the web, a page dies the day one person stops paying for it. Here, anyone can keep any site up, a year at a time, for 0.25 CSD a year: the doors keep it until its time runs out, whether or not a name still points to it. Years stack, anyone can add more, and anyone can check how long a site is kept from the network itself.</p>
+      <p>This page is kept that way. See the bottom of it.</p>
+    </div>
+  </section>
+
+  <section class="part" id="build">
+    <h2>Build on it</h2>
+    <div>
+      <h3>A whole app is one page.</h3>
+      <p>No server, no database, no accounts. The kit reads a topic from any door and checks every record in the browser; writing is signed by a key the page keeps, or by Doorway's. Publish the folder with Doorway and point a name at it.</p>
+<pre><code>import { connect, writingKey } from "compute-substrate";
+
+const net = connect();
+const me = await writingKey("guestbook");
+await net.write(me.signer(net), "guestbook.example", "Hello");
+const entries = await net.read("guestbook.example");   // each one checked</code></pre>
+      <div class="row">
+        <a class="btn" href="https://www.npmjs.com/package/compute-substrate">npm install compute-substrate</a>
+        <a class="btn" href="https://github.com/compute-substrate/compute-substrate/tree/main/kit/template">A whole app in one page</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="part" id="door">
+    <h2>Run a door</h2>
+    <div>
+      <h3>One command, on any small server.</h3>
+      <p>A door serves the network to browsers and keeps the sites names point to and people keep up. It needs no domain and no approval: it announces itself on the network, and Doorway finds it.</p>
+<pre><code id="doorCmd">curl -fsSL https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/door.sh | bash</code></pre>
+      <div class="row"><button class="copy" id="copyDoor">Copy</button><a class="btn" href="https://github.com/compute-substrate/compute-substrate/blob/main/docs/public-node.md">How a door works</a></div>
+    </div>
+  </section>
+
+  <section class="part">
+    <h2>Why it holds</h2>
+    <div class="facts">
+      <div><b>Nothing to trust</b><p>Every page and record is checked on your own computer, against its address and the network's proof-of-work. A door can refuse to answer; it can't change a byte.</p></div>
+      <div><b>No accounts</b><p>You are a key. Nobody can lock you out, and nobody needs your email.</p></div>
+      <div><b>No owner</b><p>Anyone can run a node or a door, and none of them is special. The rules are the code everyone runs.</p></div>
+      <div><b>Writing costs a stamp</b><p>Each record costs a little CSD, the network's unit, a few cents' worth. Spam doesn't pay, so nobody has to moderate it away.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="kept"><span id="keptLine">This page has no server.</span><button id="addYear" hidden>Add a year</button></div>
+    <p id="keepSaid"></p>
+    <div class="small">
+      <a href="https://computesubstrate.org">computesubstrate.org</a>
+      <a href="https://github.com/compute-substrate/compute-substrate">Source</a>
+      <a id="commonplace" href="https://commonplace.place">Commonplace</a>
+      <span>Reading through <code id="node">…</code></span>
+    </div>
+  </footer>
+</div>
+<script type="module" src="page.js"></script>
+</body>
+</html>
