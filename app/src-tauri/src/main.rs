@@ -678,6 +678,60 @@ struct KeptSite {
     names: Vec<String>,
     helping: bool,
     carried: bool,
+    // what the site calls itself: its <title>, and its icon as a data: URL
+    title: Option<String>,
+    icon: Option<String>,
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len() * 4 / 3 + 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[(n >> (18 - 6 * i)) as usize & 63] as char } else { '=' });
+        }
+    }
+    out
+}
+
+// A site's own title and icon, read from its files: <title>, then the icon its index.html names
+// (<link rel="icon"> or apple-touch-icon), then the usual file names
+fn site_face(dir: &Path) -> (Option<String>, Option<String>) {
+    let html = fs::read_to_string(dir.join("index.html")).unwrap_or_default();
+    let lower = html.to_ascii_lowercase();
+    let title = lower.find("<title").and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
+        .and_then(|a| lower[a..].find("</title>").map(|b| html[a..a + b].trim().to_string()))
+        .map(|t| t.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">"))
+        .filter(|t| !t.is_empty() && t.len() < 120);
+    let mut hrefs: Vec<String> = Vec::new();
+    for tag in lower.match_indices("<link").map(|(i, _)| i) {
+        let end = lower[tag..].find('>').map(|e| tag + e).unwrap_or(lower.len());
+        let t = &lower[tag..end];
+        if !(t.contains("apple-touch-icon") || t.contains("\"icon\"") || t.contains("shortcut icon") || t.contains("rel=icon")) {
+            continue;
+        }
+        if let Some(h) = t.find("href=").map(|h| h + 5) {
+            let q = t.as_bytes().get(h).copied().unwrap_or(b' ');
+            let v = if q == b'"' || q == b'\'' { &html[tag + h + 1..tag + h + 1 + t[h + 1..].find(q as char).unwrap_or(0)] } else { &html[tag + h..tag + h + t[h..].find(|c: char| c.is_whitespace() || c == '>').unwrap_or(t.len() - h)] };
+            // apple-touch-icon first: it's the large, square one
+            if t.contains("apple-touch-icon") { hrefs.insert(0, v.to_string()) } else { hrefs.push(v.to_string()) }
+        }
+    }
+    hrefs.extend(["apple-touch-icon.png", "icon.png", "favicon.png", "favicon.svg", "icon.svg", "favicon.ico"].map(String::from));
+    let root = dir.canonicalize().ok();
+    let icon = hrefs.iter().find_map(|h| {
+        let h = h.split(['?', '#']).next().unwrap_or("");
+        if h.is_empty() || h.contains("://") || h.starts_with("data:") || h.contains("..") { return None; }
+        let p = dir.join(h.trim_start_matches("./").trim_start_matches('/')).canonicalize().ok()?;
+        if !root.as_ref().is_some_and(|r| p.starts_with(r)) { return None; }
+        let bytes = fs::read(&p).ok().filter(|b| !b.is_empty() && b.len() <= 300_000)?;
+        let mime = match p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+            "png" => "image/png", "svg" => "image/svg+xml", "ico" => "image/x-icon", "jpg" | "jpeg" => "image/jpeg", "webp" => "image/webp", "gif" => "image/gif", _ => return None,
+        };
+        Some(format!("data:{mime};base64,{}", b64(&bytes)))
+    });
+    (title, icon)
 }
 
 // The release of Commonplace the app carries (app/commonplace.json), whose .car ships beside it
@@ -731,7 +785,12 @@ fn kept_sites(app: tauri::AppHandle) -> Vec<KeptSite> {
     }
     cids.into_iter().map(|cid| {
         let is_carried = Some(&cid) == carried.as_ref();
+        let folder = if dir.join(&cid).join("index.html").is_file() { Some(dir.join(&cid)) }
+            else if is_carried { app.path().resource_dir().ok().map(|d| d.join("commonplace")) } else { None };
+        let (title, icon) = folder.map(|f| site_face(&f)).unwrap_or((None, None));
         KeptSite {
+            title,
+            icon,
             names: names.iter().filter(|(_, e)| e.cid == cid).map(|(n, _)| n.clone()).collect(),
             helping: help.get(&cid).copied().unwrap_or(is_carried),
             carried: is_carried,
@@ -1022,6 +1081,19 @@ mod tests {
         assert!(!valid_cid("../bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs"));
         assert_eq!(doors(), vec!["https://csd.aon.network".to_string()]);
         assert_eq!(name_of_host("commonplace.localhost"), Some("commonplace".into()));
+        assert_eq!(b64(b"Man"), "TWFu");
+        assert_eq!(b64(b"Ma"), "TWE=");
+        assert_eq!(b64(b"M"), "TQ==");
+        let d = std::env::temp_dir().join(format!("doorway-face-{}", std::process::id()));
+        fs::create_dir_all(d.join("img")).unwrap();
+        fs::write(d.join("index.html"), r#"<html><head><title>My &amp; Site</title><link rel="icon" href="/img/i.png"></head></html>"#).unwrap();
+        fs::write(d.join("img/i.png"), [137u8, 80, 78, 71]).unwrap();
+        let (t, i) = site_face(&d);
+        assert_eq!(t.as_deref(), Some("My & Site"));
+        assert_eq!(i.as_deref(), Some("data:image/png;base64,iVBORw=="));
+        fs::write(d.join("index.html"), r#"<link rel="icon" href="../../etc/passwd">"#).unwrap();
+        assert_eq!(site_face(&d), (None, None));
+        fs::remove_dir_all(&d).ok();
         assert_eq!(name_of_host("Guest-Book.localhost:8800"), Some("guest-book".into()));
         assert_eq!(name_of_host("alice.csd.localhost"), Some("alice".into()));
         assert_eq!(name_of_host("localhost:80"), None);

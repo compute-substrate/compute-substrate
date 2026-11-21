@@ -7,22 +7,24 @@
 <style>
   /* Doorway: calm and plain. One place to type a name, your sites, and everything else folded away. */
   :root {
-    --bg: #f6f4ef; --card: #fffdf9; --ink: #22201c; --muted: #77726a; --line: #e6e1d7;
-    --accent: #2f6a5a; --accent-soft: #dcebe4; --warn: #9a3b2a; --warn-soft: #f6e3de; --busy: #c28a2c;
-    --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --bg: #fbf7f0; --card: #ffffff; --ink: #2a2420; --muted: #8a8078; --line: #efe7db;
+    --accent: #2e6b5a; --accent-soft: #e3efe9; --warm: #f0b44c; --warm-soft: #fdf0d8;
+    --warn: #b04a36; --warn-soft: #fbe9e4; --busy: #e0a23c; --shadow: 0 1px 2px rgba(60,40,20,.05), 0 6px 20px rgba(60,40,20,.06);
+    --display: ui-rounded, "SF Pro Rounded", "Nunito", -apple-system, "Segoe UI", system-ui, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #161614; --card: #1f1f1c; --ink: #edeae3; --muted: #9b968c; --line: #2e2d29;
-      --accent: #74c4a7; --accent-soft: #1f3830; --warn: #f0a08f; --warn-soft: #3b231e; --busy: #e0b259;
+      --bg: #1a1714; --card: #24201c; --ink: #f2ece4; --muted: #a59a8e; --line: #332d27;
+      --accent: #7fcbb0; --accent-soft: #23352e; --warm: #f2bd5e; --warm-soft: #3a2f1d;
+      --warn: #f0a08f; --warn-soft: #3b231e; --busy: #e8b55a; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
     }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--ink); }
-  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 26px 26px 22px; -webkit-user-select: none; user-select: none; }
+  body { font: 14px/1.5 var(--display); padding: 28px 24px 22px; -webkit-user-select: none; user-select: none; }
   .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 26px; }
-  .brand { display: flex; align-items: center; gap: 10px; font: 600 24px/1 var(--display); letter-spacing: -.01em; }
-  .brand svg { width: 26px; height: 26px; color: var(--accent); }
+  .brand { display: flex; align-items: center; gap: 10px; font: 700 22px/1 var(--display); letter-spacing: -.01em; }
+  .brand svg { width: 30px; height: 30px; flex: none; }
   .state { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.ok { background: var(--accent); }
@@ -38,25 +40,43 @@
   .bar > div { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .6s ease; }
   .actions { display: flex; gap: 8px; margin-top: 12px; }
   .go { display: flex; gap: 8px; margin: 0 0 6px; }
-  .go input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .go input { flex: 1; min-width: 0; font: inherit; font-size: 17px; padding: 15px 20px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--ink); -webkit-user-select: text; user-select: text; box-shadow: var(--shadow); }
   .go input::placeholder { color: var(--muted); }
   .go input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .go button { padding: 0 20px; border-radius: 14px; font-size: 15px; }
+  .go button { padding: 0 22px; border-radius: 999px; font-size: 15px; }
   .hint { color: var(--muted); font-size: 12px; margin: 0 4px; min-height: 18px; }
-  h2 { font: 600 17px/1.2 var(--display); margin: 28px 2px 8px; }
+  h2 { font: 700 16px/1.2 var(--display); margin: 30px 4px 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 12px; }
+  .tile { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 18px 10px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); cursor: pointer; text-align: center; transition: transform .15s ease, box-shadow .15s ease; font: inherit; color: inherit; }
+  .tile:hover { transform: translateY(-2px); }
+  .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .face { width: 56px; height: 56px; border-radius: 15px; display: grid; place-items: center; font: 700 24px/1 var(--display); color: #fff; overflow: hidden; flex: none; }
+  .face img { width: 100%; height: 100%; object-fit: cover; }
+  .tile b { font-weight: 650; font-size: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile small { color: var(--muted); font-size: 11.5px; margin-top: -6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .heart { position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 50%; border: 0; background: transparent; padding: 0; display: grid; place-items: center; cursor: pointer; color: var(--muted); }
+  .heart:hover { background: var(--bg); }
+  .heart svg { width: 17px; height: 17px; }
+  .heart.on { color: #e0584a; }
+  .forget { position: absolute; top: 10px; left: 10px; font-size: 11px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; opacity: 0; transition: opacity .15s; }
+  .tile:hover .forget, .forget:focus-visible { opacity: 1; }
+  .tile.add { border: 1.5px dashed var(--line); background: transparent; box-shadow: none; color: var(--muted); justify-content: center; }
+  .tile.add .face { background: var(--warm-soft); color: var(--warm); font-size: 30px; }
   .cards { display: flex; flex-direction: column; gap: 8px; }
   .site { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
   .site .what { flex: 1; min-width: 0; }
   .site .what b { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .site small { color: var(--muted); display: block; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; padding: 14px; border: 1px dashed var(--line); border-radius: 12px; text-align: center; }
-  .note { color: var(--muted); font-size: 12px; margin: 10px 4px 0; }
+  .note { color: var(--muted); font-size: 12px; margin: 14px 4px 0; display: flex; align-items: center; gap: 6px; }
+  .note svg { width: 13px; height: 13px; color: #e0584a; flex: none; }
   .link { background: none; border: 0; padding: 0; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .link:hover { color: var(--ink); }
   button { font: inherit; font-size: 13px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 13px; cursor: pointer; white-space: nowrap; }
   button:hover { border-color: var(--muted); }
   button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 650; }
+  @media (prefers-color-scheme: dark) { button.primary { color: #10201b; } }
   .publish { margin-top: 12px; }
   #publishBox { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
   #publishBox p { margin: 0; }
@@ -91,7 +111,7 @@
 <body>
   <header class="top">
     <div class="brand">
-      <svg viewBox="0 0 26 26" fill="none" aria-hidden="true"><path d="M5 24V11a8 8 0 0 1 16 0v13" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M2.5 24h21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M9.5 24v-9.5a3.5 3.5 0 0 1 7 0V24" fill="currentColor" opacity=".22"/></svg>
+      <svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#357a67"/><stop offset="1" stop-color="#255a4c"/></linearGradient><linearGradient id="dl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbe7b8"/><stop offset="1" stop-color="#f3c978"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#dg)"/><path d="M20 49V30a12 12 0 0 1 24 0v19Z" fill="url(#dl)"/><path d="M20 49V30a12 12 0 0 1 24 0v19" fill="none" stroke="#fbf7f0" stroke-width="3.4" stroke-linejoin="round"/><path d="M15 49h34" stroke="#fbf7f0" stroke-width="3.4" stroke-linecap="round"/></svg>
       Doorway
     </div>
     <div class="state" title="This computer's part of the network"><span class="dot" id="dot"></span><span id="headline">Getting ready…</span></div>
@@ -107,16 +127,15 @@
   </section>
 
   <form class="go" id="nameForm">
-    <input id="nameInput" placeholder="Go to a name" spellcheck="false" autocomplete="off" aria-label="A .csd name, like commonplace">
+    <input id="nameInput" placeholder="Where to?" spellcheck="false" autocomplete="off" aria-label="A name, like commonplace">
     <button class="primary">Open</button>
   </form>
-  <p class="hint" id="nameStatus">Type a name, like <b>commonplace</b>. Or open <b>commonplace.localhost</b> in your browser.</p>
+  <p class="hint" id="nameStatus">Type a name, like <b>commonplace</b></p>
 
   <h2>Your sites</h2>
-  <div id="sites" class="cards"></div>
+  <div id="sites" class="tiles"></div>
+  <input type="file" id="publishFolder" webkitdirectory hidden>
   <div class="publish">
-    <button id="publish">Publish a site</button>
-    <input type="file" id="publishFolder" webkitdirectory hidden>
     <div id="publishBox" hidden>
       <p id="publishSaid"></p>
       <div class="row" id="publishAddr" hidden style="border-top:0;padding:8px 0 0">
@@ -124,13 +143,13 @@
         <button id="publishCopy" type="button">Copy</button>
       </div>
       <form class="go" id="publishForm">
-        <input id="publishName" placeholder="Your .csd name" spellcheck="false" autocomplete="off" aria-label="Your .csd name">
+        <input id="publishName" placeholder="Your name" spellcheck="false" autocomplete="off" aria-label="Your .csd name">
         <button class="primary">Point it here</button>
       </form>
       <p class="hint" id="publishStatus"></p>
     </div>
   </div>
-  <p class="note">Sites you open are kept on this computer. Switch one on to help keep it up for everyone, with no server.</p>
+  <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up for everyone, with no server.</p>
 
   <details class="settings" id="settingsBox">
     <summary>Settings</summary>
@@ -138,6 +157,9 @@
       <div class="row" style="border-top:0">
         <div>Start when I log in<small>Keeps Doorway running in the background</small></div>
         <label class="switch"><input type="checkbox" id="autostart" aria-label="Start when I log in"><i></i></label>
+      </div>
+      <div class="row">
+        <div>Open sites in your browser<small>Any name works as <code>name.localhost</code>, like <code>commonplace.localhost</code></small></div>
       </div>
       <div class="row">
         <div style="flex:1">Put your site on the doors<small id="putStatus">A .car file of your site, once a .csd name points to it</small></div>
@@ -342,34 +364,47 @@
   // passed on to the doors (each its owner's choice) and a way to forget it
   const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   let seededAt = 0;
+  const HEART = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z" fill="currentColor"/></svg>';
+  const HEART_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+  // a site without an icon gets its first letter, on a color from its own address
+  const tint = cid => { let h = 0; for (const ch of cid) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 45% 52%)`; };
   async function renderSites() {
     let list; try { list = await invoke("kept_sites"); } catch { return; }
-    list.sort((a, b) => (b.carried - a.carried) || (a.names[0] ?? "").localeCompare(b.names[0] ?? ""));
-    $("sites").innerHTML = list.length ? list.map((x, i) => {
-      const title = x.carried ? "Commonplace" : x.names.length ? x.names.map(n => n + ".csd").join(", ") : "A site no name points to now";
+    list.sort((a, b) => (b.carried - a.carried) || (a.title ?? a.names[0] ?? "").localeCompare(b.title ?? b.names[0] ?? ""));
+    $("sites").innerHTML = list.map((x, i) => {
+      const title = x.title || (x.carried ? "Commonplace" : x.names[0] ? x.names[0][0].toUpperCase() + x.names[0].slice(1) : "Your site");
+      const name = x.names[0] ?? (x.carried ? "commonplace" : "");
       const doorsN = onDoors.get(x.cid);
-      const sub = !x.helping ? (x.carried ? "One example of an app on the network; it runs on this computer" : "Kept for you")
-        : doorsN == null ? "Helping keep it up…" : doorsN ? `Helping keep it up, on ${doorsN === 1 ? "1 door" : doorsN + " doors"}` : "Helping keep it up, once a door answers";
-      return `<div class="site">
-        <div class="what"><b>${esc(title)}</b><small>${esc(sub)}${x.carried ? "" : ` <button class="link" data-forget="${i}">Forget</button>`}</small></div>
-        ${x.carried || x.names.length ? `<button data-open="${i}">Open</button>` : ""}
-        <label class="switch" title="Help keep it up"><input type="checkbox" data-help="${i}" ${x.helping ? "checked" : ""}><i></i></label>
+      const tip = x.helping ? (doorsN ? `Helping keep it up, on ${doorsN === 1 ? "1 door" : doorsN + " doors"}` : "Helping keep it up") : "Help keep it up for everyone";
+      const face = x.icon ? `<img src="${x.icon}" alt="">` : esc(title.trim()[0] ?? "·").toUpperCase();
+      return `<div class="tile" role="button" tabindex="0" data-open="${i}" title="Open ${esc(title)}">
+        <span class="face" style="${x.icon ? "" : `background:${tint(x.cid)}`}">${face}</span>
+        <b>${esc(title)}</b>${name && name !== title.toLowerCase().replace(/\s+/g, "") ? `<small>${esc(name)}</small>` : ""}
+        <button class="heart${x.helping ? " on" : ""}" data-help="${i}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${x.helping}">${x.helping ? HEART : HEART_OFF}</button>
+        ${x.carried ? "" : `<button class="forget" data-forget="${i}">Forget</button>`}
       </div>`;
-    }).join("") : `<div class="empty">Sites you open show up here.</div>`;
-    $("sites").querySelectorAll("[data-open]").forEach(b => b.onclick = async () => {
-      const x = list[+b.dataset.open];
-      if (x.carried) invoke("plugin:opener|open_url", { url: await invoke("site_url") });
-      else openName(x.names[0]);
+    }).join("") + `<button class="tile add" id="publishTile"><span class="face">+</span><b>Publish</b><small>your own site</small></button>`;
+    $("publishTile").onclick = () => $("publishFolder").click();
+    const open = async i => {
+      const x = list[i];
+      if (x.carried && !x.names.length) invoke("plugin:opener|open_url", { url: await invoke("site_url") });
+      else if (x.names[0]) openName(x.names[0]);
+    };
+    $("sites").querySelectorAll("[data-open]").forEach(t => {
+      t.onclick = e => { if (!e.target.closest("button")) open(+t.dataset.open); };
+      t.onkeydown = e => { if ((e.key === "Enter" || e.key === " ") && e.target === t) { e.preventDefault(); open(+t.dataset.open); } };
     });
-    $("sites").querySelectorAll("[data-help]").forEach(c => c.onchange = async () => {
-      const x = list[+c.dataset.help];
-      await invoke("set_helping", { cid: x.cid, on: c.checked }).catch(() => {});
-      if (c.checked) { onDoors.delete(x.cid); renderSites(); await seed(x.cid); }
+    $("sites").querySelectorAll("[data-help]").forEach(b => b.onclick = async e => {
+      e.stopPropagation();
+      const x = list[+b.dataset.help], on = !x.helping;
+      await invoke("set_helping", { cid: x.cid, on }).catch(() => {});
+      if (on) { onDoors.delete(x.cid); renderSites(); await seed(x.cid); }
       renderSites();
     });
-    $("sites").querySelectorAll("[data-forget]").forEach(b => b.onclick = async () => {
+    $("sites").querySelectorAll("[data-forget]").forEach(b => b.onclick = async e => {
+      e.stopPropagation();
       const x = list[+b.dataset.forget];
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Forget it? Click again"; return; }
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Sure?"; b.style.opacity = 1; return; }
       await invoke("forget_site", { cid: x.cid }).catch(() => {});
       onDoors.delete(x.cid);
       renderSites();
@@ -386,7 +421,6 @@
   // `npx ipfs-car pack` gives), kept, and helped up. You point one of your names at it on that name's
   // page (approving once in Cairn), and the moment that record is in a block, the doors take it.
   let pending = null; // { cid, name, until }
-  $("publish").onclick = () => $("publishFolder").click();
   $("publishCopy").onclick = () => navigator.clipboard.writeText($("publishCid").textContent).then(() => { $("publishCopy").textContent = "Copied"; setTimeout(() => $("publishCopy").textContent = "Copy", 1500); }).catch(() => {});
   $("publishFolder").onchange = async () => {
     const list = [...$("publishFolder").files]; $("publishFolder").value = "";
