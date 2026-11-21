@@ -107,6 +107,10 @@ jobs:
       - name: Build the name resolver
         working-directory: app/resolver
         run: npm ci --prefix ../../kit && npm ci && npm run build && npm test
+      # the front page the app carries, opened on the first launch (home/)
+      - name: Build the front page
+        shell: bash
+        run: (cd home && npm run build) && rm -rf app/src-tauri/home && cp -r home/out app/src-tauri/home
 
       - uses: actions/download-artifact@v4
         with:

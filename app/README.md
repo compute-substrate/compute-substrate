@@ -34,8 +34,8 @@ After that it opens normally.
 
 ## What it does
 
-Doorway stays out of the way. The first time it opens, it shows you a site working (Commonplace,
-in your browser) and starts at login from then on. After that it lives in the menu bar (the tray on
+Doorway stays out of the way. The first time it opens, it shows you a site working (Compute
+Substrate's front page, which it carries, at `computesubstrate.localhost` in your browser) and starts at login from then on. After that it lives in the menu bar (the tray on
 Windows): closing its window keeps it running, and its icon opens the window again or quits. It only
 comes forward when a site asks to write with your key, in a small window on top: what the site
 wants to write, what it costs, Allow or Decline. In Settings you can turn off starting at login, or

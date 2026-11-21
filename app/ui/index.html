@@ -375,7 +375,7 @@
     // the very first launch: start at login from now on, and show a site working, in the browser
     try {
       if (await invoke("first_run")) {
-        setTimeout(async () => { try { await invoke("plugin:opener|open_url", { url: await commonplaceUrl() }); } catch {} }, 1500);
+        setTimeout(async () => { try { await invoke("plugin:opener|open_url", { url: await invoke("name_url", { name: "computesubstrate" }) }); } catch {} }, 1500);
       }
     } catch {}
     try { $("autostart").checked = await invoke("plugin:autostart|is_enabled"); } catch {}

@@ -543,7 +543,7 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
     // a name opened in this app: its site; else the Commonplace this app carries, for "commonplace"
     let root = app.state::<Sites>().served.lock().unwrap().get(&name).map(|(_, r)| r.lock().unwrap().clone())
         .filter(|r| r.join("index.html").is_file())
-        .or_else(|| (name == "commonplace").then(|| app.path().resource_dir().ok().map(|d| d.join("commonplace"))).flatten().filter(|r| r.join("index.html").is_file()));
+        .or_else(|| carried_site(app, &name));
     let answer = app.state::<Sites>().answers.lock().unwrap().get(&name).cloned();
     match (root, answer) {
         (Some(r), _) => respond_from(req, &r),
@@ -1093,6 +1093,18 @@ fn site_face(dir: &Path) -> (Option<String>, Option<String>) {
     (title, icon)
 }
 
+// The sites the app carries, served under their names until a name is opened (then the name's own
+// site wins): Commonplace, and Compute Substrate's front page (home/), opened on the first launch
+fn carried_site(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
+    let folder = match name { "commonplace" => "commonplace", "computesubstrate" => "home", _ => return None };
+    app.path().resource_dir().ok().map(|d| d.join(folder)).filter(|r| r.join("index.html").is_file())
+}
+
+#[tauri::command]
+fn name_url(name: String) -> Result<String, String> {
+    name_of_host(&format!("{name}.localhost")).map(|n| format!("{}/", names_origin(&n))).ok_or("not a name".into())
+}
+
 // The release of Commonplace the app carries (app/commonplace.json), whose .car ships beside it
 fn carried_cid() -> Option<String> {
     let j: serde_json::Value = serde_json::from_str(include_str!("../../commonplace.json")).ok()?;
@@ -1333,7 +1345,7 @@ fn main() {
         .manage(Sites::default())
         .manage(Arc::new(Asks::default()))
         .manage(AskShown::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url])
         .setup({
             let node = node.clone();
             move |app| {

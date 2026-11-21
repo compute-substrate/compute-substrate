@@ -54,6 +54,7 @@
     },
     "resources": {
       "commonplace/": "commonplace/",
+      "home/": "home/",
       "commonplace.car": "commonplace.car"
     }
   },
