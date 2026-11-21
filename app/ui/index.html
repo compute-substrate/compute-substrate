@@ -119,6 +119,10 @@
     <input type="file" id="publishFolder" webkitdirectory hidden>
     <div id="publishBox" hidden>
       <p id="publishSaid"></p>
+      <div class="row" id="publishAddr" hidden style="border-top:0;padding:8px 0 0">
+        <code id="publishCid" style="flex:1;min-width:0;overflow-wrap:anywhere"></code>
+        <button id="publishCopy" type="button">Copy</button>
+      </div>
       <form class="go" id="publishForm">
         <input id="publishName" placeholder="Your .csd name" spellcheck="false" autocomplete="off" aria-label="Your .csd name">
         <button class="primary">Point it here</button>
@@ -383,18 +387,21 @@
   // page (approving once in Cairn), and the moment that record is in a block, the doors take it.
   let pending = null; // { cid, name, until }
   $("publish").onclick = () => $("publishFolder").click();
+  $("publishCopy").onclick = () => navigator.clipboard.writeText($("publishCid").textContent).then(() => { $("publishCopy").textContent = "Copied"; setTimeout(() => $("publishCopy").textContent = "Copy", 1500); }).catch(() => {});
   $("publishFolder").onchange = async () => {
     const list = [...$("publishFolder").files]; $("publishFolder").value = "";
     if (!list.length) return;
     $("publishBox").hidden = false; $("publishForm").hidden = true;
-    $("publishSaid").textContent = `Packing ${list.length} files…`; $("publishStatus").textContent = "";
+    $("publishSaid").textContent = `Packing ${list.length} files…`; $("publishStatus").textContent = ""; $("publishAddr").hidden = true;
     try {
       const r = await CsdResolver.packFolder(list.map(f => ({ path: f.webkitRelativePath || f.name, bytes: async () => new Uint8Array(await f.arrayBuffer()) })));
       await invoke("site_keep_car", r.car, { headers: { "x-cid": r.cid } });
       await invoke("set_helping", { cid: r.cid, on: true });
       pending = { cid: r.cid, name: null, until: 0 };
       const mb = (r.bytes / 1e6).toFixed(r.bytes < 1e6 ? 2 : 1);
-      $("publishSaid").textContent = `Ready: ${r.files} files, ${mb} MB. Which of your names should show it?`;
+      $("publishSaid").textContent = `Ready: ${r.files} files, ${mb} MB. Its address, which a name points to:`;
+      $("publishCid").textContent = `ipfs://${r.cid}`; $("publishAddr").hidden = false;
+      $("publishStatus").textContent = "Which of your names should show it?";
       $("publishForm").hidden = false; $("publishName").focus();
       renderSites();
     } catch (err) { $("publishSaid").textContent = String(err && err.message || err); }
