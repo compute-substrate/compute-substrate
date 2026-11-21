@@ -10,5 +10,4 @@ await build({
   logLevel: "warning",
 });
 cpSync("index.html", "out/index.html");
-cpSync("icon.svg", "out/icon.svg");
 console.log("built out/");

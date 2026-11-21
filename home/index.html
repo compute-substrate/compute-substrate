@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Compute Substrate</title>
 <meta name="description" content="A network that keeps records and sites with no company in the middle. Every page is checked on your own computer, and a site stays up as long as anyone wants it to.">
-<link rel="icon" href="icon.svg" type="image/svg+xml">
 <!--
   Compute Substrate's own front page, as a site on the network. It has no server: it comes from the
   doors, checked against its address, and it's kept up by keep records anyone can add to. The
@@ -33,7 +32,6 @@
 
   header.top { display: flex; align-items: center; justify-content: space-between; padding-block: 22px; gap: 16px; }
   .mark { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.01em; text-decoration: none; }
-  .mark img { width: 30px; height: 30px; }
   nav.links { display: flex; gap: 22px; font-size: 15px; color: var(--soft); flex-wrap: wrap; }
   nav.links a { text-decoration: none; } nav.links a:hover { color: var(--ink); }
 
@@ -89,13 +87,13 @@
 <body>
 <div class="wrap">
   <header class="top">
-    <a class="mark" href="#"><img src="icon.svg" alt="">Compute Substrate</a>
+    <a class="mark" href="#">Compute Substrate</a>
     <nav class="links"><a href="#open">Open sites</a><a href="#keep">Keep them up</a><a href="#build">Build</a><a href="#door">Run a door</a></nav>
   </header>
 
   <section class="hero">
     <h1>The web, kept by <em>everyone.</em></h1>
-    <p class="lede">Compute Substrate is a network that keeps records and sites with no company in the middle. Every page you open is checked on your own computer, nobody can quietly change what was written, and a site stays up as long as anyone, not only its maker, wants it to.</p>
+    <p class="lede">Compute Substrate is a network nobody owns. The first thing on it is a web with no servers: every page is checked on your own computer, nothing can be quietly changed, and a site stays up as long as anyone wants it to.</p>
     <div class="ctas">
       <a class="btn main" id="getDoorway" href="https://github.com/compute-substrate/compute-substrate/tree/main/app#readme">Get Doorway</a>
       <a class="btn" id="browse" href="https://github.com/compute-substrate/compute-substrate/tree/main/directory#readme">Browse sites</a>
