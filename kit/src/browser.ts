@@ -36,7 +36,42 @@ export type BrowserKey = {
   restore: (privateKey: string) => void;
   // forget the key in this browser (and with it, unless backed up, its CSD)
   forget: () => void;
+  // set when Doorway holds the key: then each write is approved in Doorway, and the key itself never
+  // reaches the page (backup, restore and forget are Doorway's, in its Settings)
+  doorway?: boolean;
+  // proves the key controls its address, for buying CSD with USDC (compute-substrate/topup)
+  prove?: (authHash: Hex) => Promise<{ pubKey: string; sig: string }>;
 };
+
+// The key to write with: Doorway's, when the page was opened through Doorway (at <name>.localhost)
+// and it answers, so a person has one key and one balance for every site; else a key kept in this
+// browser for `app` (browserKey).
+export async function writingKey(app = "csd"): Promise<BrowserKey> {
+  return (await doorwayKey()) ?? browserKey(app);
+}
+
+export async function doorwayKey(): Promise<BrowserKey | null> {
+  try {
+    if (!/\.localhost$/.test(location.hostname)) return null;
+    const r = await fetch("/.doorway/key", { signal: AbortSignal.timeout(2000) });
+    const j = r.ok ? await r.json() : null;
+    const address = String(j?.address ?? "").toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) return null;
+    const post = async (path: string, body: unknown) => {
+      const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body, (_, v) => typeof v === "bigint" ? v.toString() : v instanceof Uint8Array ? bytesToHex(v) : v) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error ?? `Doorway answered ${r.status}`);
+      return j;
+    };
+    const held = () => { throw new Error("Doorway keeps this key: back it up or change it in Doorway's Settings."); };
+    return {
+      slot: "doorway", address: address as Hex, kept: true, doorway: true,
+      signer: () => ({ address: address as Hex, send: async (app, fee) => String((await post("/.doorway/write", { app, fee })).txid).toLowerCase() as Hex }),
+      backup: held, restore: held, forget: held,
+      prove: authHash => post("/.doorway/prove", { authHash }),
+    };
+  } catch { return null; }
+}
 
 // The key this browser keeps for an app, made the first time. `app` names it, so different apps on
 // the same site keep different keys.
@@ -146,6 +181,7 @@ export async function openInvites(net: Net, topic: string = WELCOME_TOPIC): Prom
 // under `topic` onto it (a random one, so newcomers arriving together don't all reach for the same).
 // Once per browser. Returns what's on its way, or null when there was nothing to do or take.
 export async function welcome(net: Net, me: BrowserKey, topic: string = WELCOME_TOPIC): Promise<{ csd: number; txid: Hex } | null> {
+  if (me.doorway) return null; // Doorway welcomes its key itself
   const done = `${me.slot}.welcomed`;
   if (store.get(done) === me.address) return null;
   if ((await net.api.utxos(me.address)).length) { store.set(done, me.address); return null; }

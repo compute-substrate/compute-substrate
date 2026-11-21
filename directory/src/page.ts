@@ -1,7 +1,7 @@
 // The directory's page: the list (app/resolver/src/directory.ts), and recommending, signed by a
 // key kept in this browser (the kit's browserKey), with the usual ways to get the little CSD it costs.
 import { listSites, siteFace, DIRECTORY, type Listed } from "../../app/resolver/src/directory";
-import { connect, browserKey, claimInvite, openInvites, welcome } from "../../kit/src/index";
+import { connect, writingKey, claimInvite, openInvites, welcome } from "../../kit/src/index";
 
 // Doors: public nodes anyone runs (docs/public-node.md). The page reads through the first that
 // answers, and fetches each site's title and icon from any of them; everything is checked here.
@@ -27,7 +27,8 @@ $("howOpen").innerHTML = viaDoorway
   ? "Sites open from this computer, through Doorway, checked."
   : 'Sites open through an IPFS gateway. With <a href="https://github.com/compute-substrate/compute-substrate/tree/main/app#readme">Doorway</a> they open from your own computer at <code>name.localhost</code>, checked.';
 
-const me = browserKey("directory");
+const me = await writingKey("directory");
+if (me.doorway) $("keyBtn").closest("span")!.textContent = "Each recommendation is a record on Compute Substrate, signed by your key in Doorway once you allow it there. A key counts once per site.";
 let net: ReturnType<typeof connect>;
 let sites: Listed[] = [];
 let order: "rec" | "new" = "rec";

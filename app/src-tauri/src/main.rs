@@ -471,6 +471,9 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
         let _ = req.respond(tiny_http::Response::from_string("Open a .csd name as http://<name>.localhost").with_status_code(404));
         return;
     };
+    if req.url().starts_with("/.doorway/") {
+        return doorway_request(app, req, name, host);
+    }
     // a name opened in this app: its site; else the Commonplace this app carries, for "commonplace"
     let root = app.state::<Sites>().served.lock().unwrap().get(&name).map(|(_, r)| r.lock().unwrap().clone())
         .filter(|r| r.join("index.html").is_file())
@@ -497,6 +500,137 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
                 .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap()));
         }
     }
+}
+
+// ── One key for every site ──────────────────────────────────────────────────
+// Doorway keeps one key, so a person has one balance and one backup, not one per site. A site opened
+// through Doorway asks at its own address:
+//   GET  /.doorway/key    -> {"address"}: the key's address
+//   POST /.doorway/write  {"app", "fee"} -> {"txid"}: shown in the window, signed once allowed
+//   POST /.doorway/prove  {"authHash"} -> {"pubKey","sig"}: that the key controls its address, for
+//                         buying CSD with USDC (CSD can only be delivered to it)
+// A POST must come from the site's own page (its Origin is its own address, and it's JSON, which
+// another page can't send without asking first), so no site can ask in another's name. The window
+// does the signing; the key never leaves this computer, and never reaches a site.
+#[derive(Default)]
+struct Asks {
+    next: std::sync::atomic::AtomicU64,
+    waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Result<serde_json::Value, String>>>>,
+}
+
+fn wallet_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("wallet.json"))
+}
+
+fn wallet_address(app: &tauri::AppHandle) -> Option<String> {
+    let j: serde_json::Value = serde_json::from_str(&fs::read_to_string(wallet_file(app).ok()?).ok()?).ok()?;
+    j["address"].as_str().filter(|a| a.len() == 42 && a.starts_with("0x")).map(str::to_string)
+}
+
+fn json_response(status: u16, v: serde_json::Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    tiny_http::Response::from_data(serde_json::to_vec(&v).unwrap())
+        .with_status_code(status)
+        .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+        .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap())
+}
+
+fn doorway_request(app: &tauri::AppHandle, mut req: tiny_http::Request, name: String, host: String) {
+    use tiny_http::Method::*;
+    let path = req.url().split('?').next().unwrap_or("").to_string();
+    fn header(r: &tiny_http::Request, k: &'static str) -> Option<String> {
+        r.headers().iter().find(|h| h.field.equiv(k)).map(|h| h.value.as_str().to_string())
+    }
+    match (req.method().clone(), path.as_str()) {
+        (Get, "/.doorway/key") => {
+            let r = match wallet_address(app) {
+                Some(a) => json_response(200, serde_json::json!({ "address": a })),
+                None => json_response(404, serde_json::json!({ "error": "Doorway has no key yet." })),
+            };
+            let _ = req.respond(r);
+        }
+        (Post, "/.doorway/write") | (Post, "/.doorway/prove") => {
+            let own = header(&req, "Origin").is_some_and(|o| o.eq_ignore_ascii_case(&format!("http://{host}")));
+            let json = header(&req, "Content-Type").is_some_and(|c| c.to_ascii_lowercase().starts_with("application/json"));
+            if !own || !json {
+                let _ = req.respond(json_response(403, serde_json::json!({ "error": "Only the site's own page can ask." })));
+                return;
+            }
+            let mut body = Vec::new();
+            if req.as_reader().take(16_385).read_to_end(&mut body).is_err() || body.len() > 16_384 {
+                let _ = req.respond(json_response(400, serde_json::json!({ "error": "That ask is too large." })));
+                return;
+            }
+            let Ok(body) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                let _ = req.respond(json_response(400, serde_json::json!({ "error": "That ask isn't JSON." })));
+                return;
+            };
+            let asks = app.state::<Arc<Asks>>().inner().clone();
+            let id = asks.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let (tx, rx) = std::sync::mpsc::channel();
+            asks.waiting.lock().unwrap().insert(id, tx);
+            let kind = if path.ends_with("prove") { "prove" } else { "write" };
+            let _ = app.emit("site-ask", serde_json::json!({ "id": id, "site": name, "kind": kind, "body": body }));
+            if kind == "write" {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            std::thread::spawn(move || {
+                let answer = rx.recv_timeout(Duration::from_secs(300)).unwrap_or_else(|_| Err("Nobody answered in Doorway.".into()));
+                asks.waiting.lock().unwrap().remove(&id);
+                let r = match answer {
+                    Ok(v) => json_response(200, v),
+                    Err(e) => json_response(403, serde_json::json!({ "error": e })),
+                };
+                let _ = req.respond(r);
+            });
+        }
+        (Options, _) => {
+            let _ = req.respond(tiny_http::Response::empty(204));
+        }
+        _ => {
+            let _ = req.respond(json_response(404, serde_json::json!({ "error": "Doorway answers /.doorway/key, /.doorway/write and /.doorway/prove." })));
+        }
+    }
+}
+
+#[tauri::command]
+fn answer_ask(asks: tauri::State<'_, Arc<Asks>>, id: u64, ok: Option<serde_json::Value>, error: Option<String>) {
+    if let Some(tx) = asks.waiting.lock().unwrap().remove(&id) {
+        let _ = tx.send(ok.ok_or_else(|| error.unwrap_or_else(|| "Declined in Doorway.".into())));
+    }
+}
+
+// The key itself, for the window alone (a site can't call commands; it only reaches the server above)
+#[tauri::command]
+fn wallet_get(app: tauri::AppHandle) -> Option<serde_json::Value> {
+    serde_json::from_str(&fs::read_to_string(wallet_file(&app).ok()?).ok()?).ok()
+}
+
+#[tauri::command]
+fn wallet_set(app: tauri::AppHandle, key: String, address: String) -> Result<(), String> {
+    let key = key.trim().to_ascii_lowercase();
+    let address = address.trim().to_ascii_lowercase();
+    let hex = |s: &str, n: usize| s.len() == n + 2 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit());
+    if !hex(&key, 64) || !hex(&address, 40) {
+        return Err("That isn't a key.".into());
+    }
+    let file = wallet_file(&app)?;
+    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    // the old one, if any, is kept beside it: replacing a key must never lose the one before
+    if file.exists() {
+        let _ = fs::copy(&file, file.with_file_name(format!("wallet-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))));
+    }
+    let tmp = file.with_extension("part");
+    fs::write(&tmp, serde_json::to_vec_pretty(&serde_json::json!({ "key": key, "address": address })).unwrap()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp, &file).map_err(|e| e.to_string())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -981,7 +1115,8 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(node.clone())
         .manage(Sites::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer])
+        .manage(Arc::new(Asks::default()))
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set])
         .setup({
             let node = node.clone();
             move |app| {

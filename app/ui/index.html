@@ -99,6 +99,16 @@
   details.settings > summary::-webkit-details-marker { display: none; }
   details.settings > summary::before { content: "▸ "; }
   details.settings[open] > summary::before { content: "▾ "; }
+  .ask { position: fixed; inset: 0; background: rgba(30,22,14,.35); display: grid; place-items: center; padding: 20px; z-index: 20; }
+  .ask > div { background: var(--card); border-radius: 18px; padding: 20px; max-width: 420px; width: 100%; box-shadow: 0 10px 40px rgba(0,0,0,.25); display: flex; flex-direction: column; gap: 12px; }
+  .ask h3 { margin: 0; font: 700 18px/1.3 var(--display); }
+  .ask p { margin: 0; overflow-wrap: anywhere; }
+  .ask .what { background: var(--bg); border-radius: 12px; padding: 12px 14px; font-size: 14px; }
+  .ask label { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+  .ask .btns { display: flex; gap: 10px; justify-content: flex-end; }
+  .ask .btns button { border: 0; border-radius: 999px; padding: 10px 18px; font: 600 14px var(--display); cursor: pointer; }
+  .ask #askYes { background: var(--accent); color: #fff; }
+  .ask #askNo { background: var(--line); color: var(--ink); }
   .group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin-top: 8px; }
   .group h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 2px; }
   .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 6px; }
@@ -163,8 +173,38 @@
     <button class="hint" id="discoverMore" hidden style="background:none;border:0;cursor:pointer;text-decoration:underline;margin-top:8px">Show all</button>
   </div>
 
+  <div class="ask" id="ask" hidden role="dialog" aria-modal="true" aria-labelledby="askTitle">
+    <div>
+      <h3 id="askTitle"></h3>
+      <p class="what" id="askWhat"></p>
+      <p class="hint" style="margin:0" id="askBal"></p>
+      <label><input type="checkbox" id="askAlways"> <span id="askAlwaysText"></span></label>
+      <div class="btns"><button id="askNo">Decline</button><button id="askYes">Allow</button></div>
+    </div>
+  </div>
+
   <details class="settings" id="settingsBox">
     <summary>Settings</summary>
+    <div class="group">
+      <h3>Your key</h3>
+      <p class="sub" style="margin:2px 0 6px">One key for every site you open here: sites ask Doorway when they want to write, and never see the key itself.</p>
+      <div class="row" style="border-top:0">
+        <div style="min-width:0">Balance <b id="walletBal">…</b> CSD<small><code id="walletAddr" style="overflow-wrap:anywhere"></code></small></div>
+        <button id="walletCopy">Copy address</button>
+      </div>
+      <div class="row">
+        <div>Back it up<small>Whoever has the key can spend its CSD. Keep the copy somewhere safe.</small></div>
+        <button id="walletBackup">Copy key</button>
+      </div>
+      <form class="row" id="walletRestore">
+        <input id="walletRestoreText" placeholder="Paste a key to use it here instead" spellcheck="false" autocomplete="off" style="flex:1;min-width:0;font:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)">
+        <button>Use</button>
+      </form>
+      <div class="row" id="walletAllowedRow" hidden>
+        <div style="min-width:0">Allowed without asking<small id="walletAllowed"></small></div>
+      </div>
+      <p class="hint" id="walletStatus" style="margin:0 0 8px"></p>
+    </div>
     <div class="group">
       <div class="row" style="border-top:0">
         <div>Start when I log in<small>Keeps Doorway running in the background</small></div>
@@ -569,6 +609,98 @@
   };
   renderSites();
   setInterval(renderSites, 60000);
+
+  // ── your key: one for every site opened here ──────────────────────────────
+  // Sites ask at their own address (/.doorway/...), Doorway's server passes the ask here, and it's
+  // signed only once allowed. "Allow without asking" is per site, up to 1 CSD a day.
+  const W = CsdResolver.wallet;
+  let wallet = null;
+  const DAY = 86_400_000, BUDGET = 1;
+  const store = { get(k) { try { return JSON.parse(localStorage.getItem(k) ?? "null"); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+  const allowed = () => store.get("doorway.allowed") ?? {}; // site -> { since, spent: [{at, csd}] }
+  const spentToday = site => (allowed()[site]?.spent ?? []).filter(x => Date.now() - x.at < DAY).reduce((n, x) => n + x.csd, 0);
+  async function loadWallet() {
+    wallet = await invoke("wallet_get").catch(() => null);
+    if (!wallet) {
+      const k = W.newKey();
+      await invoke("wallet_set", k);
+      wallet = k;
+    }
+    $("walletAddr").textContent = wallet.address;
+    showBalance();
+  }
+  async function showBalance() {
+    try { $("walletBal").textContent = String(await W.balance(await readingNode(), wallet.address)); } catch { $("walletBal").textContent = "?"; }
+    const a = Object.keys(allowed());
+    $("walletAllowedRow").hidden = !a.length;
+    $("walletAllowed").innerHTML = a.map(s => `${esc(s)}.csd <button class="link" data-unallow="${esc(s)}" style="background:none;border:0;padding:0;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit">stop</button>`).join(", ");
+    $("walletAllowed").querySelectorAll("[data-unallow]").forEach(b => b.onclick = () => { const m = allowed(); delete m[b.dataset.unallow]; store.set("doorway.allowed", m); showBalance(); });
+  }
+  // a newcomer's welcome, once: one of the invites people left in the shared pool
+  async function welcomeOnce() {
+    if (store.get("doorway.welcomed") === wallet.address) return;
+    try {
+      const got = await W.welcomeKey(await readingNode(), wallet.address);
+      store.set("doorway.welcomed", wallet.address);
+      if (got) { $("walletStatus").textContent = `Welcome! Someone left you ${got} CSD to write with. It's ready in about two minutes.`; setTimeout(showBalance, 130_000); }
+    } catch {}
+  }
+  $("walletCopy").onclick = () => navigator.clipboard.writeText(wallet.address).then(() => { $("walletCopy").textContent = "Copied"; setTimeout(() => $("walletCopy").textContent = "Copy address", 1500); }).catch(() => {});
+  $("walletBackup").onclick = () => navigator.clipboard.writeText(wallet.key).then(() => { $("walletStatus").textContent = "Key copied. Keep it somewhere safe: whoever has it can spend its CSD."; }).catch(() => {});
+  $("walletRestore").onsubmit = async e => {
+    e.preventDefault();
+    const t = $("walletRestoreText").value.trim();
+    try {
+      const address = W.addressOf(t);
+      const key = "0x" + t.replace(/^0x/i, "").toLowerCase();
+      await invoke("wallet_set", { key, address });   // the key before is kept in Doorway's folder
+      wallet = { key, address };
+      $("walletRestoreText").value = "";
+      $("walletAddr").textContent = address;
+      $("walletStatus").textContent = "Using that key now. The one before is kept in Doorway's folder (wallet-….json).";
+      showBalance();
+    } catch (err) { $("walletStatus").textContent = String(err && err.message || err); }
+  };
+
+  const asks = [];
+  listen("site-ask", e => { asks.push(e.payload); if (asks.length === 1) nextAsk(); });
+  async function nextAsk() {
+    const a = asks[0];
+    if (!a) return;
+    const done = (ok, error) => { invoke("answer_ask", { id: a.id, ok, error }).catch(() => {}); asks.shift(); $("ask").hidden = true; nextAsk(); };
+    try {
+      if (!wallet) await loadWallet();
+      if (a.kind === "prove") return done(W.prove(wallet.key, a.body?.authHash), null);
+      const ask = W.readAsk(a.body);
+      const csd = Number(ask.fee) / 1e8;
+      const go = async () => {
+        try {
+          const txid = await W.send(await readingNode(), wallet.key, ask);
+          if (allowed()[a.site]) { const m = allowed(); m[a.site].spent = [...(m[a.site].spent ?? []).filter(x => Date.now() - x.at < DAY), { at: Date.now(), csd }]; store.set("doorway.allowed", m); }
+          done({ txid }, null);
+          setTimeout(showBalance, 3000);
+        } catch (err) { done(null, String(err && err.message || err)); }
+      };
+      // allowed without asking, within its day's budget
+      if (allowed()[a.site] && spentToday(a.site) + csd <= BUDGET) return go();
+      $("askTitle").textContent = `${a.site}.csd asks to write`;
+      $("askWhat").textContent = W.describe(ask);
+      const bal = $("walletBal").textContent;
+      $("askBal").textContent = /^[\d.]+$/.test(bal) ? `Your key holds ${bal} CSD.` : "";
+      $("askAlways").checked = false;
+      $("askAlwaysText").textContent = `Allow ${a.site}.csd without asking, up to ${BUDGET} CSD a day`;
+      $("ask").hidden = false;
+      $("askYes").focus();
+      $("askYes").onclick = () => {
+        if ($("askAlways").checked) { const m = allowed(); m[a.site] = { since: Date.now(), spent: [] }; store.set("doorway.allowed", m); }
+        $("ask").hidden = true;
+        go();
+      };
+      $("askNo").onclick = () => done(null, "Declined in Doorway.");
+    } catch (err) { done(null, String(err && err.message || err)); }
+  }
+  loadWallet().then(welcomeOnce).catch(() => {});
+  setInterval(() => wallet && showBalance(), 5 * 60_000);
   // Discover: every site a name points to, most recommended first (the directory, read here too)
   let discoverAll = false, discovered = [];
   const faceOf = new Map();

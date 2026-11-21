@@ -71,7 +71,7 @@
       <p class="small">Or send CSD to your writing key: <button class="link" id="needAddr">copy its address</button></p>
     </div>
     <div class="panel" id="panel" hidden>
-      <p class="small">A key kept in this browser writes your entries. Each one costs 0.25 CSD. Send CSD to it from any wallet:</p>
+      <p class="small" id="keyWhat">A key kept in this browser writes your entries. Each one costs 0.25 CSD. Send CSD to it from any wallet:</p>
       <div class="row"><code id="addr" style="flex:1"></code><button class="link" id="copy">Copy</button></div>
       <div class="row"><input id="invite" placeholder="Or paste an invite link" aria-label="Invite link"><button id="claim">Use</button></div>
       <p class="small">Clearing this site's data loses the key and its CSD, so keep small amounts here. <button class="link" id="backup">Copy key</button></p>
@@ -85,7 +85,7 @@
 </main>
 
 <script type="module">
-  import { connect, browserKey, claimInvite, makeInvites, openInvites, welcome } from "./compute-substrate.js";
+  import { connect, writingKey, claimInvite, makeInvites, openInvites, welcome } from "./compute-substrate.js";
 
   // Your app's topic: records in it are your app's data. Pick a name no one else uses.
   const TOPIC = "guestbook.example";
@@ -98,10 +98,13 @@
   const net = connect({ node: new URLSearchParams(location.search).get("node") ?? undefined });
   $("node").textContent = net.node;
 
-  // A writing key, kept in this browser: like a spending wallet, topped up with a little CSD from
-  // wherever you keep the rest. No wallet to install, no button to connect. (To sign with Cairn
-  // Wallet instead, use cairnSigner() from the kit.)
-  const me = browserKey("guestbook");
+  // A writing key: Doorway's, when this page was opened through Doorway (one key and one balance
+  // for every site, each post approved there); else a key kept in this browser, like a spending
+  // wallet topped up with a little CSD. No wallet to install, no button to connect. (To sign with
+  // Cairn Wallet instead, use cairnSigner() from the kit.)
+  const me = await writingKey("guestbook");
+  // Doorway keeps its key itself: backing up and restoring are in its Settings
+  if (me.doorway) for (const id of ["backup", "restoreText", "restore"]) $(id).closest("p, .row").hidden = true;
   const showKey = async () => {
     $("addr").textContent = me.address;
     try { $("bal").textContent = String(await net.balance(me.address)); } catch { $("bal").textContent = "?"; }
@@ -187,6 +190,7 @@
   if (!me.kept) say("This browser won't keep the key (a private window?), so it lasts this visit only.");
   // someone new, with nothing on their key: take one of the invites left for newcomers
   else if (!invited) welcome(net, me, INVITES).then(r => { if (r) { say(`Welcome! Someone left you ${r.csd} CSD to write with. It's ready in about two minutes.`); setTimeout(showKey, 130_000); } }).catch(() => {});
+  if (me.doorway) $("keyWhat").textContent = "Doorway's key writes your entries: each one is approved in Doorway, and costs 0.25 CSD. Send CSD to it from any wallet:";
   $("keyToggle").onclick = () => { const p = $("panel"); p.hidden = !p.hidden; $("keyToggle").setAttribute("aria-expanded", String(!p.hidden)); };
   showKey();
   showWaiting();

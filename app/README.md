@@ -63,6 +63,22 @@ no special place there; anyone can build others over the same records.
   tied to the address a page is served from, so a passkey made on `localhost` is a different key from
   one made on commonplace.place.
 
+### Your key
+
+Doorway keeps one key for you, so you have one balance and one backup for every site you open
+through it, not one per site. When a site wants to write (a post, a recommendation), Doorway's
+window shows what it asks and what it costs, and signs only if you allow it. You can let a site
+write without asking, up to 1 CSD a day, and stop that in Settings.
+
+- Sites never see the key. They ask at their own address (`/.doorway/write` on `<name>.localhost`),
+  and only a site's own page can ask in its name.
+- Doorway signs records and attestations only: never a payment, and never more than 1 CSD at once.
+- The first time, it takes one of the invites people leave for newcomers, so writing just works.
+- *Settings* shows the key's address and balance, copies the key to back it up, and takes a key to
+  use instead (the one before is kept in Doorway's folder as `wallet-….json`).
+- Sites built with the kit use it by themselves (`writingKey()`); opened anywhere else, they keep a
+  key in the browser as before.
+
 It also opens `.csd` names, from Cairn's name service (CNS, by InverseAltruism), through your own
 node. Type a name into *Go to a name* in the window (just `commonplace`, say), or click a `web+csd:<name>` link anywhere on the computer; the app
 registers itself for those links.

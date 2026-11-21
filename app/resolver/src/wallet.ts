@@ -1,0 +1,87 @@
+// Doorway's key: one key, one balance, for every site opened through Doorway. Sites ask for a
+// write at their own address (/.doorway/write on <name>.localhost); the window shows what's asked,
+// and signs only once it's allowed. The key never reaches a site.
+import { connect, claimInvite, openInvites } from "../../../kit/src/index";
+import { buildAppTx, bytesToHex, concat, hexToBytes, keyFromPrivate, utf8, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
+import { secp256k1 } from "@noble/curves/secp256k1";
+import { keccak_256 } from "@noble/hashes/sha3";
+
+// the most one write may cost without the person typing it in somewhere else
+export const MAX_FEE = 100_000_000n; // 1 CSD
+
+export function newKey(): { key: Hex; address: Hex } {
+  const key = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+  return { key, address: keyFromPrivate(hexToBytes(key)).addr20 };
+}
+export function addressOf(key: string): Hex {
+  if (!/^(0x)?[0-9a-f]{64}$/i.test(key.trim())) throw new Error("That isn't a key backup: it's 64 hex characters.");
+  return keyFromPrivate(hexToBytes(("0x" + key.trim().replace(/^0x/i, "")) as Hex)).addr20;
+}
+
+// What a site asked for, read strictly: a record (propose) or an attestation, and its fee
+export type Ask = { app: AppPayload; fee: bigint };
+export function readAsk(body: any): Ask {
+  const a = body?.app, fee = BigInt(String(body?.fee ?? "0"));
+  let app: AppPayload;
+  if (a?.kind === "propose") {
+    const domain = String(a.domain ?? ""), uri = String(a.uri ?? "");
+    if (!domain || utf8(domain).length > 128 || !uri || utf8(uri).length > 512) throw new Error("bad record");
+    const ph = hexToBytes(String(a.payloadHash ?? ""));
+    if (ph.length !== 32) throw new Error("bad record");
+    app = { kind: "propose", domain, uri, payloadHash: ph, expiresEpoch: BigInt(String(a.expiresEpoch ?? "0")) };
+    if (fee < MIN_FEE_PROPOSE) throw new Error("fee too low");
+  } else if (a?.kind === "attest") {
+    const id = String(a.proposalId ?? "").toLowerCase();
+    if (!/^0x[0-9a-f]{64}$/.test(id)) throw new Error("bad attestation");
+    const score = Number(a.score), confidence = Number(a.confidence ?? 1);
+    if (![score, confidence].every(n => Number.isInteger(n) && n >= 0 && n <= 0xffffffff)) throw new Error("bad attestation");
+    app = { kind: "attest", proposalId: id as Hex, score, confidence };
+    if (fee < MIN_FEE_ATTEST) throw new Error("fee too low");
+  } else throw new Error("Doorway signs records and attestations only.");
+  if (fee > MAX_FEE) throw new Error("That costs more than 1 CSD, which Doorway doesn't sign for a site.");
+  return { app, fee };
+}
+
+// Sign and send, through `node`. "Not enough CSD" is worded as the kit words it, so pages show
+// their ways to get some.
+export async function send(node: string, key: Hex, ask: Ask): Promise<Hex> {
+  const net = connect({ node });
+  const k = keyFromPrivate(hexToBytes(key));
+  const utxos = await net.api.utxos(k.addr20);
+  if (utxos.reduce((s, u) => s + u.value, 0n) < ask.fee) throw new Error(`Not enough CSD at ${k.addr20}: writing this costs ${Number(ask.fee) / 1e8} CSD.`);
+  return (await net.api.submit(buildAppTx(utxos, k, ask.app, ask.fee))).toLowerCase() as Hex;
+}
+
+// That this key controls its address, for a trade on the CSD/USDC market (the kit's top-up): CSD
+// can only be delivered to it, so there's nothing to approve
+export function prove(key: Hex, authHash: string) {
+  const h = hexToBytes(authHash as Hex);
+  if (h.length !== 32) throw new Error("bad trade");
+  const priv = hexToBytes(key);
+  const s = secp256k1.sign(keccak_256(concat(utf8("AON CSD/USDC: I control this CSD address for trade "), h)), priv, { lowS: true });
+  return { pubKey: bytesToHex(secp256k1.getPublicKey(priv, false).slice(1)), sig: bytesToHex(concat(s.toCompactRawBytes(), new Uint8Array([27 + s.recovery]))) };
+}
+
+export async function balance(node: string, address: Hex): Promise<number> {
+  return connect({ node }).balance(address);
+}
+
+// A newcomer's welcome: one of the invites people left in the shared pool, onto this key
+export async function welcomeKey(node: string, address: Hex): Promise<number | null> {
+  const net = connect({ node });
+  if ((await net.api.utxos(address)).length) return null;
+  const open = await openInvites(net as any);
+  while (open.length) {
+    const [pick] = open.splice(Math.floor(Math.random() * open.length), 1);
+    try { return (await claimInvite(net as any, pick.code, address)).csd; } catch { /* taken a moment ago */ }
+  }
+  return null;
+}
+
+// Words for what a site asks
+export function describe(ask: Ask): string {
+  const csd = `${Number(ask.fee) / 1e8} CSD`;
+  if (ask.app.kind === "propose") return `Write "${ask.app.uri.length > 140 ? ask.app.uri.slice(0, 140) + "…" : ask.app.uri}" under ${ask.app.domain}, for ${csd}`;
+  if (ask.app.kind === "attest") return `Attest ${ask.app.score} to record ${ask.app.proposalId.slice(0, 10)}…, for ${csd}`;
+  return csd;
+}

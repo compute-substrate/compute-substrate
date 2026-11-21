@@ -228,3 +228,4 @@ export async function lookup(input: string, opts: { doors?: string[] } = {}): Pr
 export { fetchSite, carRoot, filesFromCar, fileFromCar } from "./site";
 export { listSites, siteFace, DIRECTORY } from "./directory";
 export { packFolder } from "./pack";
+export * as wallet from "./wallet";

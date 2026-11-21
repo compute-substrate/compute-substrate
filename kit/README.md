@@ -9,11 +9,11 @@ npm install compute-substrate
 ```
 
 ```js
-import { connect, browserKey } from "compute-substrate";
+import { connect, writingKey } from "compute-substrate";
 
 const net = connect();                                   // a public node; or connect({ node: "http://127.0.0.1:8789" })
 const entries = await net.read("guestbook.example");     // newest first, each one checked
-const me = browserKey("guestbook");                      // a writing key, kept in this browser
+const me = await writingKey("guestbook");                // Doorway's key, or one kept in this browser
 await net.write(me.signer(net), "guestbook.example", "Hello from my own app");  // once me.address holds a little CSD
 ```
 
@@ -47,6 +47,14 @@ Think of it as a spending wallet: a little CSD for writing, topped up from where
 the rest. It's only as safe as the browser's storage (clearing site data loses it), so keep small
 amounts on it and offer `backup()` and `restore()`, as the template does. For more than that, or one
 identity across apps, sign with a wallet instead (`cairnSigner()`).
+
+**With Doorway, one key for every site.** `writingKey()` is `browserKey()`, except that on a page
+opened through [Doorway](../app) (at `<name>.localhost`) it uses the key Doorway keeps: one balance
+and one backup for every site, and each write approved in Doorway's window, where the person can
+also let a site write without asking, up to 1 CSD a day. The page never sees the key. Doorway signs
+records and attestations only, never a payment, and nothing over 1 CSD; `me.doorway` is true, and
+`backup()`, `restore()` and `forget()` point to Doorway's Settings. The welcome and the USDC top-up
+work with it as they are.
 
 ## A welcome, so writing just works
 
@@ -94,6 +102,7 @@ someone presses *Buy with 1 USDC*: posting with no CSD shows the three ways to g
 | `net.write(signer, domain, text, { payloadHash?, fee? })` | write a record; returns its id. It shows from the next block, about 2 minutes |
 | `net.attest(signer, id, score, { confidence?, fee? })` | attest to a record with a number your app gives meaning to |
 | `net.balance(address)` | CSD at an address |
+| `writingKey(app?)` | Doorway's key when the page was opened through Doorway, else `browserKey(app)` (async) |
 | `browserKey(app?)` | the writing key this browser keeps for your app: `address`, `signer(net)`, `backup()`, `restore(hex)`, `forget()`, and `kept` (false in a private window) |
 | `claimInvite(net, link, address)` | move an invite link's CSD onto an address; a link like `…/#/invite/<code>`, as Commonplace makes, or the bare code |
 | `makeInvites(net, key, { topic, count, each })` | split `each` CSD into `count` invites (up to 10) off a key you hold, and list them under `topic` in the same transaction |
