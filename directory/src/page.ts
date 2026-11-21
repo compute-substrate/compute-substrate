@@ -53,10 +53,36 @@ function render() {
       </a>
       <div class="foot">
         <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}</span>
-        <button class="rec" data-name="${esc(s.name)}" ${done ? "disabled" : ""}>${done ? "Recommended" : "Recommend"}</button>
+        <span class="acts">
+          <button class="rec quiet" data-share="${esc(s.name)}" title="Share a link to it">Share</button>
+          <button class="rec" data-name="${esc(s.name)}" ${done ? "disabled" : ""}>${done ? "Recommended" : "Recommend"}</button>
+        </span>
       </div>
     </article>`;
   }).join("");
+}
+
+// A name in the address (this page, then #<name>) opens that name's site: a link anyone can share
+// and open on any device, phone included, with nothing installed
+const wanted = () => decodeURIComponent(location.hash.replace(/^#\/?/, "")).trim().toLowerCase().replace(/\.csd$/, "");
+let opening = wanted();
+if (opening) $("grid").innerHTML = `<p class="empty">Opening ${esc(opening)}.csd…</p>`;
+function openWanted() {
+  if (!opening || !sites.length) return;
+  const s = sites.find(x => x.name === opening);
+  if (s) { location.replace(openUrl(s)); return; }
+  say(`${opening}.csd doesn't point to a site.`);
+  opening = "";
+  render();
+}
+addEventListener("hashchange", () => { opening = wanted(); openWanted(); });
+// a link to a site: to this page with its name, which opens it (always its newest site); opened
+// through Doorway, where this page's address is only this computer's, a link to the site itself
+async function share(s: Listed) {
+  const url = viaDoorway ? `https://${s.cid}.ipfs.dweb.link/` : `${location.origin}${location.pathname}#${s.name}`;
+  const title = faces.get(s.cid)?.title || `${s.name}.csd`;
+  try { if ((navigator as any).share) { await (navigator as any).share({ title, url }); return; } } catch { return; }
+  try { await navigator.clipboard.writeText(url); say(`Link copied: ${url}`); } catch { say(url); }
 }
 
 async function load() {
@@ -64,6 +90,7 @@ async function load() {
     if (!net) { net = connect({ node: await pickNode() }); $("node").textContent = net.node; }
     const r = await listSites(net.node);
     sites = r.sites;
+    if (opening) return openWanted();
     render();
     // faces, a few at a time, each remembered once it's read
     const want = sites.filter(s => !faces.has(s.cid));
@@ -77,6 +104,8 @@ async function load() {
 }
 
 $("grid").addEventListener("click", async e => {
+  const sh = (e.target as HTMLElement).closest("button[data-share]") as HTMLButtonElement | null;
+  if (sh) { const s = sites.find(x => x.name === sh.dataset.share); if (s) share(s); return; }
   const b = (e.target as HTMLElement).closest("button.rec") as HTMLButtonElement | null;
   if (!b || b.disabled) return;
   const s = sites.find(x => x.name === b.dataset.name);

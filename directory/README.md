@@ -12,6 +12,11 @@ against the site's own address. Doorway shows the same list under *Discover*.
 - **Faces:** a site's `<title>` and icon, fetched from a door one file at a time
   (`/sites/<cid>.car?path=…`) and checked block by block.
 
+- **Links to a site:** the page's address with `#<name>` opens that name's newest site, on any
+  device, phones included, with nothing installed. *Share* on each site makes one (through the
+  phone's share sheet where there is one). Without Doorway, sites open through an IPFS gateway,
+  which serves them unchecked; with Doorway, they open from the person's own computer, checked.
+
 Its code is `src/page.ts` (the page) and `app/resolver/src/directory.ts` (the list, shared with
 Doorway).
 
