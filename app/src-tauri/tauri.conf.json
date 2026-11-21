@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 https: https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 https: https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'"
     }
   },
   "bundle": {

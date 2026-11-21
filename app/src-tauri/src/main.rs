@@ -569,11 +569,25 @@ fn load_site_map(dir: &Path) -> std::collections::BTreeMap<String, SiteEntry> {
 fn serve_name(dir: &Path, sites: &Sites, name: &str, cid: &str) -> Result<u16, String> {
     let folder = dir.join(cid);
     let mut served = sites.served.lock().unwrap();
+    let mut map = load_site_map(dir);
+    // the name has moved on to another site: the one it pointed to before goes, unless something
+    // else still needs it (another name, the Commonplace the app carries, or a heart)
+    if let Some(old) = map.get(name).map(|e| e.cid.clone()).filter(|o| o != cid) {
+        let needed = map.iter().any(|(n, e)| n != name && e.cid == old)
+            || carried_cid().as_deref() == Some(old.as_str())
+            || helping_map(dir).get(&old).copied().unwrap_or(false);
+        if !needed {
+            let _ = fs::remove_dir_all(dir.join(&old));
+            let _ = fs::remove_file(dir.join(format!("{old}.car")));
+        }
+    }
     if let Some((port, root)) = served.get(name) {
         *root.lock().unwrap() = folder;
-        return Ok(*port);
+        let port = *port;
+        map.insert(name.to_string(), SiteEntry { port, cid: cid.to_string() });
+        let _ = fs::write(dir.join("sites.json"), serde_json::to_string_pretty(&map).unwrap());
+        return Ok(port);
     }
-    let mut map = load_site_map(dir);
     let used: std::collections::HashSet<u16> = served.values().map(|(p, _)| *p).chain(map.iter().filter(|(n, _)| n.as_str() != name).map(|(_, e)| e.port)).collect();
     let mut port = map.get(name).map(|e| e.port).unwrap_or(0);
     let mut server = None;
@@ -768,11 +782,25 @@ fn doors() -> Vec<String> {
 
 // The sites this app keeps: each one opened by name, and its Commonplace
 #[tauri::command]
-fn kept_sites(app: tauri::AppHandle) -> Vec<KeptSite> {
+fn kept_sites(app: tauri::AppHandle, sites: tauri::State<'_, Sites>) -> Vec<KeptSite> {
     let Ok(dir) = sites_dir(&app) else { return vec![] };
     let help = helping_map(&dir);
     let names = load_site_map(&dir);
     let carried = carried_cid();
+    // Older versions left behind when a name moved on (before the app cleared them itself): no name
+    // points to them, they aren't carried or hearted, and nothing serves them. They go.
+    let serving: Vec<PathBuf> = sites.served.lock().unwrap().values().map(|(_, r)| r.lock().unwrap().clone()).collect();
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let Some(c) = e.file_name().to_str().and_then(|n| n.strip_suffix(".car")).map(str::to_string) else { continue };
+            let orphan = valid_cid(&c) && Some(&c) != carried.as_ref() && !names.values().any(|x| x.cid == c)
+                && !help.get(&c).copied().unwrap_or(false) && !serving.contains(&dir.join(&c));
+            if orphan {
+                let _ = fs::remove_dir_all(dir.join(&c));
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
     let mut cids: Vec<String> = carried.iter().filter(|c| car_file(&app, c).is_some()).cloned().collect();
     if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.flatten() {

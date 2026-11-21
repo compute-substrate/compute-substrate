@@ -80,6 +80,10 @@
   .publish { margin-top: 12px; }
   #publishBox { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
   #publishBox p { margin: 0; }
+  #publishBox.done #publishSaid { font-weight: 600; }
+  #publishBox.done #publishSaid::before { content: "✓ "; color: var(--accent); }
+  #publishOther a { color: var(--muted); }
+  #publishBox.done #publishOther { display: none; }
   #publishBox .go { margin: 10px 0 4px; }
   #publishBox .go input { font-size: 14px; padding: 9px 12px; border-radius: 10px; }
   #publishBox .go button { border-radius: 10px; font-size: 13px; }
@@ -135,6 +139,7 @@
   <h2>Your sites</h2>
   <div id="sites" class="tiles"></div>
   <input type="file" id="publishFolder" webkitdirectory hidden>
+  <input type="file" id="publishCar" accept=".car" hidden>
   <div class="publish">
     <div id="publishBox" hidden>
       <p id="publishSaid"></p>
@@ -147,6 +152,7 @@
         <button class="primary">Point it here</button>
       </form>
       <p class="hint" id="publishStatus"></p>
+      <p class="hint" id="publishOther"><a href="#" id="publishCarLink">Have a .car file instead? Choose it</a></p>
     </div>
   </div>
   <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up for everyone, with no server.</p>
@@ -464,24 +470,41 @@
   // page (approving once in Cairn), and the moment that record is in a block, the doors take it.
   let pending = null; // { cid, name, until }
   $("publishCopy").onclick = () => navigator.clipboard.writeText($("publishCid").textContent).then(() => { $("publishCopy").textContent = "Copied"; setTimeout(() => $("publishCopy").textContent = "Copy", 1500); }).catch(() => {});
-  $("publishFolder").onchange = async () => {
-    const list = [...$("publishFolder").files]; $("publishFolder").value = "";
+  // a site already packed (a .car, as `npx ipfs-car pack` makes): checked block by block here
+  async function fromCar(file) {
+    if (file.size > 70e6) throw new Error("A site can be at most 64 MB.");
+    const car = new Uint8Array(await file.arrayBuffer());
+    const cid = await CsdResolver.carRoot(car);
+    let files;
+    try { files = await CsdResolver.filesFromCar(car, cid); }
+    catch (e) { throw new Error(`That .car isn't a whole site: ${String(e && e.message || e).replace("the gateway sent a different site", "its root is missing")}.`); }
+    return { car, cid, files: files.size, bytes: [...files.values()].reduce((n, b) => n + b.length, 0) };
+  }
+  $("publishCarLink").onclick = e => { e.preventDefault(); $("publishCar").click(); };
+  $("publishCar").onchange = () => { const f = $("publishCar").files[0]; $("publishCar").value = ""; if (f) publish([f]); };
+  $("publishFolder").onchange = () => { const list = [...$("publishFolder").files]; $("publishFolder").value = ""; publish(list); };
+  async function publish(list) {
     if (!list.length) return;
-    $("publishBox").hidden = false; $("publishForm").hidden = true;
-    $("publishSaid").textContent = `Packing ${list.length} files…`; $("publishStatus").textContent = ""; $("publishAddr").hidden = true;
+    $("publishBox").hidden = false; $("publishForm").hidden = true; $("publishBox").classList.remove("done");
+    $("publishSaid").textContent = `Packing ${list.length === 1 ? "it" : list.length + " files"}…`; $("publishStatus").textContent = ""; $("publishAddr").hidden = true;
     try {
-      const r = await CsdResolver.packFolder(list.map(f => ({ path: f.webkitRelativePath || f.name, bytes: async () => new Uint8Array(await f.arrayBuffer()) })));
+      // a folder holding just a .car: that's the site, already packed
+      const cars = list.filter(f => /\.car$/i.test(f.name));
+      const hasIndex = list.some(f => /(^|\/)index\.html$/i.test(f.webkitRelativePath || f.name));
+      const r = cars.length === 1 && !hasIndex ? await fromCar(cars[0])
+        : await CsdResolver.packFolder(list.map(f => ({ path: f.webkitRelativePath || f.name, bytes: async () => new Uint8Array(await f.arrayBuffer()) })));
       await invoke("site_keep_car", r.car, { headers: { "x-cid": r.cid } });
       await invoke("set_helping", { cid: r.cid, on: true });
       pending = { cid: r.cid, name: null, until: 0 };
       const mb = (r.bytes / 1e6).toFixed(r.bytes < 1e6 ? 2 : 1);
-      $("publishSaid").textContent = `Ready: ${r.files} files, ${mb} MB. Its address, which a name points to:`;
+      $("publishBox").classList.add("done");
+      $("publishSaid").textContent = `Your site is ready (${r.files} files, ${mb} MB). Its address:`;
       $("publishCid").textContent = `ipfs://${r.cid}`; $("publishAddr").hidden = false;
       $("publishStatus").textContent = "Which of your names should show it?";
       $("publishForm").hidden = false; $("publishName").focus();
       renderSites();
     } catch (err) { $("publishSaid").textContent = String(err && err.message || err); }
-  };
+  }
   $("publishForm").onsubmit = async e => {
     e.preventDefault();
     const name = $("publishName").value.trim().toLowerCase().replace(/\.csd$/, "");
@@ -500,7 +523,7 @@
     const n = await seed(pending.cid);
     if (n > 0) {
       const name = pending.name; pending = null;
-      $("publishStatus").textContent = `Live on ${n === 1 ? "1 door" : n + " doors"}. Opening ${name}.csd…`;
+      $("publishStatus").textContent = `✓ Live on ${n === 1 ? "1 door" : n + " doors"}. Opening ${name}.csd…`;
       await openName(name);
       renderSites();
       return;

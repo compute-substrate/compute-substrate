@@ -11,10 +11,18 @@ export async function packFolder(files: PackFile[]): Promise<{ car: Uint8Array; 
   // the folder's own name, common to every path, isn't part of the site
   const common: string[] = [];
   for (let i = 0; parts.every(p => p.length > i + 1 && p[i] === parts[0][i]); i++) common.push(parts[0][i]);
-  const items = files.map((f, i) => ({ name: parts[i].slice(common.length).join("/"), f }))
+  let items = files.map((f, i) => ({ name: parts[i].slice(common.length).join("/"), f }))
     .filter(x => !x.name.split("/").some(seg => seg.startsWith(".")))
     .sort((a, b) => (a.name === b.name ? 0 : a.name > b.name ? 1 : -1));
-  if (!items.some(x => x.name === "index.html")) throw new Error("A site needs an index.html at the top of its folder.");
+  // the site may sit one folder down (a zip unpacked into its own folder, say): then that folder is it
+  if (!items.some(x => x.name === "index.html")) {
+    const depth = (n: string) => n.split("/").length;
+    const idx = items.filter(x => x.name.endsWith("/index.html")).sort((a, b) => depth(a.name) - depth(b.name));
+    const top = idx.filter(x => depth(x.name) === depth(idx[0]?.name ?? ""));
+    if (top.length !== 1) throw new Error("A site needs an index.html at the top of its folder.");
+    const pre = top[0].name.slice(0, -"index.html".length);
+    items = items.filter(x => x.name.startsWith(pre)).map(x => ({ ...x, name: x.name.slice(pre.length) }));
+  }
   let total = 0;
   const like = await Promise.all(items.map(async x => {
     const b = await x.f.bytes();
