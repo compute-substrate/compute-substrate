@@ -184,7 +184,8 @@ export function rpcProvider(urls = PUBLIC_RPCS): Provider {
 }
 // The most a single trade may spend right now, across makers (each caps its trades)
 export async function maxTrade(): Promise<bigint> {
-  const qs = await quotes(USDC_UNIT * 2n).catch(() => []);
+  // a market that can't be reached isn't an empty one: say which it is
+  const qs = await quotes(USDC_UNIT * 2n).catch(e => { throw new Error("MARKET_UNREACHABLE", { cause: e }); });
   return qs.reduce((m, q) => { const x = BigInt(q.offer.payload.maxTradeUsdc); return x > m ? x : m; }, 0n);
 }
 
@@ -355,6 +356,7 @@ export function topUpError(e: unknown): string {
     NOT_ENOUGH_USDC: "That wallet doesn't hold enough USDC on Ethereum.",
     NO_OFFER: "Nobody is selling CSD right now. Try again later.",
     NO_MAKER_ANSWERED: "No market maker answered. Try again in a little while.",
+    MARKET_UNREACHABLE: "Couldn't reach the market that lists the offers. Nothing was traded; try again in a little while.",
     MARKET_FULL: "The market is full for the moment. Try again in a little while.",
   } as Record<string, string>)[m] ?? (/rejected|denied/i.test(m) ? "The wallet didn't sign." : m);
 }
