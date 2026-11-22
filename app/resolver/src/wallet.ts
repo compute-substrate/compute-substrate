@@ -4,6 +4,7 @@
 import { connect, claimInvite, openInvites } from "../../../kit/src/index";
 import { buildAppTx, buildSplitTx, bytesToHex, concat, hexToBytes, keyFromPrivate, sha256d, utf8, EPOCH_LEN, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
 import { DIRECTORY } from "./directory";
+import { nameProfile, DOMAIN as CAIRNX } from "@inversealtruism/cairnx-core";
 import { keepRecord, keptSites, heightToDate } from "../../../kit/src/keep";
 export { keptSites, heightToDate };
 import { secp256k1 } from "@noble/curves/secp256k1";
@@ -33,6 +34,9 @@ export function readAsk(body: any): Ask {
   if (a?.kind === "propose") {
     const domain = String(a.domain ?? ""), uri = String(a.uri ?? "");
     if (!domain || utf8(domain).length > 128 || !uri || utf8(uri).length > 512) throw new Error("bad record");
+    // Cairn's records move names and tokens: a site never gets those signed, with or without asking.
+    // Doorway's own window points names (pointAsk), with nothing in between.
+    if (/^cairnx/i.test(domain.trim())) throw new Error("Doorway doesn't sign Cairn's records (names, tokens) for a site. Manage names in Doorway itself.");
     const ph = hexToBytes(String(a.payloadHash ?? ""));
     if (ph.length !== 32) throw new Error("bad record");
     app = { kind: "propose", domain, uri, payloadHash: ph, expiresEpoch: BigInt(String(a.expiresEpoch ?? "0")) };
@@ -110,6 +114,15 @@ export function describe(ask: Ask): string {
 export function recommendAsk(site: { key: string; listing: string | null }, tip: number): Ask {
   if (site.listing) return { app: { kind: "attest", proposalId: site.listing as Hex, score: 1, confidence: 1 }, fee: MIN_FEE_ATTEST, burn: 0n };
   return { app: { kind: "propose", domain: DIRECTORY, uri: site.key, payloadHash: sha256d(utf8(site.key)), expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
+}
+
+// Pointing a name Doorway's key holds at a site: its profile record (Cairn's nprofile), which
+// replaces the whole profile, so every other field is kept as it was
+export function pointAsk(name: string, profile: Record<string, string>, cid: string, tip: number): Ask {
+  if (!/^b[a-z2-7]{50,100}$/.test(cid)) throw new Error("That isn't a site's address.");
+  const p = { ...profile, contenthash: `ipfs://${cid}` };
+  const b = nameProfile({ name, p });
+  return { app: { kind: "propose", domain: CAIRNX, payloadHash: hexToBytes(b.payloadHash), uri: b.uri, expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
 }
 
 // Keeping a site, with Doorway's own key (the kit's keepRecord)

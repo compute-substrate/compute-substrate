@@ -120,13 +120,19 @@ registers itself for those links.
     `http://<name>.localhost:8800`.)
   - It asks the doors first (below), and IPFS gateways too if no door has it.
 
-Names are registered and managed on Cairn; the app only reads them.
+Names are registered on Cairn. Doorway reads them, and points the ones its own key holds (below).
 
 **Publishing a site.** *Publish a site* in the window: pick the site's folder (it needs an
 `index.html`). The app packs it into one site with one address, the same one `npx ipfs-car pack`
-gives, keeps it, and opens your name's page in Commonplace with the new site filled in, to approve
-once in Cairn Wallet. As soon as that's in a block, the app gives the site to the doors, and it's
-live at `<name>.localhost` for anyone with the app, and on every door within minutes.
+gives, and keeps it. Then you type the name that should show it. If Doorway's key holds that name
+(register it to that key's address on Cairn, or transfer it there), Doorway points it right away,
+for 0.25 CSD. A name held in Cairn Wallet opens its page in Commonplace instead, with the new site
+filled in, to approve there. As soon as the record is in a block, the app gives the site to the
+doors, and it's live at `<name>.localhost` for anyone with the app, and on every door within
+minutes.
+
+Sites never get Cairn's records signed by Doorway's key, asked or not: a name it holds can only be
+changed from Doorway's own window.
 
 **Helping keep sites up.** Most home and mobile connections can't be reached from outside, so a
 computer at home can't serve sites to others directly. *Doors* can: public nodes that also run a

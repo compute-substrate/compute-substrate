@@ -178,7 +178,7 @@ async function allEventsThrough(doors: string[], l: Light, tip: number): Promise
   return (await inBatches([...doorHistory.ids], 8, id => prove(l, id))).filter(Boolean);
 }
 
-export type Opened = { name: string; open?: string; why?: string; owner?: string; page?: string; node?: string; via?: string };
+export type Opened = { name: string; open?: string; why?: string; owner?: string; page?: string; node?: string; via?: string; profile?: Record<string, string> };
 
 // `doors`: where to read while this computer's node is still catching up
 export async function lookup(input: string, opts: { doors?: string[] } = {}): Promise<Opened> {
@@ -218,11 +218,11 @@ export async function lookup(input: string, opts: { doors?: string[] } = {}): Pr
   if (!st || st.expired || st.pending) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
   const p = st.profile ?? {};
   const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(p["contenthash"] ?? "")?.[1];
-  if (ipfs) return { name, via, owner: st.owner, open: `ipfs://${ipfs}` };
-  if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, via, owner: st.owner, open: p["url"] };
+  if (ipfs) return { name, via, owner: st.owner, profile: p, open: `ipfs://${ipfs}` };
+  if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, via, owner: st.owner, profile: p, open: p["url"] };
   // no site or link: its holder's page, in the Commonplace this app carries, read where this was
   const addr = (st.addr ?? st.owner).toLowerCase();
-  return { name, via, owner: st.owner, page: addr, node: via, open: `${COMMONPLACE}/?node=${encodeURIComponent(via)}#/p/${addr}` };
+  return { name, via, owner: st.owner, profile: p, page: addr, node: via, open: `${COMMONPLACE}/?node=${encodeURIComponent(via)}#/p/${addr}` };
 }
 
 export { fetchSite, carRoot, filesFromCar, fileFromCar } from "./site";

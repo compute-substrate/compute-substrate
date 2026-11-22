@@ -602,6 +602,7 @@
   // `npx ipfs-car pack` gives), kept, and helped up. You point one of your names at it on that name's
   // page (approving once in Cairn), and the moment that record is in a block, the doors take it.
   let pending = null; // { cid, name, until }
+  let pointing = null; // { name, profile }: a name Doorway's key holds, waiting for the second press
   $("publishCopy").onclick = () => navigator.clipboard.writeText($("publishCid").textContent).then(() => { $("publishCopy").textContent = "Copied"; setTimeout(() => $("publishCopy").textContent = "Copy", 1500); }).catch(() => {});
   // a site already packed (a .car, as `npx ipfs-car pack` makes): checked block by block here
   async function fromCar(file) {
@@ -642,7 +643,7 @@
       $("publishCid").textContent = `ipfs://${r.cid}`; $("publishAddr").hidden = false;
       $("publishStatus").innerHTML = preview ? `<a href="#" id="publishPreview">See it here first</a>, then choose which of your names should show it.` : "Which of your names should show it?";
       if (preview) $("publishPreview").onclick = e => { e.preventDefault(); invoke("plugin:opener|open_url", { url: preview }); };
-      $("publishForm").hidden = false; $("publishName").focus();
+      $("publishForm").hidden = false; $("publishName").focus(); pointing = null; $("publishForm").querySelector("button").textContent = "Point it here";
       renderSites();
     } catch (err) { $("publishSaid").textContent = String(err && err.message || err); }
   }
@@ -650,6 +651,36 @@
     e.preventDefault();
     const name = $("publishName").value.trim().toLowerCase().replace(/\.csd$/, "");
     if (!pending || !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(name)) { $("publishStatus").textContent = "That isn't a .csd name."; return; }
+    const st = $("publishStatus"), btn = $("publishForm").querySelector("button");
+    // a name Doorway's key holds: pointed right here, signed by that key
+    if (wallet && pointing?.name !== name) {
+      st.textContent = `Looking up ${name}.csd…`;
+      let o = null; try { o = await CsdResolver.lookup(name, { doors: await doorList() }); } catch {}
+      if (o?.owner && o.owner.toLowerCase() === wallet.address.toLowerCase()) {
+        pointing = { name, profile: o.profile ?? {} };
+        btn.textContent = "Point it here (0.25 CSD)";
+        st.textContent = `Doorway's key holds ${name}.csd. Press again to point it at this site: a record signed by that key, for 0.25 CSD. Its other profile fields stay as they are.`;
+        return;
+      }
+      if (o?.why && !o.owner) { st.textContent = o.why; return; }
+    }
+    if (wallet && pointing?.name === name) {
+      btn.disabled = true; st.textContent = `Pointing ${name}.csd at it…`;
+      try {
+        const node = await readingNode();
+        const tip = (await (await fetch(`${node}/tip`)).json()).height;
+        await W.send(node, wallet.key, W.pointAsk(name, pointing.profile, pending.cid, tip));
+        pointing = null; btn.textContent = "Point it here";
+        pending.name = name; pending.until = Date.now() + 60 * 60_000;
+        st.textContent = `Sent. The doors take the site once that's in a block, about two minutes.`;
+        publishTick();
+      } catch (err) {
+        const m = String(err && err.message || err);
+        st.textContent = /Not enough CSD/.test(m) ? "Pointing a name costs 0.25 CSD, and Doorway's key has too little. Add some in Settings, under Your key." : m;
+      }
+      btn.disabled = false;
+      return;
+    }
     pending.name = name; pending.until = Date.now() + 60 * 60_000;
     $("publishStatus").textContent = "Opening your name's page on commonplace.place. Sign in with the wallet that holds the name (Cairn), and approve the change there.";
     await openName("commonplace", false).catch(() => {}); // the newest Commonplace, for its name page
