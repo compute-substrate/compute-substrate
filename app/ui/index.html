@@ -647,10 +647,11 @@
     const name = $("publishName").value.trim().toLowerCase().replace(/\.csd$/, "");
     if (!pending || !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(name)) { $("publishStatus").textContent = "That isn't a .csd name."; return; }
     pending.name = name; pending.until = Date.now() + 60 * 60_000;
-    $("publishStatus").textContent = "Opening your name's page. Approve the change there in Cairn Wallet.";
+    $("publishStatus").textContent = "Opening your name's page on commonplace.place. Sign in with the wallet that holds the name (Cairn), and approve the change there.";
     await openName("commonplace", false).catch(() => {}); // the newest Commonplace, for its name page
-    const base = await commonplaceUrl();
-    await invoke("plugin:opener|open_url", { url: `${base}#/n/${name}/site/${pending.cid}` });
+    // on commonplace.place (https), where wallet extensions like Cairn work: a name is signed for
+    // by the key that holds it, which is usually in Cairn, not Doorway
+    await invoke("plugin:opener|open_url", { url: `https://commonplace.place/#/n/${name}/site/${pending.cid}` });
     publishTick();
   };
   // until the doors take it: they do once the name's record is in a block, about two minutes
