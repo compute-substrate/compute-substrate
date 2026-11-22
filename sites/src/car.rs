@@ -1,6 +1,6 @@
 // Checking a site's .car against the address it's said to be, before keeping it: every block must
 // hash to its own address, and every block reachable from the root must be there. The same check the
-// Node app makes (app/resolver/src/site.ts), so a door keeps nothing a reader would refuse.
+// Doorway makes (app/resolver/src/site.ts), so a door keeps nothing a reader would refuse.
 //
 // Only what IPFS sites use: CIDv0 and CIDv1, sha2-256, dag-pb (folders and files) and raw leaves.
 

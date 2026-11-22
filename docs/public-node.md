@@ -220,7 +220,7 @@ curl https://csd.example.org/sites
 ```
 
 It lists what it keeps, and how far it has read the names (`names_read_to`, which reaches the tip
-within a minute or so). To have the Node app use your door, announce it: see *In one command* above for what the
+within a minute or so). To have Doorway use your door, announce it: see *In one command* above for what the
 announcement is, or run `scripts/door.sh` with `--node` on a door you set up by hand.
 
 ## Letting people use it

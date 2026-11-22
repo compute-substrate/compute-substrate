@@ -115,7 +115,7 @@ registers itself for those links.
     opens that in your normal browser. Browsers send every `.localhost` name to this computer by
     their own rule, with no DNS and no certificate, and treat it as secure, so wallets and passkeys
     work. Each name is an origin of its own, so sites can't read each other's storage. You can also
-    type `<name>.localhost` straight into the browser: the app looks the name up and fetches it
+    type `<name>.localhost` straight into the browser (in Safari, with `http://` first): the app looks the name up and fetches it
     while the page waits. (Port 80 when the computer allows it; otherwise
     `http://<name>.localhost:8800`.)
   - It asks the doors first (below), and IPFS gateways too if no door has it.

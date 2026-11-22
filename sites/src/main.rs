@@ -8,7 +8,7 @@
 //   GET  /sites             what this door keeps
 //
 // Readers check every block against the address the name points to, as they would from anyone,
-// so a door is trusted with nothing. Anyone can run one; the Compute Substrate Node app gives the
+// so a door is trusted with nothing. Anyone can run one; Doorway gives the
 // sites it has to the doors it knows, and reads from them.
 //
 // It reads names from its own node (its RPC, --node), and runs beside it, usually behind the same

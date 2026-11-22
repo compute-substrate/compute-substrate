@@ -1040,6 +1040,9 @@ struct KeptSite {
     // what the site calls itself: its <title>, and its icon as a data: URL
     title: Option<String>,
     icon: Option<String>,
+    // whether its files are unpacked here (a site published here before Doorway kept them has
+    // only its .car)
+    files: bool,
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -1174,6 +1177,7 @@ fn kept_sites(app: tauri::AppHandle, sites: tauri::State<'_, Sites>) -> Vec<Kept
         let is_carried = Some(&cid) == carried.as_ref();
         let folder = if dir.join(&cid).join("index.html").is_file() { Some(dir.join(&cid)) }
             else if is_carried { app.path().resource_dir().ok().map(|d| d.join("commonplace")) } else { None };
+        let files = folder.is_some();
         let (title, icon) = folder.map(|f| site_face(&f)).unwrap_or((None, None));
         KeptSite {
             title,
@@ -1181,6 +1185,7 @@ fn kept_sites(app: tauri::AppHandle, sites: tauri::State<'_, Sites>) -> Vec<Kept
             names: names.iter().filter(|(_, e)| e.cid == cid).map(|(n, _)| n.clone()).collect(),
             helping: help.get(&cid).copied().unwrap_or(is_carried),
             carried: is_carried,
+            files,
             cid,
         }
     }).collect()
