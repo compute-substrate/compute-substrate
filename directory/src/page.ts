@@ -195,7 +195,8 @@ $("buyUsdc").onclick = async () => {
   } catch (e: any) { $("buySaid").textContent = "Couldn't load the market: " + String(e?.message ?? e); }
 };
 $("copyAddr").onclick = () => navigator.clipboard?.writeText(me.address).then(() => { $("copyAddr").textContent = "copied"; }).catch(() => {});
-$("keyBtn").onclick = () => navigator.clipboard?.writeText(me.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can spend its CSD.")).catch(() => {});
+// through Doorway there's no key here to back up (the line about it says so instead)
+if (!me.doorway) $("keyBtn").onclick = () => navigator.clipboard?.writeText(me.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can spend its CSD.")).catch(() => {});
 
 const setOrder = (o: "rec" | "new") => { order = o; $("byRec").setAttribute("aria-pressed", String(o === "rec")); $("byNew").setAttribute("aria-pressed", String(o === "new")); render(); };
 $("byRec").onclick = () => setOrder("rec");
