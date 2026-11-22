@@ -11,9 +11,9 @@ checked here before it's kept.
 
 ## Download
 
-- **macOS** (Apple Silicon and Intel): [Doorway-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/Doorway-macOS.dmg).
+- **macOS** (Apple Silicon and Intel): [Doorway-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.3/Doorway-macOS.dmg).
   Open it and drag Doorway to Applications.
-- **Windows**: [Doorway-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.2/Doorway-Windows-setup.exe).
+- **Windows**: [Doorway-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.3/Doorway-Windows-setup.exe).
 
 Newer versions, with their checksums, are on
 [Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
