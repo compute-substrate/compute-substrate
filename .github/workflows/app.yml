@@ -225,9 +225,10 @@ jobs:
           node-version: 22
       - name: Build the directory
         run: |
-          (cd kit && npm ci) && (cd app/resolver && npm ci) && (cd directory && npm run build) && (cd home && npm run build)
+          (cd kit && npm ci) && (cd app/resolver && npm ci) && (cd directory && npm run build) && (cd home && npm run build) && (cd chess && npm ci && npm test && npm run build)
           npx --yes ipfs-car@3.1.0 pack directory/out --output out/directory.car
           npx --yes ipfs-car@3.1.0 pack home/out --output out/home.car
+          npx --yes ipfs-car@3.1.0 pack chess/out --output out/chess.car
       - name: The installer, for this release, and the checksums
         run: |
           sed "s/__TAG__/${GITHUB_REF_NAME}/" scripts/door.sh > out/door.sh

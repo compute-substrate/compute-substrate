@@ -1,0 +1,12 @@
+{
+  "name": "csd-chess",
+  "private": true,
+  "description": "Correspondence chess on Compute Substrate: no server, the network is the referee. A static site: build, then publish out/ with Doorway.",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "chess.js": "1.4.0"
+  }
+}
