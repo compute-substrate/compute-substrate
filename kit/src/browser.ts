@@ -46,8 +46,12 @@ export type BrowserKey = {
 // The key to write with: Doorway's, when the page was opened through Doorway (at <name>.localhost)
 // and it answers, so a person has one key and one balance for every site; else a key kept in this
 // browser for `app` (browserKey).
+// `?key=own` in the page's address keeps a key in this browser even through Doorway: a separate
+// identity for this site in this browser (and a way to play yourself from two browsers).
 export async function writingKey(app = "csd"): Promise<BrowserKey> {
-  return (await doorwayKey()) ?? browserKey(app);
+  let own = false;
+  try { own = new URLSearchParams(location.search).get("key") === "own"; } catch {}
+  return (own ? null : await doorwayKey()) ?? browserKey(app);
 }
 
 export async function doorwayKey(): Promise<BrowserKey | null> {
