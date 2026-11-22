@@ -74,6 +74,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Before building: does the certificate secret open with its password? Says which secret is
+      # wrong, without showing either (only the file's size and the start of its hash, to compare
+      # with the .p12 on your Mac: shasum -a 256 cert.p12)
+      - name: Check the signing certificate (macOS)
+        if: matrix.name == 'macos'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$CERT" ]; then echo "No certificate secret: the app is built unsigned."; exit 0; fi
+          printf %s "$CERT" | tr -d ' \n\r' | base64 --decode > "$RUNNER_TEMP/c.p12" 2>/dev/null || { echo "APPLE_CERTIFICATE isn't valid base64 text."; exit 1; }
+          echo "Certificate: $(wc -c < "$RUNNER_TEMP/c.p12" | tr -d ' ') bytes, sha256 $(shasum -a 256 "$RUNNER_TEMP/c.p12" | cut -c1-16)"
+          echo "Password: ${#CERT_PASSWORD} characters"
+          security create-keychain -p check "$RUNNER_TEMP/check.keychain"
+          if security import "$RUNNER_TEMP/c.p12" -k "$RUNNER_TEMP/check.keychain" -P "$CERT_PASSWORD" >/dev/null 2>&1; then echo "The password opens the certificate."; ok=1; else echo "The password does NOT open this certificate."; ok=0; fi
+          security delete-keychain "$RUNNER_TEMP/check.keychain"; rm -f "$RUNNER_TEMP/c.p12"
+          [ "$ok" = 1 ]
+
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -123,24 +141,6 @@ jobs:
 
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
-
-      # Before building: does the certificate secret open with its password? Says which secret is
-      # wrong, without showing either (only the file's size and the start of its hash, to compare
-      # with the .p12 on your Mac: shasum -a 256 cert.p12)
-      - name: Check the signing certificate (macOS)
-        if: matrix.name == 'macos'
-        env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE }}
-          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          if [ -z "$CERT" ]; then echo "No certificate secret: the app is built unsigned."; exit 0; fi
-          printf %s "$CERT" | tr -d ' \n\r' | base64 --decode > "$RUNNER_TEMP/c.p12" 2>/dev/null || { echo "APPLE_CERTIFICATE isn't valid base64 text."; exit 1; }
-          echo "Certificate: $(wc -c < "$RUNNER_TEMP/c.p12" | tr -d ' ') bytes, sha256 $(shasum -a 256 "$RUNNER_TEMP/c.p12" | cut -c1-16)"
-          echo "Password: ${#CERT_PASSWORD} characters"
-          security create-keychain -p check "$RUNNER_TEMP/check.keychain"
-          if security import "$RUNNER_TEMP/c.p12" -k "$RUNNER_TEMP/check.keychain" -P "$CERT_PASSWORD" >/dev/null 2>&1; then echo "The password opens the certificate."; ok=1; else echo "The password does NOT open this certificate."; ok=0; fi
-          security delete-keychain "$RUNNER_TEMP/check.keychain"; rm -f "$RUNNER_TEMP/c.p12"
-          [ "$ok" = 1 ]
 
       # Signed with a Developer ID and notarized by Apple when the repository has these secrets (then
       # macOS opens it without asking); without them it's built unsigned, as before.
