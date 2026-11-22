@@ -868,7 +868,7 @@
       const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name || `${s.cid.slice(0, 10)}…`;
       const mine = !!wallet && (s.recommenders.includes(wallet.address) || recommended().includes(s.key));
       const n = s.recommenders.length + (mine && !s.recommenders.includes(wallet.address) ? 1 : 0);
-      const tip = mine ? "You recommend it" : `Recommend it, for ${s.listing ? "0.05" : "0.25"} CSD`;
+      const tip = mine ? "You recommend it" : s.listing ? "Recommend it, for 0.05 CSD" : "Be the first to recommend it, for 0.25 CSD (after that, 0.05)";
       return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.key)}" title="Open ${esc(s.name ? s.name + ".csd" : title)}">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
         <b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeOf(s.cid)}</small>` : ""}
@@ -886,7 +886,7 @@
       const label = s && (s.name ? `${s.name}.csd` : (faceOf.get(s.cid)?.title || "this site"));
       if (!s || !wallet) return;
       const cost = s.listing ? "0.05" : "0.25";
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = `Press the star again to recommend ${label}, for ${cost} CSD.`; return; }
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = s.listing ? `Press the star again to recommend ${label}, for 0.05 CSD.` : `Nobody has recommended ${label} yet. Press the star again to be the first, for 0.25 CSD: the first one puts it on the list, and each one after costs 0.05.`; return; }
       b.disabled = true;
       $("discoverNote").textContent = `Recommending ${label}…`;
       try {
