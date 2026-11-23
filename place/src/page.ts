@@ -12,11 +12,16 @@ const CID_RE = /^b[a-z2-7]{50,100}$/;
 const inDoorway = (name: string) => `http://${name}.localhost/`;
 
 // ── download: the newest Doorway, for this computer first ─────────────────────
+// The links go straight to the files (the page itself names a release that has them, so they work
+// before this runs); here they follow the newest release. On a phone, there's nothing to install.
 const isWin = /Windows/i.test(navigator.userAgent);
+const isPhone = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 async function download() {
   const dl = $("dlMain") as HTMLAnchorElement, other = $("dlAlt") as HTMLAnchorElement;
   dl.textContent = isWin ? "Download for Windows" : "Download for Mac";
   other.textContent = isWin ? "For Mac" : "For Windows";
+  if (isWin) { const h = dl.href; dl.href = other.href; other.href = h; }
+  if (isPhone) $("dlSaid").textContent = "Doorway is for Mac and Windows: open doorway.place on your computer to get it. Free and open source.";
   try {
     const rs = await (await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, { signal: AbortSignal.timeout(8000) })).json();
     const r = (rs as any[]).find(x => /^app-v/.test(x.tag_name) && !x.draft && !x.prerelease && x.assets?.some((a: any) => a.name === "Doorway-macOS.dmg"));
@@ -195,7 +200,7 @@ async function sites() {
     // titles and icons, from each site's own files (checked against its address)
     for (const el of [...box.querySelectorAll<HTMLElement>(".site")]) {
       faceOf(el.dataset.cid!).then(f => {
-        if (f.title) el.querySelector("b")!.textContent = f.title;
+        if (f.title) { el.querySelector("b")!.textContent = f.title; if (!f.icon) el.querySelector(".ic")!.textContent = f.title.trim().slice(0, 1).toUpperCase(); }
         if (f.icon) el.querySelector(".ic")!.innerHTML = `<img alt="" src="${f.icon}">`;
       }).catch(() => {});
     }
