@@ -1,7 +1,7 @@
 // The directory's page: the list (app/resolver/src/directory.ts), and recommending, signed by a
 // key kept in this browser (the kit's browserKey), with the usual ways to get the little CSD it costs.
 import { listSites, siteFace, hiddenList, listed, DIRECTORY, type Listed } from "../../app/resolver/src/directory";
-import { connect, writingKey, claimInvite, openInvites, welcome, heightToDate } from "../../kit/src/index";
+import { connect, writingKey, claimInvite, openInvites, welcome, heightToDate, monthYear } from "../../kit/src/index";
 
 // Doors: public nodes anyone runs (docs/public-node.md). The page reads through the first that
 // answers, and fetches each site's title and icon from any of them; everything is checked here.
@@ -39,6 +39,8 @@ const faces = new Map<string, { title?: string; icon?: string }>();
 // how long each site is kept up (kit/src/keep.ts): its address -> the block, and the tip
 let kept: { tip: number; until: Map<string, number> } = { tip: 0, until: new Map() };
 const lifeOf = (cid: string) => { const u = kept.until.get(cid); return u && u > kept.tip ? heightToDate(u, kept.tip).getFullYear() : null; };
+// when its keep runs out, to the month (see monthYear)
+const lifeSaid = (cid: string, short = false) => { const u = kept.until.get(cid); return u && u > kept.tip ? monthYear(heightToDate(u, kept.tip), short) : null; };
 let keeping: string | null = null, keepYears = 10;
 
 function render() {
@@ -58,7 +60,7 @@ function render() {
         <span style="min-width:0"><b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name, kept up by its address"}</small></span>
       </a>
       <div class="foot">
-        <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}${lifeOf(s.cid) ? `<span class="life" title="Kept up on the doors until ${lifeOf(s.cid)}, name or not">until ${lifeOf(s.cid)}</span>` : ""}</span>
+        <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}${lifeOf(s.cid) ? `<span class="life" title="Kept up on the doors until ${lifeSaid(s.cid)}, name or not">until ${lifeSaid(s.cid, true)}</span>` : ""}</span>
         <span class="acts">
           <button class="rec quiet" data-share="${esc(s.key)}" title="Share a link to it">Share</button>
           <button class="rec quiet" data-keep="${esc(s.cid)}" title="Keep it up for years, name or not">Keep</button>
@@ -98,7 +100,7 @@ function keepPanel(s: Listed) {
   const from = lifeOf(s.cid) ?? new Date().getFullYear();
   const choices = [...new Set([1, 10, 25, Math.max(1, 2100 - from)])];
   return `<div class="keep">
-    <small>${lifeOf(s.cid) ? `Kept up until ${lifeOf(s.cid)}.` : "Nobody keeps it up yet: it stays only while its name points to it."} Anyone can add time, and the doors keep it until it runs out, name or not.</small>
+    <small>${lifeOf(s.cid) ? `Kept up until ${lifeSaid(s.cid)}.` : "Nobody keeps it up yet: it stays only while its name points to it."} Anyone can add time, and the doors keep it until it runs out, name or not.</small>
     <div class="years">${choices.map(y => `<button class="rec" data-years="${y}" aria-pressed="${y === keepYears}">${from + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("")}</div>
     <div class="row"><small>Until ${from + keepYears}, for ${(keepYears * 0.25).toLocaleString()} CSD. The first 0.25 pays for the record; the rest is burned.</small><button class="rec go" data-keepgo="${esc(s.cid)}">Keep it</button></div>
   </div>`;

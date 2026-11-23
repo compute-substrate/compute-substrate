@@ -2,7 +2,7 @@
 // with the holder's own key in Cairn Wallet), and the sites on the network. Everything is read
 // through the doors and checked in this browser; the page has nothing behind it.
 import { lookup, listSites, siteFace, hiddenList, isHidden, listed, wallet as W } from "../../app/resolver/src/main";
-import { cairnSigner, friendlyName, heightToDate } from "../../kit/src/index";
+import { cairnSigner, friendlyName, heightToDate, monthYear } from "../../kit/src/index";
 
 const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
 const REPO = "compute-substrate/compute-substrate";
@@ -46,11 +46,11 @@ function firstDoor(): Promise<string> {
   return door;
 }
 const tipOf = async () => (await (await fetch(`${await firstDoor()}/tip`, { signal: AbortSignal.timeout(8000) })).json()).height as number;
-async function keptYear(cid: string): Promise<number | null> {
+async function keptYear(cid: string): Promise<string | null> {
   try {
     const k = await W.kept(await firstDoor());
     const u = k.until.get(cid);
-    return u && u > k.tip ? heightToDate(u, k.tip).getFullYear() : null;
+    return u && u > k.tip ? monthYear(heightToDate(u, k.tip)) : null;
   } catch { return null; }
 }
 
@@ -188,7 +188,7 @@ async function sites() {
     if (!sites.length) { box.innerHTML = `<p class="small">No sites yet.</p>`; return; }
     const ranked = sites.slice().sort((a, b) => b.recommenders.length - a.recommenders.length || b.since - a.since).slice(0, 60);
     box.innerHTML = ranked.map(s => {
-      const until = s.keptUntil && s.keptUntil > tip ? heightToDate(s.keptUntil, tip).getFullYear() : null;
+      const until = s.keptUntil && s.keptUntil > tip ? monthYear(heightToDate(s.keptUntil, tip), true) : null;
       const label = s.name || `${s.cid.slice(0, 10)}…`;
       return `<a class="site" href="${inDoorway(s.name || s.cid)}" data-cid="${esc(s.cid)}" title="Open in Doorway">
         <span class="ic">${esc(label.slice(0, 1).toUpperCase())}</span>

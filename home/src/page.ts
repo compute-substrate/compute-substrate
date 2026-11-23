@@ -2,7 +2,7 @@
 // the doors that answer, the sites on the network, and how long this page is kept up, with a way for
 // anyone to add a year.
 import { listSites, type Listed } from "../../app/resolver/src/directory";
-import { connect, lightClient, writingKey, claimInvite, openInvites, heightToDate } from "../../kit/src/index";
+import { connect, lightClient, writingKey, claimInvite, openInvites, heightToDate, monthYear } from "../../kit/src/index";
 
 // this page's own .csd name, and the doors it starts from (it finds the rest on the network)
 const NAME = "computesubstrate";
@@ -81,9 +81,9 @@ async function showKept() {
   $("addYear").hidden = !myCid;
   const u = myCid ? k.until.get(myCid) : undefined;
   if (u && u > k.tip) {
-    const y = heightToDate(u, k.tip).getFullYear();
-    $("until").textContent = String(y);
-    $("keptLine").textContent = `This page has no server. It's kept up until ${y}.`;
+    const d = heightToDate(u, k.tip);
+    $("until").textContent = monthYear(d, true);
+    $("keptLine").textContent = `This page has no server. It's kept up until ${monthYear(d)}.`;
   } else {
     $("until").textContent = "—";
     $("untilSaid").textContent = myCid ? "nobody keeps this page up yet" : "this page isn't on the network yet";

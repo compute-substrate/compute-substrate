@@ -65,3 +65,8 @@ export async function keptSites(api: Api): Promise<{ tip: number; until: Map<str
 export function heightToDate(height: number, tip: number): Date {
   return new Date(Date.now() + (height - tip) * 120_000);
 }
+
+// When a keep runs out, as people say it: the month and year. Not the day or time: blocks come about
+// every two minutes, so the block a keep ends at drifts by days over decades, and a minute would be
+// a precision it doesn't have.
+export const monthYear = (d: Date, short = false) => d.toLocaleString("en-US", { month: short ? "short" : "long", year: "numeric" });

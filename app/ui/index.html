@@ -559,8 +559,8 @@
       return `<div class="tile" role="button" tabindex="0" data-open="${i}" title="Open ${esc(title)}">
         <span class="face" style="${x.icon ? "" : `background:${tint(x.cid)}`}">${face}</span>
         <b>${esc(title)}</b>${name && name !== title.toLowerCase().replace(/\s+/g, "") ? `<small>${esc(name)}</small>` : ""}
-        ${lifeOf(x.cid) ? `<small class="life">until ${lifeOf(x.cid)}</small>` : ""}
-        <button class="heart keep${lifeOf(x.cid) ? " on" : ""}" data-keep="${i}" title="${lifeOf(x.cid) ? `Kept up until ${lifeOf(x.cid)}. Add time` : "Keep it up for years, with or without a name"}" aria-label="Keep it up">${HOURGLASS}</button>
+        ${lifeOf(x.cid) ? `<small class="life">until ${lifeSaid(x.cid, true)}</small>` : ""}
+        <button class="heart keep${lifeOf(x.cid) ? " on" : ""}" data-keep="${i}" title="${lifeOf(x.cid) ? `Kept up until ${lifeSaid(x.cid)}. Add time` : "Keep it up for years, with or without a name"}" aria-label="Keep it up">${HOURGLASS}</button>
         <button class="heart${x.helping ? " on" : ""}" data-help="${i}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${x.helping}">${x.helping ? HEART : HEART_OFF}</button>
       </div>`;
     }).join("") + `<button class="tile add" id="publishTile"><span class="face">+</span><b>Publish</b><small>your own site</small></button>`;
@@ -746,6 +746,8 @@
   let keptInfo = null;
   const yearOf = h => keptInfo ? W.heightToDate(h, keptInfo.tip).getFullYear() : null;
   const lifeOf = cid => { const u = keptInfo?.until.get(cid); return u && u > keptInfo.tip ? yearOf(u) : null; };
+  // when it runs out, to the month (a day or time would be a precision a keep doesn't have)
+  const lifeSaid = (cid, short) => { const u = keptInfo?.until.get(cid); return u && u > keptInfo.tip ? W.monthYear(W.heightToDate(u, keptInfo.tip), short) : null; };
   async function refreshKept() { try { keptInfo = await W.kept(await readingNode()); renderSites(); renderDiscover(); } catch {} }
   setTimeout(refreshKept, 2000);
   setInterval(refreshKept, 10 * 60_000);
@@ -763,7 +765,7 @@
     const choices = [1, 10, 25, Math.max(1, 2100 - fromYear)].filter((v, i, a) => a.indexOf(v) === i);
     let years = choices[1] ?? 1;
     $("keepTitle").textContent = `Keep ${title} up`;
-    $("keepNow").textContent = now ? `Kept up until ${now}.` : "Nobody keeps it up yet: it stays only while a name points to it.";
+    $("keepNow").textContent = now ? `Kept up until ${lifeSaid(cid)}.` : "Nobody keeps it up yet: it stays only while a name points to it.";
     const show = () => {
       $("keepYears").innerHTML = choices.map(y => `<button data-y="${y}" aria-pressed="${y === years}">${fromYear + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("");
       $("keepYears").querySelectorAll("[data-y]").forEach(b => b.onclick = () => { years = +b.dataset.y; show(); });
@@ -902,7 +904,7 @@
       const tip = mine ? "You recommend it" : s.listing ? "Recommend it, for 0.05 CSD" : "Be the first to recommend it, for 0.25 CSD (after that, 0.05)";
       return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.key)}" title="Open ${esc(s.name ? s.name + ".csd" : title)}">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeOf(s.cid)}</small>` : ""}
+        <b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeSaid(s.cid, true)}</small>` : ""}
         <button class="heart star${mine ? " on" : ""}" data-rec="${esc(s.key)}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${mine}" ${mine ? "disabled" : ""}>${mine ? STAR : STAR_OFF}</button>
       </div>`;
     }).join("");

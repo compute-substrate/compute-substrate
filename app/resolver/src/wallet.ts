@@ -5,8 +5,8 @@ import { connect, claimInvite, openInvites } from "../../../kit/src/index";
 import { buildAppTx, buildSplitTx, bytesToHex, concat, hexToBytes, keyFromPrivate, sha256d, utf8, EPOCH_LEN, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
 import { DIRECTORY } from "./directory";
 import { nameProfile, DOMAIN as CAIRNX } from "@inversealtruism/cairnx-core";
-import { keepRecord, keptSites, heightToDate } from "../../../kit/src/keep";
-export { keptSites, heightToDate };
+import { keepRecord, keptSites, heightToDate, monthYear } from "../../../kit/src/keep";
+export { keptSites, heightToDate, monthYear };
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3";
 
