@@ -110,7 +110,8 @@ export type Face = { title?: string; icon?: string };
 async function fileFrom(doors: string[], cid: string, path: string): Promise<Uint8Array | null> {
   for (const d of doors) {
     try {
-      const r = await fetch(`${d}/sites/${cid}.car?path=${encodeURIComponent(path)}`, { signal: AbortSignal.timeout(10_000) });
+      // a door from before single files sends the whole site: a large one takes longer than 10 seconds
+      const r = await fetch(`${d}/sites/${cid}.car?path=${encodeURIComponent(path)}`, { signal: AbortSignal.timeout(30_000) });
       if (!r.ok) continue;
       return await fileFromCar(new Uint8Array(await r.arrayBuffer()), cid, path);
     } catch { /* the next door */ }
@@ -151,6 +152,8 @@ export async function siteFace(cid: string, doors: string[]): Promise<Face> {
     break;
   }
   const face = { title, icon };
-  try { localStorage.setItem(key, JSON.stringify(face)); } catch {}
+  // kept for good once it has its icon (a site never changes); without one it may only be that
+  // no door answered in time, so it's asked again on the next visit
+  if (icon) try { localStorage.setItem(key, JSON.stringify(face)); } catch {}
   return face;
 }
