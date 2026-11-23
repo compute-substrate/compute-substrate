@@ -45,7 +45,7 @@
   .btn:hover { border-color: var(--ink); }
 
   /* the network, live: read and checked in this browser */
-  .live { margin-top: 56px; border-block: 1px solid var(--line); display: grid; grid-template-columns: repeat(4, 1fr); }
+  .live { margin-top: 56px; border-block: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, 1fr); }
   .live > div { padding: 18px 18px 18px 0; min-width: 0; }
   .live > div + div { padding-left: 18px; border-left: 1px solid var(--line); }
   .live b { display: block; font: 400 30px/1.15 var(--serif); font-variant-numeric: tabular-nums; }
@@ -75,9 +75,8 @@
 
   @media (max-width: 760px) {
     .hero { padding-block: 40px 24px; }
-    .live { grid-template-columns: 1fr 1fr; }
-    .live > div:nth-child(3) { padding-left: 0; border-left: 0; }
-    .live > div:nth-child(n+3) { border-top: 1px solid var(--line); }
+    .live { grid-template-columns: 1fr; }
+    .live > div + div { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
     section.part { padding-block: 44px; }
     .facts { grid-template-columns: 1fr; }
     nav.links { display: none; }
@@ -101,7 +100,6 @@
     </div>
 
     <div class="live" aria-live="polite">
-      <div><b id="height">…</b><span><i class="pulse" id="pulse"></i><span id="heightSaid">reading the network</span></span></div>
       <div><b id="doors">…</b><span>doors open, run by anyone</span></div>
       <div><b id="sites">…</b><span>sites on the network</span></div>
       <div><b id="until">…</b><span id="untilSaid">this page is kept up until</span></div>

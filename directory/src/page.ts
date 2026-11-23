@@ -108,7 +108,7 @@ function keepPanel(s: Listed) {
 
 async function load() {
   try {
-    if (!net) { net = connect({ node: await pickNode() }); $("node").textContent = net.node; }
+    if (!net) { net = connect({ node: await pickNode() }); }
     const [r, k, hide] = await Promise.all([listSites(net.node), net.kept().catch(() => kept), hiddenList()]);
     // sites a name points to, less the hide list: a list chooses what it shows (see listed)
     sites = listed(hide, r.sites);

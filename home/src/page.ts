@@ -63,11 +63,8 @@ let sites: Listed[] = [];
 
 async function heartbeat(light: ReturnType<typeof lightClient>) {
   try {
-    const t = await light.syncTail(); // every header since the release's anchors: linked, at the right difficulty, with valid proof-of-work
-    $("height").textContent = fmt(t.height);
-    $("heightSaid").textContent = "blocks, checked in this browser";
-    const p = $("pulse"); p.classList.remove("beat"); void p.offsetWidth; p.classList.add("beat");
-  } catch { if ($("height").textContent === "…") $("height").textContent = "—"; $("heightSaid").textContent = "couldn't check the network just now"; }
+    await light.syncTail(); // every header since the release's anchors: linked, at the right difficulty, with valid proof-of-work
+  } catch {}
 }
 
 async function showKept() {
@@ -89,7 +86,7 @@ async function showKept() {
 
 async function start() {
   let node: string;
-  try { node = await firstDoor(); } catch { $("heightSaid").textContent = "no door answered: are you online?"; return; }
+  try { node = await firstDoor(); } catch { $("doors").textContent = "—"; return; }
   net = connect({ node });
   $("node").textContent = node.replace(/^https:\/\//, "");
   const light = lightClient(node);

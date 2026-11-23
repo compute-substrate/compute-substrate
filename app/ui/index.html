@@ -784,7 +784,7 @@
     const show = () => {
       $("keepYears").innerHTML = choices.map(y => `<button data-y="${y}" aria-pressed="${y === years}">${fromYear + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("");
       $("keepYears").querySelectorAll("[data-y]").forEach(b => b.onclick = () => { years = +b.dataset.y; show(); });
-      $("keepSaid").textContent = `Until ${fromYear + years}, for ${(years * 0.25).toLocaleString()} CSD from your key${/^[\d.]+$/.test($("walletBal").textContent) ? ` (it holds ${$("walletBal").textContent})` : ""}. The first 0.25 pays for the record; the rest is burned, so nobody gets it.`;
+      $("keepSaid").textContent = `Until ${fromYear + years}, for ${String(years * 0.25)} CSD from your key${/^[\d.]+$/.test($("walletBal").textContent) ? ` (it holds ${$("walletBal").textContent})` : ""}. The first 0.25 pays for the record; the rest is burned, so nobody gets it.`;
     };
     show();
     $("keepDlg").hidden = false;
@@ -802,7 +802,7 @@
         setTimeout(showBalance, 3000);
       } catch (err) {
         const m = String(err && err.message || err);
-        $("keepSaid").textContent = /Not enough CSD/.test(m) ? `That needs ${(years * 0.25).toLocaleString()} CSD, and your key has less. Add some under Settings, Your key.` : m;
+        $("keepSaid").textContent = /Not enough CSD/.test(m) ? `That needs ${String(years * 0.25)} CSD, and your key has less. Add some under Settings, Your key.` : m;
       }
       $("keepYes").disabled = false;
     };

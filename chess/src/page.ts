@@ -123,7 +123,7 @@ function renderGame() {
   // how it's checked
   const proven = s.moves.filter(m => checked.has(m.txid)).length + (checked.has(g.id) ? 1 : 0);
   const total = s.moves.filter(m => !m.pending).length + 1;
-  $("check").innerHTML = `<b>${proven === total ? "✓ Every record checked" : `Checking: ${proven} of ${total}`}</b> in your browser: each move is signed by its player, in a block on the network, and replayed by the rules here. Started ${ago(g.height)}, in block ${g.height}.`;
+  $("check").innerHTML = `<b>${proven === total ? "✓ Every record checked" : `Checking: ${proven} of ${total}`}</b> in your browser: each move is signed by its player, in a block on the network, and replayed by the rules here. Started ${ago(g.height)}.`;
 }
 
 async function send(score: number, nth: number, what: string) {
