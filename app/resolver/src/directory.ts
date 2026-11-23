@@ -173,4 +173,14 @@ export function hiddenList(url = HIDE_LIST): Promise<Set<string>> {
   return hidden;
 }
 export const isHidden = (h: Set<string>, s: { name?: string | null; cid: string }) => !!s.name && h.has(s.name.toLowerCase()) || h.has(s.cid.toLowerCase());
-export const listed = (h: Set<string>, sites: Listed[]) => sites.filter(s => !!s.name && !isHidden(h, s));
+// One entry per site: when several names point to the same one, the name more people recommend,
+// or else the one pointed there last
+export function listed(h: Set<string>, sites: Listed[]): Listed[] {
+  const best = new Map<string, Listed>();
+  for (const s of sites) {
+    if (!s.name || isHidden(h, s)) continue;
+    const b = best.get(s.cid);
+    if (!b || s.recommenders.length > b.recommenders.length || (s.recommenders.length === b.recommenders.length && s.since > b.since)) best.set(s.cid, s);
+  }
+  return sites.filter(s => best.get(s.cid) === s);
+}

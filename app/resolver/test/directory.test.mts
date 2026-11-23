@@ -31,7 +31,11 @@ ok(/match its address/.test(why), "an altered block is refused");
   const h = await hiddenList(`http://127.0.0.1:${(srv.address() as any).port}/hidden.txt`);
   srv.close();
   const sites: any[] = [{ name: "badsite", cid: "bafyA" }, { name: "good", cid: "bafyoldversion" }, { name: "fine", cid: "bafyC" }, { name: null, cid: "bafyD" }];
-  ok(listed(h, sites).map(s => s.name).join() === "fine", "a hidden name, a hidden address and a site with no name are all left out");
+  ok(listed(h, sites.map(s => ({ ...s, recommenders: [], since: 0 }))).map(s => s.name).join() === "fine", "a hidden name, a hidden address and a site with no name are all left out");
+  const same: any[] = [{ name: "home", cid: "bafyF", recommenders: [], since: 100 }, { name: "computesubstrate", cid: "bafyF", recommenders: [], since: 200 }, { name: "chess", cid: "bafyG", recommenders: [], since: 50 }];
+  ok(listed(new Set(), same).map(s => s.name).join() === "computesubstrate,chess", "two names on one site: listed once, under the name pointed there last");
+  same[0].recommenders = ["0xa"];
+  ok(listed(new Set(), same).map(s => s.name).join() === "home,chess", "or under the one more people recommend");
 }
 
 (globalThis as any).fetch = async (u: string) => String(u).includes(`/sites/${site.cid}.car?path=`) ? new Response(site.car) : new Response("", { status: 404 });
