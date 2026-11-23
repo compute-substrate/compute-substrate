@@ -1,7 +1,7 @@
 {
   "about": "The release of Commonplace this app carries and opens from your own computer. Commonplace is one example of an app built on Compute Substrate; anyone can build others. The build checks out this commit, builds it, and refuses to continue unless the result has exactly this IPFS address, so what ships is the published release, byte for byte.",
   "repository": "intervalplace/commonplace",
-  "commit": "015cdd5c29c426ccaca72055d4a94808827148c9",
-  "cid": "bafybeih6dexy3nhm4lozq4skkjf2fdtt6mab2skhrdesr7bzshjfgjmk7i",
-  "release": "v0.5.49"
+  "commit": "a502bb33891beb1f1d2f28757042b4cc3bddc72f",
+  "cid": "bafybeia2z7lbzucbsu6p42azgsv42z3wt4ezufs7nwxkubflimlgpk7ypa",
+  "release": "v0.5.50"
 }
