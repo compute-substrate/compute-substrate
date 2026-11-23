@@ -2,6 +2,7 @@
 // the doors that answer, the sites on the network, and how long this page is kept up, with a way for
 // anyone to add a year.
 import { listSites, type Listed } from "../../app/resolver/src/directory";
+import { newestDoorway } from "../../app/resolver/src/release";
 import { connect, lightClient, writingKey, claimInvite, openInvites, heightToDate, monthYear } from "../../kit/src/index";
 
 // this page's own .csd name, and the doors it starts from (it finds the rest on the network)
@@ -24,18 +25,13 @@ if (viaDoorway) {
 // This page never changes once it's published, so its download links follow Doorway's newest
 // release, read from GitHub as the page opens (else they go to Doorway's page, which lists them)
 const REPO = "compute-substrate/compute-substrate";
-async function newestDoorway() {
-  try {
-    const rs = await (await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, { signal: AbortSignal.timeout(8000) })).json();
-    const r = (rs as any[]).find(x => /^app-v/.test(x.tag_name) && !x.draft && !x.prerelease && x.assets?.some((a: any) => a.name === "Doorway-macOS.dmg"));
-    if (!r) return;
-    const base = `https://github.com/${REPO}/releases/download/${r.tag_name}`;
-    ($("dlMac") as HTMLAnchorElement).href = `${base}/Doorway-macOS.dmg`;
-    ($("dlWin") as HTMLAnchorElement).href = `${base}/Doorway-Windows-setup.exe`;
-    if (r.assets.some((a: any) => a.name === "door.sh")) $("doorCmd").textContent = `curl -fsSL ${base}/door.sh | bash`;
-  } catch {}
-}
-newestDoorway();
+// the newest Doorway's files, by version (release.ts)
+newestDoorway().then(r => {
+  if (!r) return;
+  ($("dlMac") as HTMLAnchorElement).href = r.mac;
+  ($("dlWin") as HTMLAnchorElement).href = r.win;
+  if (r.doorSh) $("doorCmd").textContent = `curl -fsSL ${r.doorSh} | bash`;
+});
 
 async function firstDoor(): Promise<string> {
   const asked = new URLSearchParams(location.search).get("node");

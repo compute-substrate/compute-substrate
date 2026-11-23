@@ -3,6 +3,7 @@ import { packFolder } from "../src/pack";
 import { fileFromCar } from "../src/site";
 import { siteFace, hiddenList, listed } from "../src/directory";
 import http from "node:http";
+import { newer } from "../src/release";
 
 let failures = 0;
 const ok = (c: unknown, what: string) => { console.log(`${c ? "ok  " : "FAIL"} ${what}`); if (!c) failures++; };
@@ -37,6 +38,8 @@ ok(/match its address/.test(why), "an altered block is refused");
   same[0].recommenders = ["0xa"];
   ok(listed(new Set(), same).map(s => s.name).join() === "home,chess", "or under the one more people recommend");
 }
+
+ok(newer("0.2.11", "0.2.9") && !newer("0.2.9", "0.2.11") && !newer("0.2.11", "0.2.11") && newer("1.0", "0.9.9"), "versions compare as numbers: 0.2.11 is newer than 0.2.9");
 
 (globalThis as any).fetch = async (u: string) => String(u).includes(`/sites/${site.cid}.car?path=`) ? new Response(site.car) : new Response("", { status: 404 });
 const face = await siteFace(site.cid, ["https://door.example"]);

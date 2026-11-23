@@ -1,7 +1,7 @@
 // doorway.place: Doorway's download, .csd names (looked up and checked here, pointed and kept up
 // with the holder's own key in Cairn Wallet), and the sites on the network. Everything is read
 // through the doors and checked in this browser; the page has nothing behind it.
-import { lookup, listSites, siteFace, hiddenList, isHidden, listed, wallet as W } from "../../app/resolver/src/main";
+import { lookup, listSites, siteFace, hiddenList, isHidden, listed, newestDoorway, wallet as W } from "../../app/resolver/src/main";
 import { cairnSigner, friendlyName, heightToDate, monthYear } from "../../kit/src/index";
 
 const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
@@ -22,14 +22,8 @@ async function download() {
   other.textContent = isWin ? "For Mac" : "For Windows";
   if (isWin) { const h = dl.href; dl.href = other.href; other.href = h; }
   if (isPhone) $("dlSaid").textContent = "Doorway is for Mac and Windows: open doorway.place on your computer to get it. Free and open source.";
-  try {
-    const rs = await (await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, { signal: AbortSignal.timeout(8000) })).json();
-    const r = (rs as any[]).find(x => /^app-v/.test(x.tag_name) && !x.draft && !x.prerelease && x.assets?.some((a: any) => a.name === "Doorway-macOS.dmg"));
-    if (!r) return;
-    const base = `https://github.com/${REPO}/releases/download/${r.tag_name}`;
-    const mac = `${base}/Doorway-macOS.dmg`, win = `${base}/Doorway-Windows-setup.exe`;
-    dl.href = isWin ? win : mac; other.href = isWin ? mac : win;
-  } catch { /* the releases page, which lists them */ }
+  const r = await newestDoorway();
+  if (r) { dl.href = isWin ? r.win : r.mac; other.href = isWin ? r.mac : r.win; }
 }
 download();
 

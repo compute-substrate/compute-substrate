@@ -128,7 +128,9 @@
   .row small { color: var(--muted); display: block; font-size: 12px; }
   code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-user-select: text; user-select: text; }
   .field { width: 110px; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); -webkit-user-select: text; user-select: text; }
-  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  footer .ver { display: inline-flex; gap: 10px; }
+  footer #update { color: var(--accent); font-weight: 600; text-decoration: none; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -264,7 +266,8 @@
     </div>
   </details>
 
-  <footer id="closeNote">Closing this window keeps Doorway running in the menu bar.</footer>
+  <footer><span id="closeNote">Closing this window keeps Doorway running in the menu bar.</span>
+    <span class="ver"><span id="version">Doorway</span><a href="#" id="update" hidden></a></span></footer>
 
 <script src="resolver.js"></script>
 <script>
@@ -741,6 +744,18 @@
   // Sites ask at their own address (/.doorway/...), Doorway's server passes the ask here, and it's
   // signed only once allowed. "Allow without asking" is per site, up to 1 CSD a day.
   const W = CsdResolver.wallet;
+  // which Doorway this is, and whether a newer one is out (doorway.place has it)
+  (async () => {
+    let v = null;
+    try { v = await window.__TAURI__.app.getVersion(); } catch {}
+    if (v) $("version").textContent = `Doorway ${v}`;
+    const r = await CsdResolver.newestDoorway();
+    if (v && r && CsdResolver.newer(r.version, v)) {
+      const u = $("update"); u.hidden = false; u.textContent = `${r.version} is out`;
+      u.title = "Download the newest Doorway from doorway.place";
+      u.onclick = e => { e.preventDefault(); invoke("plugin:opener|open_url", { url: "https://doorway.place/#get" }); };
+    }
+  })();
   // ── keeping sites up, for years: anyone can, for any site (kit/src/keep.ts) ──
   const HOURGLASS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   let keptInfo = null;

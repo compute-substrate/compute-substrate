@@ -229,6 +229,7 @@ export async function lookup(input: string, opts: { doors?: string[]; web?: bool
 }
 
 export { fetchSite, carRoot, filesFromCar, fileFromCar } from "./site";
+export { newestDoorway, newer } from "./release";
 export { listSites, siteFace, hiddenList, isHidden, listed, HIDE_LIST, DIRECTORY } from "./directory";
 export { packFolder } from "./pack";
 export * as wallet from "./wallet";

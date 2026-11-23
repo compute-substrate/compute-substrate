@@ -142,6 +142,15 @@ jobs:
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
+      # the app says which version it is: the tag's (app-v0.2.11 is 0.2.11)
+      - name: Version from the tag
+        if: startsWith(github.ref_name, 'app-v')
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#app-v}"
+          node -e 'const f="app/src-tauri/tauri.conf.json",fs=require("fs"),j=JSON.parse(fs.readFileSync(f));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+"\n")' "$v"
+          grep '"version"' app/src-tauri/tauri.conf.json
+
       # Signed with a Developer ID and notarized by Apple when the repository has these secrets (then
       # macOS opens it without asking); without them it's built unsigned, as before.
       - name: Build the app (macOS)
