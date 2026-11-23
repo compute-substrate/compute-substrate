@@ -11,26 +11,18 @@ checked here before it's kept.
 
 ## Download
 
-- **macOS** (Apple Silicon and Intel): [Doorway-macOS.dmg](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.3/Doorway-macOS.dmg).
-  Open it and drag Doorway to Applications.
-- **Windows**: [Doorway-Windows-setup.exe](https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.3/Doorway-Windows-setup.exe).
+Get it at **[doorway.place](https://doorway.place)**, which always offers the newest version for
+your computer:
 
-Newer versions, with their checksums, are on
+- **macOS** (Apple Silicon and Intel): open the `.dmg` and drag Doorway to Applications. It's signed
+  and notarized by Apple, so it opens like any other app.
+- **Windows**: run the installer. It isn't signed by Microsoft yet, so the first time Windows may
+  say *Windows protected your PC*: click *More info*, then *Run anyway*. After that it opens normally.
+
+Every version, with its checksums and the build that made it, is on
 [Releases](https://github.com/compute-substrate/compute-substrate/releases) under tags named `app-v…`.
 Doorway used to be called Compute Substrate Node; it keeps the same data, so if you have that
 installed, delete it after installing Doorway.
-
-### The first time you open it
-
-The app isn't signed by Apple or Microsoft (that costs money each year and ties the app to a
-person or company), so your computer asks once whether you trust it:
-
-- **macOS:** open it; when macOS says it can't verify the app, click *Done*. Then open *System
-  Settings*, *Privacy & Security*, scroll down to the message about Doorway and click
-  *Open Anyway*.
-- **Windows:** if *Windows protected your PC* appears, click *More info*, then *Run anyway*.
-
-After that it opens normally.
 
 ## What it does
 

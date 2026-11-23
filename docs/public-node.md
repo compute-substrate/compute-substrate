@@ -13,7 +13,7 @@ usually enough to start; the node's data grows with the network. No domain neede
 **2. Run this on it, as root:**
 
 ```bash
-curl -fsSL https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.3/door.sh | bash
+curl -fsSL https://github.com/compute-substrate/compute-substrate/releases/download/app-v0.2.11/door.sh | bash
 ```
 
 It installs a node, the site store and Caddy, and serves them over HTTPS at an address made from the
