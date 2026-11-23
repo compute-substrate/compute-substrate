@@ -33,7 +33,7 @@ let door: Promise<string> | null = null;
 function firstDoor(): Promise<string> {
   door ??= (async () => {
     for (const d of DOORS) {
-      try { if ((await fetch(`${d}/tip`, { signal: AbortSignal.timeout(6000) })).ok) { $("door").textContent = new URL(d).host; return d; } } catch {}
+      try { if ((await fetch(`${d}/tip`, { signal: AbortSignal.timeout(6000) })).ok) return d; } catch {}
     }
     door = null;
     throw new Error("No door answered just now. Try again in a minute.");
@@ -49,6 +49,40 @@ async function keptYear(cid: string): Promise<number | null> {
   } catch { return null; }
 }
 
+// ── the way in: a name typed into the door's light, and what's on the other side ──
+const faceCache = new Map<string, Promise<{ title?: string; icon?: string }>>();
+const faceOf = (cid: string) => { let f = faceCache.get(cid); if (!f) { f = siteFace(cid, DOORS).catch(() => ({})); faceCache.set(cid, f); } return f; };
+async function peek(input: string) {
+  const box = $("beyond");
+  const name = input.trim().toLowerCase().replace(/\.csd$/, "");
+  if (!name) return;
+  box.innerHTML = `<p class="msg">Looking for ${esc(name)}…</p>`;
+  try {
+    const f = await lookup(name, { doors: DOORS, web: true });
+    if (!f.owner) {
+      const free = /^Nobody holds/.test(f.why ?? "");
+      box.innerHTML = `<p class="msg">${free ? `Nothing is here yet. <b>${esc(name)}</b> is free: <a href="https://cairn-substrate.com" target="_blank" rel="noopener">make it yours</a>.` : esc(f.why ?? "Nothing is here.")}</p>`;
+      return;
+    }
+    const cid = f.open?.startsWith("ipfs://") ? f.open.slice(7) : null;
+    const [face, year] = cid ? await Promise.all([faceOf(cid), keptYear(cid)]) : [{} as { title?: string; icon?: string }, null];
+    const title = face.title || `${name}.csd`;
+    box.innerHTML = `
+      <span class="face">${face.icon ? `<img alt="" src="${face.icon}">` : esc(name.slice(0, 1).toUpperCase())}</span>
+      <b>${esc(title)}</b>
+      <span class="where">${esc(name)}.csd</span>
+      ${cid ? `<span class="life">${year ? `Here until ${year}` : "Here as long as its name points to it"}</span>` : ""}
+      <span class="go">
+        ${cid ? `<a class="in" href="${inDoorway(name)}">Step in</a>` : f.open && !f.page ? `<a class="in" href="${esc(f.open)}" target="_blank" rel="noopener">Go there</a>` : `<a class="in" href="https://commonplace.place/#/p/${esc(f.owner)}" target="_blank" rel="noopener">Its holder's page</a>`}
+        ${cid ? `<a class="alt" href="#get">No Doorway yet?</a>` : ""}
+      </span>`;
+  } catch (e: any) { box.innerHTML = `<p class="msg">${esc(String(e?.message ?? e))}</p>`; }
+}
+$("doorForm").addEventListener("submit", e => { e.preventDefault(); peek(($("doorName") as HTMLInputElement).value); });
+const tryName = (n: string) => { ($("doorName") as HTMLInputElement).value = n; peek(n); };
+$("beyond").addEventListener("click", e => { const t = (e.target as HTMLElement).closest<HTMLElement>(".try"); if (t) tryName(t.dataset.name!); });
+$("glimpse").addEventListener("click", e => { const t = (e.target as HTMLElement).closest<HTMLElement>("button[data-name]"); if (t) tryName(t.dataset.name!); });
+
 // ── names ─────────────────────────────────────────────────────────────────────
 type Found = Awaited<ReturnType<typeof lookup>>;
 let shown: Found | null = null;
@@ -57,7 +91,6 @@ async function look(input: string) {
   const out = $("result");
   const name = input.trim().toLowerCase().replace(/\.csd$/, "");
   if (!name) { out.innerHTML = ""; return; }
-  if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   out.innerHTML = `<div class="card"><p class="said">Looking up ${esc(name)}.csd, and checking its records…</p></div>`;
   try {
     const f = await lookup(name, { doors: DOORS, web: true });
@@ -133,7 +166,7 @@ async function keep(cid: string) {
 }
 
 $("lookForm").addEventListener("submit", e => { e.preventDefault(); look(($("lookName") as HTMLInputElement).value); });
-const fromHash = () => { const n = decodeURIComponent(location.hash.slice(1)); if (n && !["names", "sites", "how"].includes(n)) { ($("lookName") as HTMLInputElement).value = n; look(n); $("names").scrollIntoView(); } };
+const fromHash = () => { const n = decodeURIComponent(location.hash.slice(1)); if (n && !["names", "sites", "how", "get"].includes(n)) tryName(n); };
 window.addEventListener("hashchange", fromHash);
 fromHash();
 
@@ -152,9 +185,16 @@ async function sites() {
         <span class="tx"><b>${esc(s.name || "A site with no name")}</b><small>${s.name ? `${esc(s.name)}.csd` : "kept up by its address"}</small>${until ? `<span class="until">until ${until}</span>` : ""}</span>
       </a>`;
     }).join("");
+    // a glimpse through the door: the top named sites
+    const top = ranked.filter(s => s.name).slice(0, 6);
+    $("glimpse").innerHTML = top.map(s => `<button type="button" data-name="${esc(s.name)}" data-cid="${esc(s.cid)}"><span>${esc(s.name.slice(0, 1).toUpperCase())}</span><em>${esc(s.name)}</em></button>`).join("");
+    for (const el of [...$("glimpse").querySelectorAll<HTMLElement>("button")]) faceOf(el.dataset.cid!).then(f => {
+      if (f.icon) el.querySelector("span")!.innerHTML = `<img alt="" src="${f.icon}">`;
+      if (f.title) el.querySelector("em")!.textContent = f.title;
+    });
     // titles and icons, from each site's own files (checked against its address)
     for (const el of [...box.querySelectorAll<HTMLElement>(".site")]) {
-      siteFace(el.dataset.cid!, DOORS).then(f => {
+      faceOf(el.dataset.cid!).then(f => {
         if (f.title) el.querySelector("b")!.textContent = f.title;
         if (f.icon) el.querySelector(".ic")!.innerHTML = `<img alt="" src="${f.icon}">`;
       }).catch(() => {});
