@@ -16,6 +16,7 @@ import { cairnConnect, cairnSubmit, discoverCairn, type CairnProvider } from "./
 
 export * from "./core";
 export { lightClient, GENESIS_HASH, type Verified } from "./light";
+export { friendlyName } from "./friendly";
 export { keepRecord, keptSites, keepCost, heightToDate, KEEP_TOPIC, BURN, YEAR_BLOCKS, PER_YEAR, MAX_YEARS } from "./keep";
 import { keepRecord, keptSites, BURN } from "./keep";
 export { discoverCairn, type CairnProvider } from "./cairn";

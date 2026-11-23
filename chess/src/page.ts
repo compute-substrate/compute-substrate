@@ -1,9 +1,9 @@
+import { friendlyName } from "../../kit/src/friendly";
 import { chessNet, pickNode } from "./net";
 import { replay, ratings, encodeMove, RESIGN, OFFER_DRAW, ACCEPT_DRAW, type GameRecord, type Attest, type State } from "./game";
 
 const $ = (id: string) => document.getElementById(id)!;
 const esc = (t: string) => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
-const short = (a: string | null) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "anyone";
 const say = (t: string) => { $("status").textContent = t; };
 // text presentation, so the pieces never turn into emoji
 const GLYPH: Record<string, string> = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
@@ -18,7 +18,10 @@ function ago(height: number) {
   const n = (x: number, unit: string) => `${x} ${unit}${x === 1 ? "" : "s"} ago`;
   return m < 2 ? "just now" : m < 60 ? n(m, "minute") : m < 48 * 60 ? n(Math.round(m / 60), "hour") : n(Math.round(m / 1440), "day");
 }
-const name = (a: string | null) => a === meAddr ? "You" : short(a);
+// a player as people read them: you, or the two words made from their address (the address
+// itself in the tooltip, and on the game's own record)
+const name = (a: string | null) => a === meAddr ? "You" : a ? friendlyName(a) : "anyone";
+const who = (a: string | null) => `<span title="${esc(a ?? "")}">${esc(name(a))}</span>`;
 
 function rebuild() {
   const r = c.records();
@@ -54,7 +57,7 @@ function renderHome() {
   const finished = [...states.values()].filter(s => s.result !== "playing" && s.white && s.black && s.endedAt !== null && !s.moves.some(m => m.pending))
     .map(s => ({ white: s.white!, black: s.black!, result: s.result as "1-0" | "0-1" | "1/2-1/2", endedAt: s.endedAt! }));
   const r = ratings(finished);
-  $("ratings").innerHTML = r.length ? r.slice(0, 20).map((x, i) => `<tr><td>${i + 1}</td><td><code>${esc(name(x.who))}</code></td><td class="n">${x.rating}</td><td class="n muted">${x.wins}–${x.losses}–${x.draws}</td></tr>`).join("") : `<tr><td></td><td class="muted">No finished games yet.</td></tr>`;
+  $("ratings").innerHTML = r.length ? r.slice(0, 20).map((x, i) => `<tr><td>${i + 1}</td><td>${who(x.who)}</td><td class="n">${x.rating}</td><td class="n muted">${x.wins}–${x.losses}–${x.draws}</td></tr>`).join("") : `<tr><td></td><td class="muted">No finished games yet.</td></tr>`;
 }
 
 // ── a game ─────────────────────────────────────────────────────────────────
@@ -92,7 +95,7 @@ function renderGame() {
   const player = (color: "w" | "b") => {
     const who = color === "w" ? s.white : s.black;
     const turnHere = s.result === "playing" && s.turn === color;
-    return `<span class="dot ${color}"></span><span>${who ? `<code>${esc(name(who))}</code>` : `<span class="muted">Open: anyone can take ${color === "w" ? "white" : "black"}</span>`}</span>${turnHere ? `<span class="turn">to move</span>` : ""}`;
+    return `<span class="dot ${color}"></span><span>${who ? `<b>${esc(name(who))}</b>` : `<span class="muted">Open: anyone can take ${color === "w" ? "white" : "black"}</span>`}</span>${turnHere ? `<span class="turn">to move</span>` : ""}`;
   };
   $("pTop").innerHTML = player(flip ? "w" : "b");
   $("pBottom").innerHTML = player(flip ? "b" : "w");
@@ -229,7 +232,7 @@ async function tick() {
     $("node").textContent = node.replace(/^https:\/\//, "");
     const k = await c.key();
     meAddr = k.address.toLowerCase();
-    $("me").innerHTML = `Playing as <code>${short(meAddr)}</code>`;
+    $("me").innerHTML = `<span title="${esc(meAddr ?? "")}">Playing as ${esc(meAddr ? friendlyName(meAddr) : "you")}</span>`;
     if (k.doorway) { $("keyWhose").textContent = "your key in Doorway, once you allow each one there"; $("backup").hidden = true; }
     $("backup").onclick = () => navigator.clipboard?.writeText(k.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can play as you and spend its CSD.")).catch(() => {});
     await tick();
