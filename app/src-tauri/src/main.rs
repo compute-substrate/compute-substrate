@@ -697,9 +697,16 @@ fn wallet_set(app: tauri::AppHandle, key: String, address: String) -> Result<(),
 // person has to decide, it shows here, small and on top, and the answer goes back to the main window.
 #[derive(Default)]
 struct AskShown(Mutex<Option<serde_json::Value>>);
+// whether Doorway's own window was in front when a site asked: if not, answering hands the screen
+// back to the browser instead of bringing Doorway's window up with the approval
+#[derive(Default)]
+struct AskFromMain(Mutex<bool>);
 
 #[tauri::command]
-fn show_ask(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, ask: serde_json::Value) -> Result<(), String> {
+fn show_ask(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: tauri::State<'_, AskFromMain>, ask: serde_json::Value) -> Result<(), String> {
+    let main_in_front = app.get_webview_window("main").map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false)).unwrap_or(false);
+    // a second ask while one shows keeps what was true when the first came
+    if shown.0.lock().unwrap().is_none() { *from.0.lock().unwrap() = main_in_front; }
     *shown.0.lock().unwrap() = Some(ask.clone());
     if let Some(w) = app.get_webview_window("ask") {
         let _ = app.emit_to("ask", "ask-show", ask);
@@ -728,11 +735,19 @@ fn ask_current(shown: tauri::State<'_, AskShown>) -> Option<serde_json::Value> {
 }
 
 #[tauri::command]
-fn ask_reply(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, reply: serde_json::Value) {
+fn ask_reply(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: tauri::State<'_, AskFromMain>, reply: serde_json::Value) {
     *shown.0.lock().unwrap() = None;
     let _ = app.emit_to("main", "ask-reply", reply);
     if let Some(w) = app.get_webview_window("ask") {
         let _ = w.hide();
+    }
+    // asked from a site: back to the site. On a Mac, showing the approval brought all of Doorway
+    // forward, so Doorway as a whole steps back (its window comes again from the menu bar)
+    if !*from.0.lock().unwrap() {
+        #[cfg(target_os = "macos")]
+        { let _ = app.hide(); }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(m) = app.get_webview_window("main") { if m.is_focused().unwrap_or(false) { let _ = m.minimize(); } }
     }
 }
 
@@ -744,6 +759,8 @@ const NO_TRAY: &str = "no-tray";
 const FIRST_RUN_DONE: &str = "first-run-done";
 
 fn show_main(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    { let _ = app.show(); }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -1350,6 +1367,7 @@ fn main() {
         .manage(Sites::default())
         .manage(Arc::new(Asks::default()))
         .manage(AskShown::default())
+        .manage(AskFromMain::default())
         .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url])
         .setup({
             let node = node.clone();
@@ -1393,7 +1411,7 @@ fn main() {
                     let app = window.app_handle();
                     if window.label() == "ask" {
                         api.prevent_close();
-                        ask_reply(app.clone(), app.state::<AskShown>(), serde_json::json!({ "closed": true }));
+                        ask_reply(app.clone(), app.state::<AskShown>(), app.state::<AskFromMain>(), serde_json::json!({ "closed": true }));
                     } else if tray_shown(app.clone()) {
                         api.prevent_close();
                         let _ = window.hide();

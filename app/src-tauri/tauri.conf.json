@@ -12,9 +12,9 @@
       {
         "label": "main",
         "title": "Doorway",
-        "width": 460,
-        "height": 680,
-        "minWidth": 380,
+        "width": 760,
+        "height": 720,
+        "minWidth": 420,
         "minHeight": 480,
         "resizable": true
       }

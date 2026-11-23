@@ -21,7 +21,7 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--ink); }
-  body { font: 14px/1.5 var(--display); padding: 28px 24px 22px; -webkit-user-select: none; user-select: none; }
+  body { font: 14px/1.5 var(--display); padding: 28px 24px 22px; -webkit-user-select: none; user-select: none; max-width: 900px; margin: 0 auto; box-sizing: border-box; }
   .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 26px; }
   .brand { display: flex; align-items: center; gap: 10px; font: 700 22px/1 var(--display); letter-spacing: -.01em; }
   .brand svg { width: 30px; height: 30px; flex: none; }
@@ -79,7 +79,7 @@
   button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 650; }
   @media (prefers-color-scheme: dark) { button.primary { color: #10201b; } }
-  .publish { margin-top: 12px; }
+  .publish { margin-top: 12px; min-width: 0; max-width: 100%; }
   #publishBox { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
   #publishBox p { margin: 0; }
   #publishBox.done #publishSaid { font-weight: 600; }
@@ -164,7 +164,7 @@
     <div id="publishBox" hidden>
       <p id="publishSaid"></p>
       <div class="row" id="publishAddr" hidden style="border-top:0;padding:8px 0 0">
-        <code id="publishCid" style="flex:1;min-width:0;overflow-wrap:anywhere"></code>
+        <code id="publishCid" style="flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-all"></code>
         <button id="publishCopy" type="button">Copy</button>
       </div>
       <form class="go" id="publishForm">
