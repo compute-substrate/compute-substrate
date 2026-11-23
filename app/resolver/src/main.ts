@@ -181,11 +181,13 @@ async function allEventsThrough(doors: string[], l: Light, tip: number): Promise
 export type Opened = { name: string; open?: string; why?: string; owner?: string; page?: string; node?: string; via?: string; profile?: Record<string, string> };
 
 // `doors`: where to read while this computer's node is still catching up
-export async function lookup(input: string, opts: { doors?: string[] } = {}): Promise<Opened> {
+// `web`: from a web page rather than Doorway, so through the doors alone, never a node on this computer
+export async function lookup(input: string, opts: { doors?: string[]; web?: boolean } = {}): Promise<Opened> {
   const name = input.trim().toLowerCase().replace(/^web\+csd:(\/\/)?/, "").replace(/\.csd$/, "").replace(/\/+$/, "");
   if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name." };
-  const own = await ownNodeReady();
+  const own = opts.web ? false : await ownNodeReady();
   const doors = own ? [] : await answering(opts.doors ?? []);
+  if (!own && !doors.length && opts.web) throw new Error("No door answered just now. Try again in a minute.");
   if (!own && !doors.length) {
     // nothing else answers: this computer's node, however far it has got
     if (!(await getJson(`${NODE}/tip`, 4_000).catch(() => null))) throw new Error("Can't reach the network right now. Is this computer online?");
@@ -215,7 +217,8 @@ export async function lookup(input: string, opts: { doors?: string[] } = {}): Pr
     events = l ? await allEventsThrough(doors, l, tip) : await allEvents(tip);
   }
   const st = resolve(events, tip).names[name];
-  if (!st || st.expired || st.pending) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
+  if (st?.pending) return { name, via, why: `${name}.csd is being registered: its registration isn't finished yet.` };
+  if (!st || st.expired) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
   const p = st.profile ?? {};
   const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(p["contenthash"] ?? "")?.[1];
   if (ipfs) return { name, via, owner: st.owner, profile: p, open: `ipfs://${ipfs}` };

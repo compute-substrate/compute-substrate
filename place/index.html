@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Doorway</title>
+<meta name="description" content="Doorway opens the web nobody owns: type a name, get a site, checked on your own computer. Download it, look up and manage .csd names, and browse what's out there.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<!--
+  doorway.place: where Doorway is downloaded, .csd names are looked up and pointed, and the sites on
+  the network can be browsed. A static page with nothing behind it: everything on it is read from
+  the network's doors and checked in this browser, and names are changed with the holder's own key.
+-->
+<style>
+  :root {
+    --bg: #fbf7f0; --card: #ffffff; --ink: #2a2420; --soft: #5f5750; --muted: #8a8078; --line: #efe7db;
+    --accent: #2e6b5a; --accent-soft: #e3efe9; --warm: #f0b44c; --warm-soft: #fdf0d8; --bad: #a24a3a;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg: #1a1714; --card: #24201c; --ink: #f2ece4; --soft: #c3b9ae; --muted: #a59a8e; --line: #332d27;
+    --accent: #7fcbb0; --accent-soft: #23352e; --warm: #f2bd5e; --warm-soft: #3a2f1d; --bad: #e08a78; color-scheme: dark;
+  } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16.5px/1.55 var(--sans); }
+  .wrap { max-width: 1000px; margin: 0 auto; padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
+  a { color: inherit; text-underline-offset: 3px; }
+  code { font: 13.5px var(--mono); overflow-wrap: anywhere; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 20px; }
+  .mark { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; text-decoration: none; letter-spacing: -0.01em; }
+  .mark svg { width: 34px; height: 34px; }
+  nav.links { display: flex; gap: 22px; font-size: 15px; color: var(--soft); }
+  nav.links a { text-decoration: none; } nav.links a:hover { color: var(--ink); }
+
+  .hero { padding-block: 64px 36px; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 48px; align-items: center; }
+  h1 { font-size: clamp(40px, 6.4vw, 70px); line-height: 1.02; letter-spacing: -0.035em; margin: 0; text-wrap: balance; }
+  .lede { font-size: clamp(17.5px, 2vw, 20px); color: var(--soft); margin: 22px 0 0; max-width: 32em; }
+  .ctas { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 30px; align-items: center; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 13px 22px; border-radius: 999px; font: 600 15.5px var(--sans); text-decoration: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  .btn.main { background: var(--accent); color: #fff; border-color: var(--accent); }
+  @media (prefers-color-scheme: dark) { .btn.main { color: #10201b; } }
+  .btn:hover { border-color: var(--accent); }
+  .btn[disabled] { opacity: .55; cursor: default; }
+  .small { color: var(--muted); font-size: 14px; }
+
+  /* the app, drawn: what it looks like when you type a name */
+  .window { background: var(--card); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 18px 50px rgba(60,40,20,.10); padding: 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .window .bar { display: flex; gap: 10px; }
+  .window .field { flex: 1; border: 1px solid var(--line); border-radius: 999px; padding: 11px 16px; color: var(--ink); font-weight: 500; min-width: 0; }
+  .window .open { background: var(--accent); color: #fff; border-radius: 999px; padding: 11px 18px; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { .window .open { color: #10201b; } }
+  .window .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .window .t { border: 1px solid var(--line); border-radius: 14px; padding: 12px 8px; display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; min-width: 0; }
+  .window .t i { width: 38px; height: 38px; border-radius: 10px; display: block; }
+  .window .note { font-size: 12.5px; color: var(--muted); }
+
+  section.part { padding-block: 56px; border-top: 1px solid var(--line); }
+  h2 { font-size: clamp(28px, 3.6vw, 38px); letter-spacing: -0.02em; line-height: 1.1; margin: 0 0 10px; }
+  .part > p.intro { color: var(--soft); max-width: 40em; margin: 0 0 22px; }
+
+  /* names */
+  form.look { display: flex; gap: 10px; flex-wrap: wrap; max-width: 640px; }
+  form.look input { flex: 1; min-width: 220px; font: 500 17px var(--sans); border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 13px 20px; }
+  form.look input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .card { margin-top: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px; max-width: 640px; display: flex; flex-direction: column; gap: 12px; }
+  .card h3 { margin: 0; font-size: 26px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+  .card h3 span { color: var(--muted); font-weight: 500; }
+  .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; font-size: 15px; }
+  .facts dt { color: var(--muted); }
+  .facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .act { border-top: 1px solid var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .act input { flex: 1; min-width: 200px; font: 14px var(--mono); border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 12px; padding: 10px 12px; }
+  .said { font-size: 14.5px; color: var(--soft); margin: 0; }
+  .said.bad { color: var(--bad); }
+  .said.ok { color: var(--accent); }
+
+  /* sites */
+  .sites { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+  .site { display: flex; gap: 12px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; text-decoration: none; min-width: 0; }
+  .site:hover { border-color: var(--accent); }
+  .sites > p { grid-column: 1 / -1; }
+  .site .ic { width: 44px; height: 44px; border-radius: 12px; flex: none; background: var(--accent-soft); display: grid; place-items: center; font-weight: 700; color: var(--accent); overflow: hidden; }
+  .site .ic img { width: 100%; height: 100%; object-fit: cover; }
+  .site .tx { display: flex; flex-direction: column; min-width: 0; }
+  .site b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .site small { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .site .until { color: var(--accent); font-size: 12.5px; font-weight: 600; }
+
+  .how { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px; }
+  .how b { display: block; margin-bottom: 4px; }
+  .how p { margin: 0; color: var(--soft); font-size: 15.5px; }
+
+  footer { padding-block: 40px 56px; border-top: 1px solid var(--line); display: flex; gap: 20px; flex-wrap: wrap; color: var(--muted); font-size: 14px; }
+
+  @media (max-width: 820px) {
+    .hero { grid-template-columns: 1fr; padding-block: 36px 24px; gap: 32px; }
+    .how { grid-template-columns: 1fr; }
+    nav.links { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="mark" href="#">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#357a67"/><stop offset="1" stop-color="#255a4c"/></linearGradient><linearGradient id="dl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbe7b8"/><stop offset="1" stop-color="#f3c978"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#dg)"/><path d="M20 49V30a12 12 0 0 1 24 0v19Z" fill="url(#dl)"/><path d="M20 49V30a12 12 0 0 1 24 0v19" fill="none" stroke="#fbf7f0" stroke-width="3.4" stroke-linejoin="round"/><path d="M15 49h34" stroke="#fbf7f0" stroke-width="3.4" stroke-linecap="round"/></svg>
+      Doorway
+    </a>
+    <nav class="links"><a href="#names">Names</a><a href="#sites">Sites</a><a href="#how">How it works</a></nav>
+  </header>
+
+  <section class="hero">
+    <div>
+      <h1>Type a name. Get a site nobody owns.</h1>
+      <p class="lede">Doorway is a small app for your computer. It opens sites that have no server and no host: each one comes from whichever doors have it, checked byte by byte on your own computer, and it stays up as long as anyone wants it to.</p>
+      <div class="ctas">
+        <a class="btn main" id="dlMain" href="https://github.com/compute-substrate/compute-substrate/releases">Download Doorway</a>
+        <a class="btn" id="dlAlt" href="https://github.com/compute-substrate/compute-substrate/releases">For Windows</a>
+      </div>
+      <p class="small" style="margin-top:14px">Free, open source, and it asks before anything is written with your key.</p>
+    </div>
+    <div class="window" aria-hidden="true">
+      <div class="bar"><span class="field">commonplace</span><span class="open">Open</span></div>
+      <div class="tiles">
+        <span class="t"><i style="background:linear-gradient(#2f3d78,#1f2a5c)"></i>Commonplace</span>
+        <span class="t"><i style="background:linear-gradient(#e7b04a,#c98f2c)"></i>Directory</span>
+        <span class="t"><i style="background:repeating-conic-gradient(#c9a77a 0 25%, #8b6a45 0 50%) 0 0/50% 50%"></i>Chess</span>
+      </div>
+      <span class="note">Opens at commonplace.localhost, in the browser you already use.</span>
+    </div>
+  </section>
+
+  <section class="part" id="names">
+    <h2>Names</h2>
+    <p class="intro">A .csd name points to a site, a page or a link. It's held by a key, not rented from a company, and anyone can look one up and check it here. Names are registered on <a href="https://cairn-substrate.com" target="_blank" rel="noopener">Cairn</a>.</p>
+    <form class="look" id="lookForm">
+      <input id="lookName" placeholder="Look up a name, like commonplace" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label=".csd name">
+      <button class="btn main" type="submit">Look up</button>
+    </form>
+    <div id="result"></div>
+  </section>
+
+  <section class="part" id="sites">
+    <h2>Sites</h2>
+    <p class="intro">What's on the network right now, most recommended first, read from the doors and checked in this browser. Each opens in Doorway.</p>
+    <div class="sites" id="siteList"><p class="small">Reading the network…</p></div>
+  </section>
+
+  <section class="part" id="how">
+    <h2>How it works</h2>
+    <div class="how">
+      <div><b>No servers</b><p>A site is a bundle of files with an address made from its contents. Doors, run by anyone, hand it out; Doorway checks every byte against the address, so a door can refuse to answer but can't change a thing.</p></div>
+      <div><b>Names you hold</b><p>A name is a record on Compute Substrate, signed by its holder's key. Pointing it at a new version of a site is one more record. Nobody can take it down or redirect it.</p></div>
+      <div><b>Kept by anyone</b><p>Doors keep a site while a name points to it, and for as long as anyone keeps it up, a year at a time, for a little CSD. A site can outlive the person who made it.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>A page with nothing behind it: everything here is read from the network's doors and checked in this browser.</span>
+    <a href="https://computesubstrate.org">Compute Substrate</a>
+    <a href="https://commonplace.place">Commonplace</a>
+    <a href="https://github.com/compute-substrate/compute-substrate/tree/main/app#readme">Source</a>
+    <span>Reading through <code id="door">…</code></span>
+  </footer>
+</div>
+<script type="module" src="page.js"></script>
+</body>
+</html>

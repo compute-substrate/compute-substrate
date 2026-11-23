@@ -23,10 +23,11 @@ async function pickNode(): Promise<string> {
 // Opened from Doorway (this page at directory.localhost), sites open from this computer too
 const viaDoorway = location.hostname.endsWith(".localhost");
 // named sites open by name; a site kept with no name, by its own address (Doorway serves both)
-const openUrl = (s: Listed) => viaDoorway ? `${location.protocol}//${s.name || s.cid}.localhost${location.port ? ":" + location.port : ""}/` : `https://${s.cid}.ipfs.dweb.link/`;
+// sites open in Doorway, at name.localhost, wherever this page was opened (gateways don't have them)
+const openUrl = (s: Listed) => viaDoorway ? `${location.protocol}//${s.name || s.cid}.localhost${location.port ? ":" + location.port : ""}/` : `http://${s.name || s.cid}.localhost/`;
 $("howOpen").innerHTML = viaDoorway
   ? "Sites open from this computer, through Doorway, checked."
-  : 'Sites open through an IPFS gateway. With <a href="https://github.com/compute-substrate/compute-substrate/tree/main/app#readme">Doorway</a> they open from your own computer at <code>name.localhost</code>, checked.';
+  : 'Sites open in <a href="https://doorway.place">Doorway</a>, from your own computer at <code>name.localhost</code>, checked.';
 
 const me = await writingKey("directory");
 if (me.doorway) $("keyBtn").closest("span")!.textContent = "Each recommendation is a record on Compute Substrate, signed by your key in Doorway once you allow it there. A key counts once per site.";
@@ -83,10 +84,10 @@ function openWanted() {
   render();
 }
 addEventListener("hashchange", () => { opening = wanted(); openWanted(); });
-// a link to a site: to this page with its name, which opens it (always its newest site); opened
-// through Doorway, where this page's address is only this computer's, a link to the site itself
+// a link to a site that works for anyone: its name on doorway.place (which looks it up, checks it
+// and opens it in Doorway, or says where to get Doorway); a site with no name, by its address
 async function share(s: Listed) {
-  const url = viaDoorway || !s.name ? `https://${s.cid}.ipfs.dweb.link/` : `${location.origin}${location.pathname}#${s.name}`;
+  const url = s.name ? `https://doorway.place/#${s.name}` : `ipfs://${s.cid}`;
   const title = faces.get(s.cid)?.title || (s.name ? `${s.name}.csd` : "A site");
   try { if ((navigator as any).share) { await (navigator as any).share({ title, url }); return; } } catch { return; }
   try { await navigator.clipboard.writeText(url); say(`Link copied: ${url}`); } catch { say(url); }

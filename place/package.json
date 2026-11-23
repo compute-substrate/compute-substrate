@@ -1,0 +1,8 @@
+{
+  "name": "doorway-place",
+  "private": true,
+  "description": "doorway.place: Doorway's download, .csd names looked up and pointed, and the sites on the network. A static site: build, then upload out/.",
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}
