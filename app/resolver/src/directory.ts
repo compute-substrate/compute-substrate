@@ -157,3 +157,20 @@ export async function siteFace(cid: string, doors: string[]): Promise<Face> {
   if (icon) try { localStorage.setItem(key, JSON.stringify(face)); } catch {}
   return face;
 }
+
+// What the lists leave out. A list is a view, and a view chooses what it shows: sites no name
+// points to (nearly always an older version of a site, kept up by its address) aren't listed, and
+// neither is anything on the hide list its maker keeps at doorway.place/hidden.txt, one name or site
+// address per line. Nothing here touches the network: a hidden site is still there, by its address,
+// for anyone who has it; a door's own deny list is what keeps a site off a door.
+export const HIDE_LIST = "https://doorway.place/hidden.txt";
+let hidden: Promise<Set<string>> | null = null;
+export function hiddenList(url = HIDE_LIST): Promise<Set<string>> {
+  hidden ??= fetch(url, { signal: AbortSignal.timeout(6000), cache: "no-cache" })
+    .then(r => (r.ok ? r.text() : ""))
+    .then(t => new Set(t.split("\n").map(l => l.replace(/#.*/, "").trim().toLowerCase().replace(/^ipfs:\/\//, "").replace(/\.csd$/, "")).filter(Boolean)))
+    .catch(() => new Set<string>());
+  return hidden;
+}
+export const isHidden = (h: Set<string>, s: { name?: string | null; cid: string }) => !!s.name && h.has(s.name.toLowerCase()) || h.has(s.cid.toLowerCase());
+export const listed = (h: Set<string>, sites: Listed[]) => sites.filter(s => !!s.name && !isHidden(h, s));

@@ -1,0 +1,4 @@
+# What doorway.place and the directory don't show: one .csd name or site address (ipfs://…) per
+# line. It's this page's choice of what to list, nothing more: a hidden site is still on the network,
+# by its address, and a door's own deny list (/etc/csd/deny.txt) is what keeps a site off a door.
+# Anyone can run a list of their own.

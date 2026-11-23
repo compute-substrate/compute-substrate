@@ -12,4 +12,6 @@ await build({
 });
 cpSync("index.html", "out/index.html");
 cpSync("icon.svg", "out/icon.svg");
+cpSync("hidden.txt", "out/hidden.txt");
+cpSync("_headers", "out/_headers");
 console.log("built out/");

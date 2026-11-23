@@ -1,6 +1,6 @@
 // The directory's page: the list (app/resolver/src/directory.ts), and recommending, signed by a
 // key kept in this browser (the kit's browserKey), with the usual ways to get the little CSD it costs.
-import { listSites, siteFace, DIRECTORY, type Listed } from "../../app/resolver/src/directory";
+import { listSites, siteFace, hiddenList, listed, DIRECTORY, type Listed } from "../../app/resolver/src/directory";
 import { connect, writingKey, claimInvite, openInvites, welcome, heightToDate } from "../../kit/src/index";
 
 // Doors: public nodes anyone runs (docs/public-node.md). The page reads through the first that
@@ -107,8 +107,9 @@ function keepPanel(s: Listed) {
 async function load() {
   try {
     if (!net) { net = connect({ node: await pickNode() }); $("node").textContent = net.node; }
-    const [r, k] = await Promise.all([listSites(net.node), net.kept().catch(() => kept)]);
-    sites = r.sites;
+    const [r, k, hide] = await Promise.all([listSites(net.node), net.kept().catch(() => kept), hiddenList()]);
+    // sites a name points to, less the hide list: a list chooses what it shows (see listed)
+    sites = listed(hide, r.sites);
     kept = k;
     if (opening) return openWanted();
     render();

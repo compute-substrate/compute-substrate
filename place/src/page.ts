@@ -1,7 +1,7 @@
 // doorway.place: Doorway's download, .csd names (looked up and checked here, pointed and kept up
 // with the holder's own key in Cairn Wallet), and the sites on the network. Everything is read
 // through the doors and checked in this browser; the page has nothing behind it.
-import { lookup, listSites, siteFace, wallet as W } from "../../app/resolver/src/main";
+import { lookup, listSites, siteFace, hiddenList, isHidden, listed, wallet as W } from "../../app/resolver/src/main";
 import { cairnSigner, friendlyName, heightToDate } from "../../kit/src/index";
 
 const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
@@ -63,7 +63,8 @@ async function peek(input: string) {
   if (!name) return;
   box.innerHTML = `<p class="msg">Looking for ${esc(name)}…</p>`;
   try {
-    const f = await lookup(name, { doors: DOORS, web: true });
+    const [f, hide] = await Promise.all([lookup(name, { doors: DOORS, web: true }), hiddenList()]);
+    if (isHidden(hide, { name, cid: f.open?.startsWith("ipfs://") ? f.open.slice(7) : "" })) { box.innerHTML = `<p class="msg">doorway.place doesn't show this one.</p>`; return; }
     if (!f.owner) {
       const free = /^Nobody holds/.test(f.why ?? "");
       box.innerHTML = `<p class="msg">${free ? `Nothing is here yet. <b>${esc(name)}</b> is free: <a href="https://cairn-substrate.com" target="_blank" rel="noopener">make it yours</a>.` : esc(f.why ?? "Nothing is here.")}</p>`;
@@ -98,7 +99,8 @@ async function look(input: string) {
   if (!name) { out.innerHTML = ""; return; }
   out.innerHTML = `<div class="card"><p class="said">Looking up ${esc(name)}.csd, and checking its records…</p></div>`;
   try {
-    const f = await lookup(name, { doors: DOORS, web: true });
+    const [f, hide] = await Promise.all([lookup(name, { doors: DOORS, web: true }), hiddenList()]);
+    if (isHidden(hide, { name, cid: f.open?.startsWith("ipfs://") ? f.open.slice(7) : "" })) { out.innerHTML = `<div class="card"><p class="said">doorway.place doesn't show this one.</p></div>`; return; }
     shown = f;
     render(f, f.open?.startsWith("ipfs://") ? await keptYear(f.open.slice(7)) : null);
   } catch (e: any) {
@@ -179,7 +181,10 @@ fromHash();
 async function sites() {
   const box = $("siteList");
   try {
-    const { tip, sites } = await listSites(await firstDoor());
+    const [{ tip, sites: all }, hide] = await Promise.all([listSites(await firstDoor()), hiddenList()]);
+    // sites a name points to, less this page's hide list (older versions kept only by their
+    // address, and anything this page won't show, stay out)
+    const sites = listed(hide, all);
     if (!sites.length) { box.innerHTML = `<p class="small">No sites yet.</p>`; return; }
     const ranked = sites.slice().sort((a, b) => b.recommenders.length - a.recommenders.length || b.since - a.since).slice(0, 60);
     box.innerHTML = ranked.map(s => {
