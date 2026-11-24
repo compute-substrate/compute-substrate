@@ -220,10 +220,11 @@ export async function topUp(args: { provider: Provider; buyer: Address; key: Csd
   const csdMaxTarget = bitsToTarget(bits) * 11n / 10n;
 
   const tried = new Set<string>();
+  let declined = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     onStep("Finding the best offer…");
     const q = (await quotes(spend, tried))[0];
-    if (!q) throw new Error(tried.size ? "NO_MAKER_ANSWERED" : "NO_OFFER");
+    if (!q) throw new Error(declined ? `MAKER_DECLINED: ${declined}` : tried.size ? "NO_MAKER_ANSWERED" : "NO_OFFER");
     tried.add(q.maker.toLowerCase());
     const [locked, max] = await Promise.all([
       read.readContract({ address: SETTLEMENT, abi: settlementAbi, functionName: "totalLocked" }),
@@ -270,6 +271,8 @@ export async function topUp(args: { provider: Provider; buyer: Address; key: Csd
       for (const o of r.inbound ?? []) if (o.objectType === "response" && (await objectSigner(o)) === q.maker.toLowerCase()) { answer = o.payload; break; }
       if (!answer) await new Promise(r => setTimeout(r, 1500));
     }
+    // declined: kept, so the person hears why (out of CSD, paused, busy) rather than "no answer"
+    if (answer && !answer.accepted) declined = String(answer.error ?? answer.code ?? "DECLINED");
     if (!answer || !answer.accepted) continue; // silent or declined: the next maker
     onStep("The maker is locking your USDC on Ethereum…");
     for (let i = 0; i < 60; i++) {
@@ -278,7 +281,7 @@ export async function topUp(args: { provider: Provider; buyer: Address; key: Csd
     }
     return record; // accepted, lock not seen yet: followed from here
   }
-  throw new Error("NO_MAKER_ANSWERED");
+  throw new Error(declined ? `MAKER_DECLINED: ${declined}` : "NO_MAKER_ANSWERED");
 }
 
 // The market maker's signed receipt for a top-up, published on AON once the trade settles
@@ -358,5 +361,13 @@ export function topUpError(e: unknown): string {
     NO_MAKER_ANSWERED: "No market maker answered. Try again in a little while.",
     MARKET_UNREACHABLE: "Couldn't reach the market that lists the offers. Nothing was traded; try again in a little while.",
     MARKET_FULL: "The market is full for the moment. Try again in a little while.",
-  } as Record<string, string>)[m] ?? (/rejected|denied/i.test(m) ? "The wallet didn't sign." : m);
+  } as Record<string, string>)[m] ?? (m.startsWith("MAKER_DECLINED") ? makerDeclined(m) : /rejected|denied/i.test(m) ? "The wallet didn't sign." : m);
+}
+// A market maker's reason for turning an order down, in words (nothing was traded either way)
+export function makerDeclined(m: string): string {
+  const code = m.replace(/^MAKER_DECLINED:\s*/, "");
+  return /NOT_ENOUGH_CSD/.test(code) ? "The market maker has run out of CSD to sell for the moment. Nothing was traded."
+    : /PAUSED/.test(code) ? "The market maker is paused for the moment. Nothing was traded."
+    : /BUSY|RATE|TOO_MANY/.test(code) ? "The market maker is busy. Nothing was traded."
+    : `The market maker turned the order down (${code}). Nothing was traded.`;
 }
