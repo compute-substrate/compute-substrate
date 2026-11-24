@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+
+<link rel="stylesheet" href="/explorer.css">
+
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+<p class="small" style="font-size:18px; margin-bottom:22px;">Search blocks, transactions, proposals, and addresses.</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+ 
+
+  <div class="box">
+<p><b>Accepted inputs</b></p>
+<ul class="small">
+<li>Number → block height</li>
+<li>32-byte hex → block hash, txid, or proposal id</li>
+<li>20-byte hex → address / addr20</li>
+</ul>
+    <label for="q" class="small muted">Hex with or without 0x prefix</label>
+    <input id="q" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
+    <button id="searchBtn">Search</button>
+  </div>
+
+  <div id="status" class="small muted"></div>
+  <div id="result"></div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function normalizeHex(s) {
+    return (s || "").trim().replace(/^0x/i, "").toLowerCase();
+  }
+
+  function isHex(s) {
+    return /^[0-9a-f]+$/i.test(s);
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+async function tryBlockHeight(height) {
+  const data = await getJSON(`/block/height/${height}`);
+  return data && data.ok ? data : null;
+}
+
+  function setStatus(msg, isError = false) {
+    const el = document.getElementById("status");
+    el.className = isError ? "error" : "small muted";
+    el.textContent = msg;
+  }
+
+  function setResult(html) {
+    document.getElementById("result").innerHTML = html;
+  }
+
+  async function tryBlock(hash) {
+    const data = await getJSON(`/block/0x${hash}`);
+    return data && data.ok ? data : null;
+  }
+
+async function tryTx(hash) {
+  const data = await getJSON(`/tx/0x${hash}`);
+  return data && data.ok ? data : null;
+}
+
+  async function tryProposal(hash) {
+    const data = await getJSON(`/proposal/0x${hash}`);
+    return data && data.ok ? data : null;
+  }
+
+  function renderFoundBlock(data) {
+    return `
+      <div class="box">
+        <p><b>Block found</b></p>
+        <p><b>Hash:</b> <span class="mono">${esc(data.hash)}</span></p>
+        <p><b>Height:</b> ${esc(data.height)}</p>
+        <p><a href="/block.html?hash=${encodeURIComponent(data.hash)}">Open block page</a></p>
+      </div>
+    `;
+  }
+
+function renderFoundBlockHeight(data) {
+  return `
+    <div class="box">
+      <p><b>Block found</b></p>
+      <p><b>Height:</b> ${esc(data.height)}</p>
+      <p><b>Hash:</b> <span class="mono">${esc(data.hash)}</span></p>
+      <p><a href="/block.html?hash=${encodeURIComponent(data.hash)}">Open block page</a></p>
+    </div>
+  `;
+}
+
+
+function renderFoundTx(data) {
+  return `
+    <div class="box">
+      <p><b>Transaction found</b></p>
+      <p><b>Txid:</b> <span class="mono">${esc(data.txid)}</span></p>
+      <p><b>Height:</b> ${esc(data.height)}</p>
+      <p><b>Block:</b> <span class="mono">${esc(data.block_hash || "")}</span></p>
+      <p><a href="/tx.html?txid=${encodeURIComponent(data.txid)}">Open transaction page</a></p>
+    </div>
+  `;
+}
+
+  function renderFoundProposal(data) {
+    const p = data.proposal || {};
+    return `
+      <div class="box">
+        <p><b>Proposal found</b></p>
+        <p><b>Proposal ID:</b> <span class="mono">${esc(p.proposal_id)}</span></p>
+        <p><b>Domain:</b> ${esc(p.domain)}</p>
+        <p><b>Payload hash:</b> <span class="mono">${esc(p.payload_hash)}</span></p>
+        <p><b>URI:</b> <a href="${esc(p.uri)}" target="_blank" rel="noopener noreferrer">${esc(p.uri)}</a></p>
+        <p><a href="/proposal.html?id=${encodeURIComponent(p.proposal_id)}">Open proposal page</a></p>
+      </div>
+    `;
+  }
+
+  function renderAddress(addr) {
+    const prefixed = `0x${addr}`;
+    return `
+      <div class="box">
+        <p><b>Address / addr20</b></p>
+        <p><span class="mono">${esc(prefixed)}</span></p>
+        <p><a href="/address.html?addr=${encodeURIComponent(prefixed)}">Open address page</a></p>
+      </div>
+    `;
+  }
+
+  async function runSearch() {
+    const raw = document.getElementById("q").value;
+    const hex = normalizeHex(raw);
+
+    setResult("");
+
+    if (!hex) {
+      setStatus("Enter a block hash, proposal id, or addr20.", true);
+      return;
+    }
+
+if (/^[0-9]+$/.test(hex)) {
+  setStatus("Searching block height…");
+
+  try {
+    const block = await tryBlockHeight(hex);
+    if (block) {
+      setStatus("Block height match found.");
+      setResult(renderFoundBlockHeight(block));
+      return;
+    }
+  } catch (_) {}
+
+  setStatus("No block found at that height.", true);
+  return;
+}
+
+    if (!isHex(hex)) {
+      setStatus("Input must be valid hexadecimal.", true);
+      return;
+    }
+
+    if (hex.length === 40) {
+      setStatus("Interpreting input as addr20…");
+      setResult(renderAddress(hex));
+      return;
+    }
+
+if (hex.length === 64) {
+  setStatus("Searching block hash / txid / proposal id…");
+
+  try {
+    const block = await tryBlock(hex);
+    if (block) {
+      setStatus("Block match found.");
+      setResult(renderFoundBlock(block));
+      return;
+    }
+  } catch (_) {}
+
+  try {
+    const tx = await tryTx(hex);
+    if (tx) {
+      setStatus("Transaction match found.");
+      setResult(renderFoundTx(tx));
+      return;
+    }
+  } catch (_) {}
+
+  try {
+    const proposal = await tryProposal(hex);
+    if (proposal) {
+      setStatus("Proposal match found.");
+      setResult(renderFoundProposal(proposal));
+      return;
+    }
+  } catch (_) {}
+
+  setStatus("No block, transaction, or proposal found for that 32-byte hash.", true);
+  return;
+}
+
+    setStatus("Input length not recognized. Use 20-byte or 32-byte hex.", true);
+  }
+
+  document.getElementById("searchBtn").addEventListener("click", runSearch);
+  document.getElementById("q").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runSearch();
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  const initial = params.get("q");
+  if (initial) {
+    document.getElementById("q").value = initial;
+    runSearch();
+  }
+</script>
+</body>
+</html>

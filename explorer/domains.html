@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+
+<link rel="stylesheet" href="/explorer.css">
+<style>
+  .domain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+    margin-top: 18px;
+  }
+
+  .domain-box {
+    border: 1px solid #ddd;
+    padding: 16px;
+    min-height: 120px;
+    overflow-wrap: anywhere;
+  }
+
+  .domain-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .domain-header h3 {
+    font-size: 19px;
+    line-height: 1.25;
+    margin: 0;
+    max-width: 190px;
+  }
+
+  .domain-header .epoch {
+    white-space: nowrap;
+    font-size: 13px;
+    margin-top: 2px;
+  }
+
+  .domain-meta {
+    margin-bottom: 10px;
+  }
+
+  .domain-box ul {
+    margin: 10px 0 0 18px;
+    padding: 0;
+  }
+
+  .domain-box li {
+    margin: 6px 0;
+  }
+
+  .controls input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 4px 0 6px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+  <p class="small" style="font-size:18px; margin-bottom:22px;">Current remembered computation by domain.</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+ 
+
+  <p class="small note">
+Domains below are discovered automatically from chain state. Ranking is by economic weight: total attestation fees. Raw score and confidence are expressive metadata, not authority.
+  </p>
+
+  <div class="controls">
+    <label for="domainsInput" class="small muted">
+      Optional manual filter (comma-separated domains)
+    </label>
+    <input
+      id="domainsInput"
+      type="text"
+      placeholder="finance, science, ai, climate"
+      autocomplete="off"
+      spellcheck="false"
+    >
+    <div class="hint small muted">
+      Leave empty to load observed domains automatically from chain state.
+    </div>
+    <button id="loadBtn">Load</button>
+    <button id="clearBtn">Clear</button>
+  </div>
+
+  <div id="status" class="loading">Loading observed domains...</div>
+  <div id="domains" class="domain-grid" style="display:none;"></div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function shortHash(h, n = 18) {
+    if (!h) return "";
+    return h.length > n ? h.slice(0, n) + "…" : h;
+  }
+
+  function parseDomains(raw) {
+    return [...new Set(
+      String(raw || "")
+        .split(",")
+        .map(x => x.trim())
+        .filter(Boolean)
+    )];
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function renderDomains(results) {
+    const wrap = document.getElementById("domains");
+    wrap.style.display = "";
+    wrap.innerHTML = results.map(({ domain, stats, data, err }) => {
+      if (err) {
+        return `
+          <div class="domain-box">
+            <div class="domain-header">
+              <h3>${esc(domain)}</h3>
+            </div>
+            <div class="error small">${esc(err)}</div>
+          </div>
+        `;
+      }
+
+const top = data.proposals || [];
+      const items = top.slice(0, 5).map(item => `
+        <li>
+          <a href="/proposal.html?id=${encodeURIComponent(item.proposal_id)}">${esc(shortHash(item.proposal_id, 22))}</a>
+<span class="small muted">height ${esc(item.height)}</span>
+        </li>
+      `).join("");
+
+      return `
+        <div class="domain-box">
+          <div class="domain-header">
+            <h3><a href="/domain.html?name=${encodeURIComponent(domain)}">${esc(domain)}</a></h3>
+<span class="small muted epoch">All time</span>
+          </div>
+
+<div class="small muted domain-meta">
+  ${esc(stats.proposals)} proposals, ${esc(stats.attestations)} attestations
+</div>
+          ${top.length ? `
+            <ul>${items}</ul>
+          ` : `
+            <p class="small muted">No current entries.</p>
+          `}
+        </div>
+      `;
+    }).join("");
+  }
+
+  async function load() {
+    const status = document.getElementById("status");
+    const raw = document.getElementById("domainsInput").value;
+    let domains = parseDomains(raw);
+
+    document.getElementById("domains").style.display = "none";
+    document.getElementById("domains").innerHTML = "";
+
+    status.className = "loading";
+    status.textContent = "Loading domains...";
+    status.style.display = "";
+
+    try {
+      const domainsResp = await getJSON("/domains");
+      const statsMap = new Map((domainsResp.domains || []).map(d => [d.domain, d]));
+
+      if (!domains.length) {
+        domains = (domainsResp.domains || []).map(d => d.domain);
+      }
+
+      if (!domains.length) {
+        status.textContent = "No observed domains found.";
+        return;
+      }
+
+      const results = await Promise.all(
+        domains.map(async (domain) => {
+          const stats = statsMap.get(domain) || {
+            domain,
+            proposals: 0,
+            attestations: 0
+          };
+
+          try {
+const data = await getJSON(`/proposals/${encodeURIComponent(domain)}/500`);
+return { domain, stats, data };
+          } catch (err) {
+            return { domain, stats, err: err.message || String(err) };
+          }
+        })
+      );
+
+      status.style.display = "none";
+      renderDomains(results);
+
+      const qs = new URLSearchParams();
+      if (raw.trim()) {
+        qs.set("names", domains.join(","));
+        history.replaceState(null, "", `/domains.html?${qs.toString()}`);
+      } else {
+        history.replaceState(null, "", `/domains.html`);
+      }
+    } catch (err) {
+      status.className = "error";
+      status.textContent = "Error loading domains: " + (err.message || err);
+      status.style.display = "";
+    }
+  }
+
+  document.getElementById("loadBtn").addEventListener("click", load);
+
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    document.getElementById("domainsInput").value = "";
+    document.getElementById("domains").style.display = "none";
+    document.getElementById("domains").innerHTML = "";
+    const status = document.getElementById("status");
+    status.className = "loading";
+    status.textContent = "Loading observed domains...";
+    status.style.display = "";
+    history.replaceState(null, "", "/domains.html");
+    load();
+  });
+
+  document.getElementById("domainsInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") load();
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  const names = params.get("names");
+  if (names) {
+    document.getElementById("domainsInput").value = names;
+    load();
+  } else {
+    load();
+  }
+</script>
+</body>
+</html>

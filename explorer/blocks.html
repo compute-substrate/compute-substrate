@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+<link rel="stylesheet" href="/explorer.css">
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+<p class="small" style="font-size:18px; margin-bottom:22px;">Recent blocks.</p>
+  <p class="nav small">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+
+  <div id="status" class="loading">Loading blocks…</div>
+
+  <div id="blocks-section" style="display:none;">
+    <h2>Chain Tip</h2>
+    <div id="tip-kv" class="small"></div>
+
+    <h2>Blocks</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Height</th>
+          <th>Hash</th>
+          <th>Previous</th>
+          <th>Time</th>
+          <th>Txs</th>
+        </tr>
+      </thead>
+      <tbody id="blocks-body"></tbody>
+    </table>
+
+    <div class="pager">
+      <button id="moreBtn">Load more</button>
+    </div>
+  </div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+  let limit = 25;
+  const MAX_LIMIT = 200;
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return d.toISOString().replace("T", " ").replace(".000Z", " UTC");
+  }
+
+  function shortHash(h) {
+    if (!h) return "";
+    return h.slice(0, 18) + "…";
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function renderTip(data) {
+    const el = document.getElementById("tip-kv");
+    el.innerHTML = `
+      <div><b>Tip hash:</b> <span class="mono">${esc(data.tip)}</span></div>
+      <div><b>Height:</b> ${esc(data.height)}</div>
+      <div><b>Blocks scanned:</b> ${esc(data.scanned_blocks)}</div>
+    `;
+  }
+
+  function renderBlocks(data) {
+    const body = document.getElementById("blocks-body");
+
+    body.innerHTML = data.blocks.map(b => `
+      <tr>
+        <td>${esc(b.height)}</td>
+        <td class="mono">
+          <a href="/block.html?hash=${esc(b.hash)}">${esc(shortHash(b.hash))}</a>
+        </td>
+        <td class="mono">${esc(shortHash(b.prev))}</td>
+        <td>${esc(fmtTime(b.time))}</td>
+        <td>${esc(b.txs)}</td>
+      </tr>
+    `).join("");
+  }
+
+  async function load() {
+    const status = document.getElementById("status");
+    try {
+      const data = await getJSON(`/recent/blocks/${limit}`);
+
+      if (!data.ok) {
+        status.className = "error";
+        status.textContent = "Failed to load blocks.";
+        return;
+      }
+
+      status.style.display = "none";
+      document.getElementById("blocks-section").style.display = "";
+
+      renderTip(data);
+      renderBlocks(data);
+
+      const moreBtn = document.getElementById("moreBtn");
+      moreBtn.disabled = limit >= MAX_LIMIT;
+    } catch (err) {
+      status.className = "error";
+      status.textContent = "Error loading blocks: " + (err.message || err);
+    }
+  }
+
+  document.getElementById("moreBtn").onclick = () => {
+    limit = Math.min(limit + 25, MAX_LIMIT);
+    load();
+  };
+
+  load();
+</script>
+</body>
+</html>

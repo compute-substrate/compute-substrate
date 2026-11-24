@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+<style>
+  :root {
+    --fg: #111;
+    --muted: #666;
+    --line: #ddd;
+    --bg: #fff;
+    --code-bg: #f6f6f6;
+    --link: #111;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: Georgia, "Times New Roman", Times, serif;
+    line-height: 1.65;
+    font-size: 18px;
+  }
+
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 28px 20px 64px;
+  }
+
+  h1, h2, h3 {
+    font-weight: 600;
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-size: 40px;
+    line-height: 1.15;
+    margin: 0 0 14px;
+  }
+
+  h2 {
+    font-size: 24px;
+    margin: 42px 0 12px;
+  }
+
+  h3 {
+    font-size: 20px;
+    margin: 24px 0 10px;
+  }
+
+  p, ul, table {
+    margin: 0 0 16px;
+  }
+
+  a {
+    color: var(--link);
+    text-decoration: none;
+  }
+
+  a:hover {
+    text-decoration: underline;
+  }
+
+  hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: 34px 0;
+  }
+
+  .small {
+    color: var(--muted);
+    font-size: 15px;
+  }
+
+  .muted {
+    color: var(--muted);
+  }
+
+  .mono {
+    font-family: "Courier New", Courier, monospace;
+    font-size: 14px;
+    word-break: break-word;
+  }
+
+  .nav {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-size: 15px;
+    margin: 0 0 42px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .nav a {
+    margin-right: 0;
+    white-space: nowrap;
+  }
+
+  .kv {
+    margin: 0 0 20px;
+  }
+
+  .kv div {
+    margin: 4px 0;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    border-top: 1px solid var(--line);
+    padding: 8px 8px 8px 0;
+    font-size: 16px;
+  }
+
+  th {
+    font-weight: 600;
+  }
+
+  .section-note {
+    margin-top: -2px;
+    margin-bottom: 10px;
+    color: var(--muted);
+    font-size: 15px;
+  }
+
+  .error {
+    color: #800;
+    font-weight: 600;
+  }
+
+  .loading {
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .domain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+  }
+
+  .domain-box {
+    border: 1px solid var(--line);
+    padding: 12px;
+  }
+
+  .domain-box ul {
+    margin: 10px 0 0 18px;
+    padding: 0;
+  }
+
+  .domain-box li {
+    margin: 4px 0;
+  }
+
+  .footer {
+    margin-top: 46px;
+    color: var(--muted);
+    font-size: 15px;
+  }
+</style>
+
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+<p class="small" style="font-size:18px; margin-bottom:22px;">Public memory of speculative computation.</p>
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="/block.html?hash=0x00000052c2821f71b19c3d79dfabfb12d4076ba15d83b47d008e582aad6c0d52">Genesis</a>
+    <a href="http://computesubstrate.org">Main site</a>
+    <a href="http://forum.computesubstrate.org">Forum</a>
+  </p>
+
+
+  <p class="small section-note">
+    This explorer shows canonical chain history, recent proposals, attestations, and observed domains. Inclusion does not imply correctness or authority.
+  </p>
+
+  <h2>Chain State</h2>
+  <div id="chain-state" class="kv loading">Loading chain state...</div>
+
+  <h2>Recent Blocks</h2>
+  <p class="small section-note">
+    Genesis is block 0. Its epigraph should be visible on the block page when block input script data is exposed.
+  </p>
+  <div id="recent-blocks" class="loading">Loading recent blocks...</div>
+
+  <h2>Recent Proposals</h2>
+  <div id="recent-proposals" class="loading">Loading recent proposals...</div>
+
+
+<h2>Active Top Proposals</h2>
+<p class="small section-note">
+Unexpired proposals ranked by accumulated economic weight: total attestation fees. Raw score and confidence are expressive metadata.
+</p>
+<div id="active-top" class="loading">Loading active ranking...</div>
+
+  <h2>Observed Domains</h2>
+  <p class="small section-note">
+    Domains are discovered from chain state. Current windows below show the most active observed domains.
+  </p>
+  <div id="domain-status" class="loading">Loading observed domains...</div>
+  <div id="domain-windows" class="domain-grid" style="display:none;"></div>
+
+  <div class="footer small muted">
+    Static explorer. No cookies. No authority. <span id="reading"></span>
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function shortHash(s, n = 14) {
+    if (!s) return "";
+    return s.length > n ? s.slice(0, n) + "…" : s;
+  }
+
+function displayUri(uri, n = 46) {
+  try {
+    const u = new URL(uri);
+    const clean = (u.hostname + u.pathname).replace(/\/$/, "");
+    return clean.length > n ? clean.slice(0, n) + "…" : clean;
+  } catch (_) {
+    const s = String(uri || "");
+    return s.length > n ? s.slice(0, n) + "…" : s;
+  }
+}
+
+function titleFromUri(uri) {
+  try {
+    const u = new URL(uri);
+    const last = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
+    return last
+      .replaceAll("-", " ")
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, c => c.toUpperCase());
+  } catch (_) {
+    const s = String(uri || "");
+    return s.length > 80 ? s.slice(0, 80) + "…" : s;
+  }
+}
+
+function cleanText(s) {
+  return String(s || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchContextMaybe(uri) {
+  try {
+    const r = await fetch(uri, { method: "GET" });
+    if (!r.ok) return { title: null, summary: null };
+
+    const ct = r.headers.get("content-type") || "";
+    if (!ct.includes("text/html") && !ct.includes("text/plain")) {
+      return { title: null, summary: null };
+    }
+
+    const text = await r.text();
+
+    const title =
+      text.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+
+    const summary =
+      text.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<meta[^>]+name=["']twitter:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<p[^>]*>(.*?)<\/p>/is)?.[1];
+
+    return {
+      title: title ? cleanText(title).slice(0, 160) : null,
+      summary: summary ? cleanText(summary).slice(0, 180) : null
+    };
+  } catch (_) {
+    return { title: null, summary: null };
+  }
+}
+
+async function hydrateRecentProposalContext(proposals) {
+  for (const p of proposals) {
+    const titleEl = document.querySelector(`[data-title-for="${CSS.escape(p.proposal_id)}"]`);
+    const summaryEl = document.querySelector(`[data-summary-for="${CSS.escape(p.proposal_id)}"]`);
+
+    const uri = String(p.uri || "").trim();
+    const isUrl = /^https?:\/\//i.test(uri);
+
+    if (!isUrl) {
+      if (titleEl) titleEl.textContent = "Plain text proposal";
+      if (summaryEl) summaryEl.textContent = uri.length > 180 ? uri.slice(0, 180) + "…" : uri;
+      continue;
+    }
+
+    const ctx = await fetchContextMaybe(uri);
+
+    if (ctx.title && titleEl) titleEl.textContent = ctx.title;
+    if (ctx.summary && summaryEl) summaryEl.textContent = ctx.summary;
+  }
+}
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return d.toISOString().replace("T", " ").replace(".000Z", " UTC");
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+async function getJSONOrNull(path) {
+  try {
+    return await getJSON(path);
+  } catch (_) {
+    return null;
+  }
+}
+async function loadActiveTop() {
+  const el = document.getElementById("active-top");
+
+  try {
+    const data = await getJSON("/top/active");
+
+    const items = data.top || [];
+
+    if (!items.length) {
+      el.className = "";
+      el.innerHTML = `<p class="small muted">No active attested proposals found.</p>`;
+      return;
+    }
+
+    const rows = items.slice(0, 10).map(i => `
+      <tr>
+        <td class="mono">
+          <a href="/proposal.html?id=${encodeURIComponent(i.proposal_id)}">
+            ${esc(shortHash(i.proposal_id, 22))}
+          </a>
+        </td>
+        <td>${esc(i.domain)}</td>
+        <td>${esc(i.economic_weight)}</td>
+        <td>${esc(i.attest_count)}</td>
+        <td>${esc(i.expires_epoch)}</td>
+      </tr>
+    `).join("");
+
+    el.className = "";
+    el.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Proposal</th>
+            <th>Domain</th>
+            <th>Economic Weight</th>
+            <th>Attests</th>
+            <th>Expires</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } catch (err) {
+    renderError("active-top", err);
+  }
+}
+function bootPeerLine(b, height) {
+  const label = esc(new URL(b.door).host);
+  if (b.height == null) {
+    return `<div class="small"><b>${label}:</b> <span class="muted">not answering</span></div>`;
+  }
+  const behind = height - b.height;
+  return `
+    <div class="small">
+      <b>${label}:</b> height ${esc(b.height)}${behind > 2 ? ` <span class="muted">(${esc(behind)} behind)</span>` : ""}, ${esc(b.peer_count ?? "—")} connected, ${esc(b.known_peers ?? "—")} discovered
+    </div>
+  `;
+}
+function renderChainState(health, bootnodes) {
+  const el = document.getElementById("chain-state");
+  el.className = "kv";
+
+  const bn = bootnodes || [];
+
+  el.innerHTML = `
+    <div><b>Height:</b> ${esc(health.height)}</div>
+    <div><b>Tip:</b> <span class="mono">${esc(health.tip)}</span></div>
+    <div><b>Chainwork:</b> <span class="mono">${esc(health.chainwork)}</span></div>
+
+    <div style="margin-top:10px;"><b>Doors:</b></div>
+    ${bn.map(b => bootPeerLine(b, Math.max(Number(health.height) || 0, ...bn.map(x => Number(x.height) || 0)))).join("")}
+    <div style="margin-top:10px;"><b>Mempool transactions:</b> ${esc(health.mempool_tx_count)}</div>
+    <div><b>Mempool bytes:</b> ${esc(health.mempool_bytes)}</div>
+  `;
+}
+  function renderRecentBlocks(data) {
+    const el = document.getElementById("recent-blocks");
+    el.className = "";
+    if (!data.blocks || !data.blocks.length) {
+      el.innerHTML = `<p class="small muted">No blocks found.</p>`;
+      return;
+    }
+
+    const rows = data.blocks.map(b => `
+      <tr>
+        <td>${esc(b.height)}</td>
+        <td class="mono"><a href="/block.html?hash=${encodeURIComponent(b.hash)}">${esc(shortHash(b.hash, 22))}</a></td>
+        <td class="mono">${esc(shortHash(b.prev, 22))}</td>
+        <td>${esc(fmtTime(b.time))}</td>
+        <td>${esc(b.txs)}</td>
+      </tr>
+    `).join("");
+
+    el.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Height</th>
+            <th>Hash</th>
+            <th>Prev</th>
+            <th>Time</th>
+            <th>Txs</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+function renderRecentProposals(data) {
+  const el = document.getElementById("recent-proposals");
+  el.className = "";
+  const proposals = data.proposals || [];
+
+  if (!proposals.length) {
+    el.innerHTML = `<p class="small muted">No proposals found.</p>`;
+    return;
+  }
+
+  const rows = proposals.map(p => {
+    const uri = String(p.uri || "").trim();
+    const isUrl = /^https?:\/\//i.test(uri);
+    const fallbackTitle = isUrl ? titleFromUri(uri) : "Plain text proposal";
+    const fallbackSummary = isUrl ? "" : (uri.length > 180 ? uri.slice(0, 180) + "…" : uri);
+
+    return `
+      <tr>
+        <td class="mono">
+          <a href="/proposal.html?id=${encodeURIComponent(p.proposal_id)}">${esc(shortHash(p.proposal_id, 22))}</a>
+        </td>
+        <td>${esc(p.domain)}</td>
+        <td>${esc(p.height)}</td>
+        <td class="mono">${esc(shortHash(p.payload_hash, 22))}</td>
+        <td>
+          <div>
+            <b data-title-for="${esc(p.proposal_id)}">${esc(fallbackTitle)}</b>
+          </div>
+          <div class="small muted" data-summary-for="${esc(p.proposal_id)}">${esc(fallbackSummary)}</div>
+          <div class="small muted">${esc(p.domain)}</div>
+        </td>
+        <td class="small">
+          ${
+            isUrl
+              ? `<a href="${esc(uri)}" title="${esc(uri)}" target="_blank" rel="noopener noreferrer">${esc(displayUri(uri))}</a>`
+              : `<span class="mono">${esc(uri.length > 46 ? uri.slice(0, 46) + "…" : uri)}</span>`
+          }
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  el.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Proposal</th>
+          <th>Domain</th>
+          <th>Height</th>
+          <th>Payload hash</th>
+          <th>Context</th>
+          <th>URI</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  hydrateRecentProposalContext(proposals);
+}
+  function renderRecentAttestations(data) {
+    const el = document.getElementById("recent-attestations");
+    if (!el) return;
+    el.className = "";
+    if (!data.items || !data.items.length) {
+      el.innerHTML = `<p class="small muted">No attestations found.</p>`;
+      return;
+    }
+
+    const rows = data.items.map(i => `
+      <tr>
+        <td class="mono"><a href="/proposal.html?id=${encodeURIComponent(i.proposal_id)}">${esc(shortHash(i.proposal_id, 22))}</a></td>
+        <td>${esc(i.domain)}</td>
+        <td>${esc(i.attest_count)}</td>
+        <td>${esc(i.score_sum)}</td>
+        <td>${esc(i.confidence_sum)}</td>
+      </tr>
+    `).join("");
+
+    el.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Proposal</th>
+            <th>Domain</th>
+            <th>Attest count</th>
+<th>Raw score sum</th>
+<th>Raw confidence sum</th>
+
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  function renderDomainWindows(results) {
+    const el = document.getElementById("domain-windows");
+    el.style.display = "";
+    el.className = "domain-grid";
+
+    el.innerHTML = results.map(({ domain, stats, windowData, err }) => {
+      if (err) {
+        return `
+          <div class="domain-box">
+            <div><b>${esc(domain)}</b></div>
+            <div class="small error">${esc(err)}</div>
+          </div>
+        `;
+      }
+
+      const items = (windowData.top || []).slice(0, 5).map(item => `
+        <li>
+          <a href="/proposal.html?id=${encodeURIComponent(item.proposal_id)}">${esc(shortHash(item.proposal_id, 18))}</a>
+<span class="small muted">economic weight ${esc(item.score)}</span>
+        </li>
+      `).join("");
+
+      return `
+        <div class="domain-box">
+          <div><b><a href="/domain.html?name=${encodeURIComponent(domain)}">${esc(domain)}</a></b></div>
+          <div class="small muted">
+            Epoch ${esc(windowData.epoch)}, ${esc(stats.proposals)} proposals, ${esc(stats.attestations)} attestations
+          </div>
+          ${items ? `<ul>${items}</ul>` : `<p class="small muted">No current entries.</p>`}
+        </div>
+      `;
+    }).join("");
+  }
+
+  function renderError(id, err) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = "error";
+    el.textContent = `Error: ${err.message || err}`;
+  }
+
+async function loadCore() {
+  getJSON("/health")
+    .then(async (health) => {
+      // every door's own view, so a door that's behind shows at once
+      const boots = await Promise.all(window.csdDoors.map(async d => {
+        try { const r = await fetch(d + "/health", { signal: AbortSignal.timeout(5000) }); return r.ok ? { ...(await r.json()), door: d } : { door: d }; }
+        catch { return { door: d }; }
+      }));
+      renderChainState(health, boots);
+    })
+    .catch(err => renderError("chain-state", err));
+
+  getJSON("/recent/blocks/10")
+    .then(renderRecentBlocks)
+    .catch(err => renderError("recent-blocks", err));
+
+  getJSON("/recent/proposals/10")
+    .then(renderRecentProposals)
+    .catch(err => renderError("recent-proposals", err));
+
+  getJSON("/recent/attestations/10")
+    .then(renderRecentAttestations)
+    .catch(err => renderError("recent-attestations", err));
+}
+
+  async function loadObservedDomains() {
+    const status = document.getElementById("domain-status");
+    const wrap = document.getElementById("domain-windows");
+
+    wrap.style.display = "none";
+    wrap.innerHTML = "";
+
+    status.className = "loading";
+    status.textContent = "Loading observed domains...";
+    status.style.display = "";
+
+    try {
+      const domainsResp = await getJSON("/domains");
+      const domains = (domainsResp.domains || []).slice(0, 12);
+
+      if (!domains.length) {
+        status.className = "loading";
+        status.textContent = "No observed domains found.";
+        return;
+      }
+
+      const results = await Promise.all(
+        domains.map(async (d) => {
+          try {
+            const windowData = await getJSON(`/window/${encodeURIComponent(d.domain)}`);
+            return {
+              domain: d.domain,
+              stats: d,
+              windowData
+            };
+          } catch (err) {
+            return {
+              domain: d.domain,
+              stats: d,
+              err: err.message || String(err)
+            };
+          }
+        })
+      );
+
+      status.style.display = "none";
+      renderDomainWindows(results);
+    } catch (err) {
+      status.className = "error";
+      status.textContent = `Error: ${err.message || err}`;
+      status.style.display = "";
+    }
+  }
+
+  window.csdReading().then(n => { document.getElementById("reading").textContent = `Reading through ${new URL(n).host}, the most up to date node that answered; add ?node=… to read through your own.`; }).catch(() => {});
+  loadCore();
+  loadObservedDomains();
+loadActiveTop();
+</script>
+</body>
+</html>

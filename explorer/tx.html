@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+  <link rel="stylesheet" href="/explorer.css">
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+  <p class="small" style="font-size:18px; margin-bottom:22px;">Transaction view.</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+  <div id="status" class="loading">Loading transaction...</div>
+
+  <div id="tx-section" style="display:none;">
+    <h2>Transaction</h2>
+    <div id="tx-kv" class="kv"></div>
+
+    <div id="genesis-note" class="box" style="display:none;">
+      <h3>Coinbase text</h3>
+      <pre id="coinbase-text"></pre>
+    </div>
+
+    <h2>Inputs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Prev txid</th>
+          <th>Vout</th>
+          <th>Script sig</th>
+        </tr>
+      </thead>
+      <tbody id="inputs-body"></tbody>
+    </table>
+
+    <h2>Outputs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Value</th>
+          <th>Script pubkey</th>
+        </tr>
+      </thead>
+      <tbody id="outputs-body"></tbody>
+    </table>
+  </div>
+
+  <div class="footer">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+  const params = new URLSearchParams(window.location.search);
+  const txid = params.get("txid");
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return d.toISOString().replace("T", " ").replace(".000Z", " UTC");
+  }
+
+  function formatValue(v) {
+    const coins = Number(v || 0) / 1e8;
+    return coins.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 8
+    });
+  }
+
+function isAddr20(s) {
+  return /^0x[0-9a-f]{40}$/i.test(String(s || ""));
+}
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function renderTx(data) {
+    const tx = data.tx || {};
+    const inputs = tx.inputs || [];
+    const outputs = tx.outputs || [];
+
+    document.getElementById("tx-kv").innerHTML = `
+      <div><b>Txid:</b> <span class="mono">${esc(data.txid)}</span></div>
+      <div><b>Block:</b> ${
+        data.block_hash
+          ? `<a class="mono" href="/block.html?hash=${encodeURIComponent(data.block_hash)}">${esc(data.block_hash)}</a>`
+          : '<span class="muted">unknown</span>'
+      }</div>
+      <div><b>Height:</b> ${data.height ?? '<span class="muted">unknown</span>'}</div>
+      <div><b>Time:</b> ${esc(fmtTime(data.time))}</div>
+      <div><b>Version:</b> ${esc(tx.version)}</div>
+      <div><b>Locktime:</b> ${esc(tx.locktime)}</div>
+      <div><b>App:</b> <span class="mono">${esc(typeof tx.app === "string" ? tx.app : JSON.stringify(tx.app))}</span></div>
+    `;
+
+document.getElementById("inputs-body").innerHTML = inputs.length
+  ? inputs.map((inp, i) => {
+      const isCoinbase =
+        (inp.prev_txid || "") === "0x0000000000000000000000000000000000000000000000000000000000000000" &&
+        Number(inp.vout) === 4294967295;
+
+      return `
+        <tr>
+          <td>${i}</td>
+          <td class="mono">${isCoinbase ? '<span class="muted">coinbase</span>' : esc(inp.prev_txid || "")}</td>
+          <td>${isCoinbase ? '<span class="muted">—</span>' : esc(inp.vout)}</td>
+          <td class="mono">${esc(inp.script_sig || "")}</td>
+        </tr>
+      `;
+    }).join("")
+  : `<tr><td colspan="4" class="muted">No inputs.</td></tr>`;
+
+
+    document.getElementById("outputs-body").innerHTML = outputs.length
+      ? outputs.map((out, i) => `
+          <tr>
+            <td>${i}</td>
+            <td>${formatValue(out.value)} <span class="small muted">CSD</span><br><span class="small muted">${esc(out.value)}</span></td>
+
+<td class="mono">
+  ${
+    isAddr20(out.script_pubkey)
+      ? `<a href="/address.html?addr=${encodeURIComponent(out.script_pubkey)}">${esc(out.script_pubkey)}</a>`
+      : esc(out.script_pubkey || "")
+  }
+</td>
+
+          </tr>
+        `).join("")
+      : `<tr><td colspan="3" class="muted">No outputs.</td></tr>`;
+
+    const coinbaseText = inputs.length ? inputs[0].script_sig_text : null;
+    if (coinbaseText) {
+      document.getElementById("genesis-note").style.display = "";
+      document.getElementById("coinbase-text").textContent = coinbaseText;
+    }
+
+    document.getElementById("tx-section").style.display = "";
+  }
+
+  async function init() {
+    const status = document.getElementById("status");
+
+    if (!txid) {
+      status.className = "error";
+      status.textContent = "Missing txid. Use /tx.html?txid=0x...";
+      return;
+    }
+
+    try {
+      const data = await getJSON(`/tx/${encodeURIComponent(txid)}`);
+
+      if (!data.ok) {
+        status.className = "error";
+        status.textContent = `Transaction not found: ${data.err || "unknown error"}`;
+        return;
+      }
+
+      status.style.display = "none";
+      renderTx(data);
+    } catch (err) {
+      status.className = "error";
+      status.textContent = `Error loading transaction: ${err.message || err}`;
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>

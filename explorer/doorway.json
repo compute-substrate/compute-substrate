@@ -1,0 +1,4 @@
+{
+  "about": "The explorer reads the network through its doors. A record's own link (a proposal's address) is fetched only when you open that record.",
+  "connect": ["https://*.aon.network"]
+}

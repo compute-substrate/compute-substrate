@@ -1,0 +1,237 @@
+:root {
+  --fg: #111;
+  --muted: #666;
+  --line: #ddd;
+  --bg: #fff;
+  --code-bg: #f6f6f6;
+  --link: #111;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Georgia, "Times New Roman", Times, serif;
+  line-height: 1.65;
+  font-size: 18px;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 28px 20px 64px;
+}
+
+h1, h2, h3 {
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+
+h1 {
+  font-size: 40px;
+  line-height: 1.15;
+  margin: 0 0 14px;
+}
+
+h2 {
+  font-size: 24px;
+  margin: 42px 0 12px;
+}
+
+h3 {
+  font-size: 20px;
+  margin: 24px 0 10px;
+}
+
+p, ul, table, pre {
+  margin: 0 0 16px;
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 34px 0;
+}
+
+.small {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.nav {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 15px;
+  margin: 0 0 42px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.nav a {
+  white-space: nowrap;
+}
+
+.kv {
+  margin: 0 0 20px;
+}
+
+.kv div {
+  margin: 4px 0;
+}
+
+.loading {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.error {
+  color: #800;
+  font-weight: 600;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+
+th, td {
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+  padding: 8px 8px 8px 0;
+  font-size: 16px;
+}
+
+th {
+  font-weight: 600;
+}
+
+.section-note,
+.note,
+.hint {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.section-note,
+.note {
+  margin-top: -2px;
+  margin-bottom: 10px;
+}
+
+.domain-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.domain-box,
+.box {
+  border: 1px solid var(--line);
+  padding: 12px;
+}
+
+.domain-box ul {
+  margin: 10px 0 0 18px;
+  padding: 0;
+}
+
+.domain-box li {
+  margin: 4px 0;
+}
+
+.domain-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.controls {
+  margin: 12px 0 16px;
+}
+
+input[type="text"],
+select {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--fg);
+}
+
+select {
+  width: auto;
+  font-family: inherit;
+  font-size: 16px;
+}
+
+td:nth-child(3),
+td:nth-child(4),
+td:nth-child(5) {
+  text-align: right;
+}
+
+
+button {
+  font-family: inherit;
+  font-size: 16px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--fg);
+  cursor: pointer;
+  margin-right: 8px;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pager {
+  margin-top: 14px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  padding: 14px 16px;
+  overflow-x: auto;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.footer {
+  margin-top: 46px;
+  color: var(--muted);
+  font-size: 15px;
+}

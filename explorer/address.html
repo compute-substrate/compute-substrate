@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+
+<link rel="stylesheet" href="/explorer.css">
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+<p class="small" style="font-size:18px; margin-bottom:22px;">Address view</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+
+  <div class="box">
+    <label for="addr" class="small muted">addr20 (20-byte hex, with or without 0x)</label>
+    <input id="addr" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
+    <button id="loadBtn">Load address</button>
+  </div>
+
+  <div id="status" class="loading">Waiting for address…</div>
+
+  <div id="summary-section" style="display:none;">
+    <h2>Address</h2>
+    <div id="summary-kv" class="kv"></div>
+  </div>
+
+  <div id="utxo-section" style="display:none;">
+    <h2>UTXOs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Txid</th>
+          <th>Vout</th>
+          <th>Value</th>
+          <th>Height</th>
+          <th>Confirmations</th>
+          <th>Coinbase</th>
+        </tr>
+      </thead>
+      <tbody id="utxo-body"></tbody>
+    </table>
+  </div>
+
+<div id="activity-section" style="display:none;">
+  <h2>Address Activity</h2>
+  <div id="activity-summary" class="kv"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Height</th>
+        <th>Type</th>
+        <th>Tx</th>
+        <th>Domain</th>
+        <th>Value Δ</th>
+      </tr>
+    </thead>
+    <tbody id="activity-body"></tbody>
+  </table>
+</div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+
+const DECIMALS = 8;
+
+function formatValue(v) {
+  const coins = v / 1e8;
+  return coins.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 8
+  });
+}
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function normalizeHex(s) {
+    return (s || "").trim().replace(/^0x/i, "").toLowerCase();
+  }
+
+  function isHex20(s) {
+    return /^[0-9a-f]{40}$/i.test(s);
+  }
+
+  function shortHash(h, n = 18) {
+    if (!h) return "";
+    return h.length > n ? h.slice(0, n) + "…" : h;
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function setStatus(msg, isError = false) {
+    const el = document.getElementById("status");
+    el.className = isError ? "error" : "loading";
+    el.textContent = msg;
+    el.style.display = "";
+  }
+
+  function renderSummary(data) {
+
+const utxos = [...(data.utxos || [])].sort((a, b) => {
+  return (b.height || 0) - (a.height || 0) || (b.confirmations || 0) - (a.confirmations || 0);
+});
+
+const totalValue = data.confirmed_balance ?? utxos.reduce((sum, u) => sum + (u.value || 0), 0);
+const minedLifetime = data.mined_lifetime ?? 0;
+const minedUnspent = data.mined_unspent ?? utxos.filter(u => !!u.coinbase).reduce((sum, u) => sum + (u.value || 0), 0);
+const confirmed = utxos.filter(u => (u.confirmations || 0) > 0).length;
+const coinbaseUnspent = data.coinbase_unspent_outputs ?? utxos.filter(u => !!u.coinbase).length;
+const coinbaseLifetime = data.coinbase_lifetime_outputs ?? coinbaseUnspent;
+
+    document.getElementById("summary-kv").innerHTML = `
+      <div><b>Address:</b> <span class="mono">${esc(data.addr20)}</span></div>
+      <div><b>UTXO count:</b> ${esc(data.count)}</div>
+<div>
+  <b>Confirmed balance:</b> ${formatValue(totalValue)} <span class="muted">CSD</span>
+  <span class="small muted">(${esc(totalValue)} base units)</span>
+</div>
+
+
+<div>
+  <b>Mined lifetime:</b> ${formatValue(minedLifetime)} <span class="muted">CSD</span>
+  <span class="small muted">(${esc(minedLifetime)} base units)</span>
+</div>
+
+<div>
+  <b>Mined unspent:</b> ${formatValue(minedUnspent)} <span class="muted">CSD</span>
+  <span class="small muted">(${esc(minedUnspent)} base units)</span>
+</div>
+
+<div><b>Confirmed outputs:</b> ${esc(confirmed)}</div>
+<div><b>Coinbase outputs:</b> ${esc(coinbaseUnspent)} unspent / ${esc(coinbaseLifetime)} lifetime</div>
+
+    `;
+
+    document.getElementById("summary-section").style.display = "";
+  }
+
+  function renderUtxos(data) {
+
+const utxos = (data.utxos || []).slice(0, 25);
+const totalUtxos = (data.utxos || []).length;
+
+    const body = document.getElementById("utxo-body");
+
+    if (!utxos.length) {
+      body.innerHTML = `
+        <tr>
+          <td colspan="6" class="muted">No UTXOs found for this address.</td>
+        </tr>
+      `;
+    } else {
+      body.innerHTML = utxos.map(u => `
+        <tr>
+
+<td class="mono"><a href="/tx.html?txid=${encodeURIComponent(u.txid)}">${esc(shortHash(u.txid, 22))}</a></td>
+
+          <td>${esc(u.vout)}</td>
+
+<td>
+  ${formatValue(u.value)} <span class="muted">CSD</span><br>
+  <span class="small muted">${esc(u.value)}</span>
+</td>
+          <td>${esc(u.height)}</td>
+          <td>${esc(u.confirmations)}</td>
+          <td>${u.coinbase ? "yes" : "no"}</td>
+        </tr>
+      `).join("");
+    }
+
+if (totalUtxos > 25) {
+  body.innerHTML += `
+    <tr>
+      <td colspan="6" class="muted">
+        Showing latest 25 of ${esc(totalUtxos)} UTXOs.
+      </td>
+    </tr>
+  `;
+}
+
+    document.getElementById("utxo-section").style.display = "";
+  }
+
+function fmtTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  if (Number.isNaN(d.getTime())) return String(ts);
+  return d.toISOString().replace("T", " ").replace(".000Z", " UTC");
+}
+
+function formatDelta(v) {
+  const sign = v > 0 ? "+" : "";
+  return `${sign}${formatValue(v)} CSD`;
+}
+
+function renderActivity(data) {
+  const summary = document.getElementById("activity-summary");
+  const body = document.getElementById("activity-body");
+  const items = data.activity || [];
+
+  summary.innerHTML = `
+    <div><b>Proposals created:</b> ${esc(data.proposals_created || 0)}</div>
+    <div><b>Attestations submitted:</b> ${esc(data.attestations_submitted || 0)}</div>
+    <div>
+      <b>Total fees paid:</b> ${formatValue(data.total_fees_paid || 0)}
+      <span class="muted">CSD</span>
+      <span class="small muted">(${esc(data.total_fees_paid || 0)} base units)</span>
+    </div>
+  `;
+
+  if (!items.length) {
+    body.innerHTML = `
+      <tr>
+        <td colspan="5" class="muted">No historical activity found for this address.</td>
+      </tr>
+    `;
+  } else {
+    body.innerHTML = items.map(i => `
+      <tr>
+        <td>${esc(i.height)}</td>
+        <td>${esc(i.kind)}</td>
+        <td class="mono">
+          <a href="/tx.html?txid=${encodeURIComponent(i.txid)}">${esc(shortHash(i.txid, 22))}</a>
+        </td>
+        <td>${i.domain ? `<a href="/domain.html?name=${encodeURIComponent(i.domain)}">${esc(i.domain)}</a>` : '<span class="muted">—</span>'}</td>
+        <td>
+          ${formatDelta(i.value_delta || 0)}<br>
+          <span class="small muted">${esc(i.value_delta || 0)} base units</span>
+        </td>
+      </tr>
+    `).join("");
+  }
+
+  document.getElementById("activity-section").style.display = "";
+}
+
+  async function loadAddress() {
+    const raw = document.getElementById("addr").value;
+    const hex = normalizeHex(raw);
+
+    document.getElementById("summary-section").style.display = "none";
+    document.getElementById("utxo-section").style.display = "none";
+
+const activitySection = document.getElementById("activity-section");
+if (activitySection) activitySection.style.display = "none";
+
+    if (!hex) {
+      setStatus("Enter an addr20 value.");
+      return;
+    }
+
+    if (!isHex20(hex)) {
+      setStatus("Address must be 20-byte hex.", true);
+      return;
+    }
+
+    setStatus("Loading address…");
+
+    try {
+      const data = await getJSON(`/utxos/0x${hex}`);
+
+      if (!data.ok) {
+        setStatus("Address lookup failed.", true);
+        return;
+      }
+
+renderSummary(data);
+renderUtxos(data);
+
+try {
+
+const activity = await getJSON(`/address/0x${hex}/activity?limit=100&include_mined=false`);
+
+  if (activity.ok) renderActivity(activity);
+} catch (_) {}
+
+document.getElementById("status").style.display = "none";
+
+    } catch (err) {
+      setStatus(`Error loading address: ${err.message || err}`, true);
+    }
+  }
+
+  document.getElementById("loadBtn").addEventListener("click", loadAddress);
+  document.getElementById("addr").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadAddress();
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  const addr = params.get("addr");
+  if (addr) {
+    document.getElementById("addr").value = addr;
+    loadAddress();
+  }
+</script>
+</body>
+</html>
+

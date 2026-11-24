@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+  <link rel="stylesheet" href="/explorer.css">
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+  <p class="small" style="font-size:18px; margin-bottom:22px;">Attestation weight, active memory, and raw support signals.</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+  <p class="small note">
+    Attestations are support signals. Ranking is based on economic weight: total attestation fees. Raw score and confidence are expressive metadata and do not imply correctness, truth, or authority.
+  </p>
+
+  <h2>Active Top Proposals</h2>
+  <p class="small note">
+    Unexpired proposals ranked by accumulated economic weight.
+  </p>
+  <div id="active-top" class="loading">Loading active top...</div>
+
+  <h2>Current Epoch Top</h2>
+  <p class="small note">
+    Current epoch ranking across all domains by economic weight.
+  </p>
+  <div id="current-top" class="loading">Loading current epoch top...</div>
+
+  <h2>All-Time Top</h2>
+  <p class="small note">
+    Historical accumulated economic weight across all proposals.
+  </p>
+  <div id="all-time-top" class="loading">Loading all-time top...</div>
+
+  <h2>Recent Attestation Activity</h2>
+  <p class="small note">
+    Raw recent attestation aggregates scanned from blocks. This is an activity feed, not the canonical ranking view.
+  </p>
+
+  <div class="controls">
+    <label for="domain" class="small muted">Domain:</label>
+    <select id="domain">
+      <option value="">All</option>
+    </select>
+
+    <label for="limit" class="small muted">Limit:</label>
+    <select id="limit">
+      <option value="10">10</option>
+      <option value="25" selected>25</option>
+      <option value="50">50</option>
+      <option value="100">100</option>
+    </select>
+
+    <button id="reloadBtn">Reload</button>
+  </div>
+
+  <div id="status" class="loading">Loading attestations…</div>
+
+  <div id="activity-section" style="display:none;">
+    <table>
+      <thead>
+        <tr>
+          <th>Proposal</th>
+          <th>Domain</th>
+          <th>Attests</th>
+          <th>Raw score</th>
+          <th>Raw confidence</th>
+          <th>Payload hash</th>
+          <th>URI</th>
+          <th>Expires</th>
+        </tr>
+      </thead>
+      <tbody id="attestations-body"></tbody>
+    </table>
+  </div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+
+
+const DECIMALS = 8;
+
+function formatValue(v) {
+  const coins = Number(v || 0) / 1e8;
+  return coins.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 8
+  });
+}
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function shortHash(h, n = 18) {
+    if (!h) return "";
+    return h.length > n ? h.slice(0, n) + "…" : h;
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function renderError(id, err) {
+    const el = document.getElementById(id);
+    el.className = "error";
+    el.textContent = `Error: ${err.message || err}`;
+  }
+
+  function renderTopTable(id, data) {
+    const el = document.getElementById(id);
+    const items = data.top || [];
+
+    el.className = "";
+
+    if (!items.length) {
+      el.innerHTML = `<p class="small muted">No entries found.</p>`;
+      return;
+    }
+
+    const rows = items.slice(0, 25).map(i => `
+      <tr>
+        <td class="mono">
+          <a href="/proposal.html?id=${encodeURIComponent(i.proposal_id)}">${esc(shortHash(i.proposal_id, 22))}</a>
+        </td>
+        <td>${esc(i.domain)}</td>
+
+<td>
+  ${formatValue(i.economic_weight)} <span class="muted">CSD</span><br>
+  <span class="small muted">${esc(i.economic_weight)} base units</span>
+</td>
+        <td>${esc(i.attest_count ?? "")}</td>
+        <td>${esc(i.raw_score_sum ?? "")}</td>
+        <td>${esc(i.raw_confidence_sum ?? "")}</td>
+        <td>${esc(i.expires_epoch ?? "")}</td>
+      </tr>
+    `).join("");
+
+    el.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Proposal</th>
+            <th>Domain</th>
+            <th>Economic Weight</th>
+            <th>Attests</th>
+            <th>Raw score</th>
+            <th>Raw confidence</th>
+            <th>Expires</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  async function loadTopViews() {
+    try {
+      const data = await getJSON("/top/active");
+      renderTopTable("active-top", data);
+    } catch (err) {
+      renderError("active-top", err);
+    }
+
+    try {
+      const data = await getJSON("/top/global");
+      renderTopTable("current-top", data);
+    } catch (err) {
+      renderError("current-top", err);
+    }
+
+    try {
+      const data = await getJSON("/top/all-time");
+      renderTopTable("all-time-top", data);
+    } catch (err) {
+      renderError("all-time-top", err);
+    }
+  }
+
+  async function loadDomains() {
+    try {
+      const data = await getJSON("/domains");
+      const select = document.getElementById("domain");
+
+      const domains = data.domains || [];
+      for (const d of domains) {
+        const opt = document.createElement("option");
+        opt.value = d.domain;
+        opt.textContent = d.domain;
+        select.appendChild(opt);
+      }
+    } catch (_) {}
+  }
+
+  function renderActivity(data) {
+    const body = document.getElementById("attestations-body");
+    const items = data.items || [];
+
+    if (!items.length) {
+      body.innerHTML = `
+        <tr>
+          <td colspan="8" class="muted">No recent attestation activity found.</td>
+        </tr>
+      `;
+      return;
+    }
+
+    body.innerHTML = items.map(i => `
+      <tr>
+        <td class="mono">
+          <a href="/proposal.html?id=${encodeURIComponent(i.proposal_id)}">${esc(shortHash(i.proposal_id, 22))}</a>
+        </td>
+        <td>${esc(i.domain)}</td>
+        <td>${esc(i.attest_count)}</td>
+        <td>${esc(i.score_sum)}</td>
+        <td>${esc(i.confidence_sum)}</td>
+        <td class="mono">${esc(shortHash(i.payload_hash, 22))}</td>
+        <td>
+          <a href="${esc(i.uri)}" target="_blank" rel="noopener noreferrer">${esc(i.uri)}</a>
+        </td>
+        <td>${esc(i.expires_epoch)}</td>
+      </tr>
+    `).join("");
+  }
+
+  async function loadActivity() {
+    const status = document.getElementById("status");
+    const domain = document.getElementById("domain").value;
+    const limit = document.getElementById("limit").value;
+
+    status.className = "loading";
+    status.textContent = "Loading attestations…";
+    status.style.display = "";
+    document.getElementById("activity-section").style.display = "none";
+
+    try {
+      const path = domain
+        ? `/recent/attestations/${encodeURIComponent(domain)}/${encodeURIComponent(limit)}`
+        : `/recent/attestations/${encodeURIComponent(limit)}`;
+
+      const data = await getJSON(path);
+
+      if (!data.ok) {
+        status.className = "error";
+        status.textContent = "Failed to load attestation activity.";
+        return;
+      }
+
+      status.style.display = "none";
+      document.getElementById("activity-section").style.display = "";
+      renderActivity(data);
+    } catch (err) {
+      status.className = "error";
+      status.textContent = "Error loading attestations: " + (err.message || err);
+    }
+  }
+
+  document.getElementById("reloadBtn").addEventListener("click", () => {
+    loadTopViews();
+    loadActivity();
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  const qDomain = params.get("domain");
+  const qLimit = params.get("limit");
+
+  if (qLimit) document.getElementById("limit").value = qLimit;
+
+  loadDomains().then(() => {
+    if (qDomain) document.getElementById("domain").value = qDomain;
+    loadActivity();
+  });
+
+  loadTopViews();
+</script>
+</body>
+</html>

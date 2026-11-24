@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Proposals</title>
+
+<link rel="stylesheet" href="/explorer.css">
+
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+  <p class="small" style="font-size:18px; margin-bottom:22px;">Recent speculative proposals recorded on-chain.</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+
+  <p class="small note">
+    Proposals are recorded computation only. Inclusion does not imply correctness, endorsement, or authority.
+  </p>
+
+  <div class="controls">
+    <label for="domain" class="small muted">Domain:</label>
+    <select id="domain">
+      <option value="">All</option>
+      <option value="finance">finance</option>
+      <option value="science">science</option>
+      <option value="systems">systems</option>
+      <option value="meta">meta</option>
+    </select>
+
+    <label for="limit" class="small muted">Limit:</label>
+    <select id="limit">
+      <option value="10">10</option>
+      <option value="25">25</option>
+      <option value="50">50</option>
+<option value="100">100</option>
+<option value="250" selected>250</option>
+<option value="500">500</option>
+    </select>
+
+    <button id="reloadBtn">Reload</button>
+  </div>
+
+  <div id="status" class="loading">Loading proposals…</div>
+
+  <div id="proposals-section" style="display:none;">
+    <h2>Proposals</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Proposal</th>
+          <th>Domain</th>
+          <th>Height</th>
+          <th>Time</th>
+          <th>Payload hash</th>
+	<th>Context</th>
+	<th>URI</th>
+          <th>Expires epoch</th>
+        </tr>
+      </thead>
+      <tbody id="proposals-body"></tbody>
+    </table>
+  </div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = "";
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function shortHash(h, n = 18) {
+    if (!h) return "";
+    return h.length > n ? h.slice(0, n) + "…" : h;
+  }
+
+function displayUri(uri, n = 46) {
+  try {
+    const u = new URL(uri);
+    const clean = (u.hostname + u.pathname).replace(/\/$/, "");
+    return clean.length > n ? clean.slice(0, n) + "…" : clean;
+  } catch (_) {
+    const s = String(uri || "");
+    return s.length > n ? s.slice(0, n) + "…" : s;
+  }
+}
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return d.toISOString().replace("T", " ").replace(".000Z", " UTC");
+  }
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+function titleFromUri(uri) {
+  try {
+    const u = new URL(uri);
+    const last = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
+    return last
+      .replaceAll("-", " ")
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, c => c.toUpperCase());
+  } catch (_) {
+    return String(uri || "").slice(0, 80);
+  }
+}
+
+async function fetchTitleMaybe(uri) {
+  try {
+    const r = await fetch(uri, { method: "GET" });
+    if (!r.ok) return null;
+
+    const ct = r.headers.get("content-type") || "";
+    if (!ct.includes("text/html") && !ct.includes("text/plain")) return null;
+
+    const text = await r.text();
+
+    const title =
+      text.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+
+    return title ? title.trim() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchSummaryMaybe(uri) {
+  try {
+    const r = await fetch(uri, { method: "GET" });
+    if (!r.ok) return null;
+
+    const ct = r.headers.get("content-type") || "";
+    if (!ct.includes("text/html") && !ct.includes("text/plain")) return null;
+
+    const text = await r.text();
+
+    const summary =
+      text.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<meta[^>]+name=["']twitter:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || text.match(/<p[^>]*>(.*?)<\/p>/is)?.[1];
+
+    if (!summary) return null;
+
+    return summary
+      .replace(/<[^>]+>/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function hydrateProposalContext(proposals) {
+  for (const p of proposals) {
+    const titleEl = document.querySelector(`[data-title-for="${CSS.escape(p.proposal_id)}"]`);
+    const summaryEl = document.querySelector(`[data-summary-for="${CSS.escape(p.proposal_id)}"]`);
+
+    const [title, summary] = await Promise.all([
+      fetchTitleMaybe(p.uri),
+      fetchSummaryMaybe(p.uri)
+    ]);
+
+    if (title && titleEl) titleEl.textContent = title;
+    if (summary && summaryEl) summaryEl.textContent = summary;
+  }
+}
+  function renderTable(data) {
+    const body = document.getElementById("proposals-body");
+    const proposals = data.proposals || [];
+
+    if (!proposals.length) {
+      body.innerHTML = `
+        <tr>
+          <td colspan="8" class="muted">No proposals found.</td>
+        </tr>
+      `;
+      return;
+    }
+
+    body.innerHTML = proposals.map(p => `
+      <tr>
+        <td class="mono">
+          <a href="/proposal.html?id=${encodeURIComponent(p.proposal_id)}">${esc(shortHash(p.proposal_id, 22))}</a>
+        </td>
+        <td>${esc(p.domain)}</td>
+        <td>${esc(p.height)}</td>
+        <td>${esc(fmtTime(p.time))}</td>
+<td class="mono">${esc(shortHash(p.payload_hash, 22))}</td>
+
+<td>
+  <div>
+    <b data-title-for="${esc(p.proposal_id)}">${esc(titleFromUri(p.uri))}</b>
+  </div>
+  <div class="small muted" data-summary-for="${esc(p.proposal_id)}"></div>
+  <div class="small muted">${esc(p.domain)}</div>
+</td>
+
+<td class="small">
+  <a
+    href="${esc(p.uri)}"
+    title="${esc(p.uri)}"
+    target="_blank"
+    rel="noopener noreferrer"
+  >${esc(displayUri(p.uri))}</a>
+</td>
+<td>${esc(p.expires_epoch)}</td>
+
+      </tr>
+    `).join("");
+hydrateProposalContext(proposals);
+  }
+
+  async function load() {
+    const status = document.getElementById("status");
+    const domain = document.getElementById("domain").value;
+    const limit = document.getElementById("limit").value;
+
+    status.className = "loading";
+    status.textContent = "Loading proposals…";
+    document.getElementById("proposals-section").style.display = "none";
+
+    try {
+      let path;
+if (domain) {
+  path = `/proposals/${encodeURIComponent(domain)}/${encodeURIComponent(limit)}`;
+} else {
+  path = `/proposals/${encodeURIComponent(limit)}`;
+}
+      const data = await getJSON(path);
+
+      if (!data.ok) {
+        status.className = "error";
+        status.textContent = "Failed to load proposals.";
+        return;
+      }
+
+      status.style.display = "none";
+      document.getElementById("proposals-section").style.display = "";
+      renderTable(data);
+    } catch (err) {
+      status.className = "error";
+      status.textContent = "Error loading proposals: " + (err.message || err);
+    }
+  }
+
+  document.getElementById("reloadBtn").addEventListener("click", load);
+
+  const params = new URLSearchParams(window.location.search);
+  const qDomain = params.get("domain");
+  const qLimit = params.get("limit");
+
+  if (qDomain) document.getElementById("domain").value = qDomain;
+  if (qLimit) document.getElementById("limit").value = qLimit;
+
+requestAnimationFrame(load);
+</script>
+</body>
+</html>

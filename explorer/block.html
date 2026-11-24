@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Compute Substrate Explorer</title>
+
+<link rel="stylesheet" href="/explorer.css">
+
+</head>
+<body>
+<main>
+  <h1>Compute Substrate Explorer</h1>
+  <p class="small" style="font-size:18px; margin-bottom:22px;">Block view.</p>
+
+  <p class="nav">
+    <a href="/">Overview</a>
+    <a href="/blocks.html">Blocks</a>
+    <a href="/proposals.html">Proposals</a>
+    <a href="/attestations.html">Attestations</a>
+    <a href="/domains.html">Domains</a>
+    <a href="/search.html">Search</a>
+    <a href="http://explorer.computesubstrate.org">Explorer</a>
+    <a href="http://computesubstrate.org">Main site</a>
+  </p>
+
+ 
+
+  <div id="status" class="loading">Loading block…</div>
+
+  <div id="block-header" style="display:none;">
+    <h2>Block</h2>
+    <div id="block-kv" class="kv"></div>
+  </div>
+
+  <div id="genesis-section" style="display:none;">
+    <h2>Genesis</h2>
+    <p class="small muted">
+      Block 0 is the network’s origin point. If a printable epigraph exists in the coinbase input,
+      it is shown below.
+    </p>
+
+    <div id="epigraph-box" class="box" style="display:none;">
+      <h3>Epigraph</h3>
+      <pre id="epigraph-text"></pre>
+    </div>
+
+    <div id="genesis-raw-box" class="box" style="display:none;">
+      <h3>Genesis Input Data</h3>
+      <div id="genesis-raw" class="mono"></div>
+    </div>
+  </div>
+
+  <div id="transactions-section" style="display:none;">
+    <h2>Transactions</h2>
+    <div id="transactions"></div>
+  </div>
+
+  <div class="small muted" style="margin-top: 30px;">
+    Static explorer. No cookies. No authority.
+  </div>
+</main>
+
+<script src="/node.js"></script>
+<script>
+  const API = ""; // same-origin
+  const params = new URLSearchParams(window.location.search);
+  const blockHash = params.get("hash");
+
+
+
+const DECIMALS = 8;
+
+function formatValue(v) {
+  const coins = v / 1e8;
+  return coins.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 8
+  });
+}
+
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function shortHash(s, n = 20) {
+    if (!s) return "";
+    return s.length > n ? s.slice(0, n) + "…" : s;
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return d.toISOString().replace("T", " ").replace(".000Z", " UTC");
+  }
+
+function bitsToHex(bits) {
+  return "0x" + Number(bits).toString(16);
+}
+
+  async function getJSON(path) {
+    const r = await csdFetch(path, { headers: { "accept": "application/json" } });
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    return r.json();
+  }
+
+  function renderHeader(data) {
+    const kv = document.getElementById("block-kv");
+    const h = data.header || {};
+
+    kv.innerHTML = `
+      <div><b>Hash:</b> <span class="mono">${esc(data.hash)}</span></div>
+      <div><b>Height:</b> ${data.height === null ? '<span class="muted">unknown</span>' : esc(data.height)}</div>
+      <div><b>Chainwork:</b> ${data.chainwork ? `<span class="mono">${esc(data.chainwork)}</span>` : '<span class="muted">unknown</span>'}</div>
+      <div><b>Previous block:</b> <span class="mono">${esc(h.prev || "")}</span></div>
+      <div><b>Merkle root:</b> <span class="mono">${esc(h.merkle || "")}</span></div>
+      <div><b>Time:</b> ${esc(fmtTime(h.time))}</div>
+<div><b>Bits:</b> <span class="mono">${esc(bitsToHex(h.bits))}</span></div>
+      <div><b>Nonce:</b> ${esc(h.nonce)}</div>
+      <div><b>Version:</b> ${esc(h.version)}</div>
+      <div><b>Transaction count:</b> ${esc((data.txs || []).length)}</div>
+    `;
+
+    document.getElementById("block-header").style.display = "";
+  }
+
+  function findGenesisEpigraph(txs) {
+    if (!Array.isArray(txs) || !txs.length) return null;
+    const coinbase = txs[0];
+    if (!coinbase || !Array.isArray(coinbase.inputs) || !coinbase.inputs.length) return null;
+
+    const inp = coinbase.inputs[0];
+    const txt = inp.script_sig_text;
+    const raw = inp.script_sig;
+
+    return {
+      text: txt && txt.trim() ? txt : null,
+      raw: raw || null
+    };
+  }
+
+  function renderGenesis(data) {
+    if (data.height !== 0) return;
+
+    document.getElementById("genesis-section").style.display = "";
+
+    const epi = findGenesisEpigraph(data.txs || []);
+
+    if (epi && epi.text) {
+      document.getElementById("epigraph-box").style.display = "";
+      document.getElementById("epigraph-text").textContent = epi.text;
+    }
+
+    if (epi && epi.raw) {
+      document.getElementById("genesis-raw-box").style.display = "";
+      document.getElementById("genesis-raw").textContent = epi.raw;
+    }
+  }
+
+function renderTransactions(data) {
+
+    const wrap = document.getElementById("transactions");
+
+    const txs = data.txs || [];
+
+    if (!txs.length) {
+
+      wrap.innerHTML = `<p class="small muted">No transactions found.</p>`;
+
+      document.getElementById("transactions-section").style.display = "";
+
+      return;
+
+    }
+
+    function isAddr20(s) {
+
+      return /^0x[0-9a-f]{40}$/i.test(String(s || ""));
+
+    }
+
+    wrap.innerHTML = txs.map((tx, idx) => {
+
+      const inputs = Array.isArray(tx.inputs)
+
+        ? tx.inputs.map((inp, i) => {
+
+            const isCoinbase =
+
+              (inp.prev_txid || "") === "0x0000000000000000000000000000000000000000000000000000000000000000" &&
+
+              Number(inp.vout) === 4294967295;
+
+            return `
+
+              <tr>
+
+                <td>${i}</td>
+
+                <td class="mono">${isCoinbase ? '<span class="muted">coinbase</span>' : esc(inp.prev_txid || "")}</td>
+
+                <td>${isCoinbase ? '<span class="muted">—</span>' : esc(inp.vout)}</td>
+
+                <td class="mono">${esc(inp.script_sig || "")}</td>
+
+              </tr>
+
+            `;
+
+          }).join("")
+
+        : `<tr><td colspan="4" class="muted">Input detail not exposed by API.</td></tr>`;
+
+      const outputs = Array.isArray(tx.outputs)
+
+        ? tx.outputs.map((out, i) => `
+
+            <tr>
+
+              <td>${i}</td>
+
+              <td>
+
+                ${formatValue(out.value)} <span class="muted">CSD</span><br>
+
+                <span class="small muted">${esc(out.value)}</span>
+
+              </td>
+
+              <td class="mono">
+
+                ${
+
+                  isAddr20(out.script_pubkey)
+
+                    ? `<a href="/address.html?addr=${encodeURIComponent(out.script_pubkey)}">${esc(out.script_pubkey)}</a>`
+
+                    : esc(out.script_pubkey || "")
+
+                }
+
+              </td>
+
+            </tr>
+
+          `).join("")
+
+        : "";
+
+      return `
+
+        <div class="tx">
+
+          <h3>Transaction ${idx}</h3>
+
+          <div class="kv">
+
+            <div><b>Txid:</b> <a class="mono" href="/tx.html?txid=${encodeURIComponent(tx.txid || "")}">${esc(tx.txid || "")}</a></div>
+
+            <div><b>Version:</b> ${esc(tx.version)}</div>
+
+            <div><b>Locktime:</b> ${esc(tx.locktime)}</div>
+
+            <div><b>App:</b> <span class="mono">${esc(typeof tx.app === "string" ? tx.app : JSON.stringify(tx.app))}</span></div>
+
+          </div>
+
+          <p><b>Inputs</b></p>
+
+          <table>
+
+            <thead>
+
+              <tr>
+
+                <th>#</th>
+
+                <th>Prev txid</th>
+
+                <th>Vout</th>
+
+                <th>Script sig</th>
+
+              </tr>
+
+            </thead>
+
+            <tbody>${inputs}</tbody>
+
+          </table>
+
+          <p><b>Outputs</b></p>
+
+          <table>
+
+            <thead>
+
+              <tr>
+
+                <th>#</th>
+
+                <th>Value</th>
+
+                <th>Script pubkey</th>
+
+              </tr>
+
+            </thead>
+
+            <tbody>${outputs}</tbody>
+
+          </table>
+
+        </div>
+
+      `;
+
+    }).join("");
+
+    document.getElementById("transactions-section").style.display = "";
+
+  
+
+  }
+
+  async function init() {
+    const status = document.getElementById("status");
+
+    if (!blockHash) {
+      status.className = "error";
+      status.textContent = "Missing block hash. Use /block.html?hash=0x...";
+      return;
+    }
+
+    try {
+      const data = await getJSON(`/block/${encodeURIComponent(blockHash)}`);
+
+      if (!data.ok) {
+        status.className = "error";
+        status.textContent = `Block not found or invalid: ${data.header?.err || "unknown error"}`;
+        return;
+      }
+
+      status.style.display = "none";
+      renderHeader(data);
+      renderGenesis(data);
+      renderTransactions(data);
+    } catch (err) {
+      status.className = "error";
+      status.textContent = `Error loading block: ${err.message || err}`;
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>
