@@ -89,15 +89,16 @@ export async function balance(node: string, address: Hex): Promise<number> {
 }
 
 // A newcomer's welcome: one of the invites people left in the shared pool, onto this key
-export async function welcomeKey(node: string, address: Hex): Promise<number | null> {
+// "has": the key holds something already; "none": nobody has left an invite just now
+export async function welcomeKey(node: string, address: Hex): Promise<number | "has" | "none"> {
   const net = connect({ node });
-  if ((await net.api.utxos(address)).length) return null;
+  if ((await net.api.utxos(address)).length) return "has";
   const open = await openInvites(net as any);
   while (open.length) {
     const [pick] = open.splice(Math.floor(Math.random() * open.length), 1);
     try { return (await claimInvite(net as any, pick.code, address)).csd; } catch { /* taken a moment ago */ }
   }
-  return null;
+  return "none";
 }
 
 // Words for what a site asks

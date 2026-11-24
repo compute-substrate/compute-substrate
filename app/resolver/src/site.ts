@@ -92,7 +92,10 @@ export async function fetchSite(cid: string, doors: string[] = []): Promise<{ fi
       ...GATEWAYS.map((g, i) => attempt(`${g}/ipfs/${cid}?format=car`, (doors.length ? FALLBACK_AFTER : 0) + i * 2_000)),
     ]);
   } catch {
-    throw new Error(`No door or gateway sent this site intact (${errors.filter(e => !/stopped|fetch/i.test(e))[0] ?? "no answer"}). If it was just published, give it a couple of minutes: Doorway hands it to the doors once its name points to it, or anyone keeps it.`);
+    console.warn("site not fetched:", cid, errors);
+    throw new Error(errors.some(e => /answered 404/.test(e))
+      ? "This site isn't on the doors yet. If it was just put up, it gets there within a few minutes, from the Doorway that put it up."
+      : "No door sent this site just now.");
   } finally { stop.abort(); }
 }
 

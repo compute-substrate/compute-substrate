@@ -592,9 +592,12 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
         (None, Some(NameAnswer::Go(url))) => {
             let _ = req.respond(tiny_http::Response::empty(302).with_header(tiny_http::Header::from_bytes(&b"Location"[..], url.as_bytes()).unwrap()));
         }
-        (None, Some(NameAnswer::Why(why))) => {
+        (None, Some(NameAnswer::Why(why, again))) => {
             let esc = why.replace('&', "&amp;").replace('<', "&lt;");
-            let _ = req.respond(tiny_http::Response::from_string(format!(r#"<!doctype html><meta charset="utf-8"><title>{name}.csd</title><style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555}}</style><p>{esc}</p>"#))
+            // something that sorts itself out (a site on its way to the doors, a node catching up):
+            // the page asks again by itself
+            let (refresh, more) = if again { (r#"<meta http-equiv="refresh" content="20">"#, "<br><small>This page tries again by itself.</small>") } else { ("", "") };
+            let _ = req.respond(tiny_http::Response::from_string(format!(r#"<!doctype html><meta charset="utf-8"><title>{name}.csd</title>{refresh}<style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555;padding:0 24px;text-align:center}}</style><p>{esc}{more}</p>"#))
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap()));
             // asked again later: the name may have been registered or pointed somewhere since
@@ -1028,7 +1031,8 @@ struct Sites {
 #[derive(Clone)]
 enum NameAnswer {
     Go(String),
-    Why(String),
+    // why it can't open, and whether that may pass by itself
+    Why(String, bool),
 }
 
 #[derive(serde::Deserialize, Serialize)]
@@ -1388,10 +1392,10 @@ fn site_car(app: tauri::AppHandle, cid: String) -> Result<tauri::ipc::Response, 
 
 // What <name>.localhost should answer for a name with no site: a link (`go`), or why there's nothing
 #[tauri::command]
-fn name_answer(sites: tauri::State<'_, Sites>, name: String, go: Option<String>, why: Option<String>) -> Result<(), String> {
+fn name_answer(sites: tauri::State<'_, Sites>, name: String, go: Option<String>, why: Option<String>, again: Option<bool>) -> Result<(), String> {
     let a = match (go, why) {
         (Some(u), _) if u.starts_with("https://") || u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1") => NameAnswer::Go(u),
-        (_, Some(w)) => NameAnswer::Why(w),
+        (_, Some(w)) => NameAnswer::Why(w, again.unwrap_or(false)),
         _ => return Err("nothing to answer".into()),
     };
     sites.answers.lock().unwrap().insert(name, a);

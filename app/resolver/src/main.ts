@@ -125,18 +125,20 @@ export async function allEvents(tip: number, base = NODE): Promise<any[]> {
 
 // ── through the doors, while this computer's node catches up ────────────────
 // Whether this computer's own node has caught up with the network: then it's the one to read.
-export async function ownNodeReady(): Promise<boolean> {
+// Caught up: as far as its peers and as far as the doors. Its peers alone aren't enough: a node
+// still syncing can be connected only to peers that are behind too, and then looks finished
+export async function ownNodeReady(doorTop = 0): Promise<boolean> {
   try {
     const h = await getJson(`${NODE}/health`, 4_000);
-    return !!h && h.peer_count > 0 && h.best_peer_height != null && h.best_peer_height <= h.height + 1;
+    return !!h && h.peer_count > 0 && h.best_peer_height != null && h.best_peer_height <= h.height + 1 && h.height + 2 >= doorTop;
   } catch { return false; }
 }
-// The doors that answer, highest first (each one only ever a source of things to check)
-async function answering(doors: string[]): Promise<string[]> {
+// The doors that answer, highest first, with their heights (each one only ever a source of things to check)
+async function answeringAt(doors: string[]): Promise<{ d: string; h: number }[]> {
   const r = await Promise.all(doors.map(async d => {
     try { const t = await getJson(`${d}/tip`, 6_000); return Number.isSafeInteger(t?.height) ? { d, h: t.height as number } : null; } catch { return null; }
   }));
-  return r.filter((x): x is { d: string; h: number } => !!x).sort((a, b) => b.h - a.h).map(x => x.d);
+  return r.filter((x): x is { d: string; h: number } => !!x).sort((a, b) => b.h - a.h);
 }
 type Light = ReturnType<typeof lightClient>;
 const lights = new Map<string, Light>();
@@ -193,8 +195,9 @@ export type NameRead = { name: string; why?: string; st?: any; free?: boolean; t
 export async function readName(input: string, opts: { doors?: string[]; web?: boolean } = {}): Promise<NameRead> {
   const name = input.trim().toLowerCase().replace(/^web\+csd:(\/\/)?/, "").replace(/\.csd$/, "").replace(/\/+$/, "");
   if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name.", tip: 0, via: "" };
-  const own = opts.web ? false : await ownNodeReady();
-  const doors = own ? [] : await answering(opts.doors ?? []);
+  const at = await answeringAt(opts.doors ?? []);
+  const own = opts.web ? false : await ownNodeReady(at[0]?.h ?? 0);
+  const doors = own ? [] : at.map(x => x.d);
   if (!own && !doors.length && opts.web) throw new Error("No door answered just now. Try again in a minute.");
   if (!own && !doors.length) {
     // nothing else answers: this computer's node, however far it has got
@@ -213,7 +216,7 @@ export async function readName(input: string, opts: { doors?: string[]; web?: bo
     events = [];
     for (const e of h.events) {
       const p = await getJson(`${NODE}/proof/tx/${String(e.txid).replace(/^0x/, "")}`);
-      if (!p?.ok) throw new Error("Your node doesn't have one of this name's records. Is it synced?");
+      if (!p?.ok) throw new Error("This computer's copy of the network hasn't reached this name yet. Try again in a few minutes.");
       const ev = eventOf(String(e.txid), parseTx(hex(p.tx_raw)), p.height, p.tx_index);
       if (ev) events.push(ev);
     }

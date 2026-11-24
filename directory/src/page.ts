@@ -15,11 +15,16 @@ const HEART = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 
 const asked = new URLSearchParams(location.search).get("node");
 // Opened in Doorway: this computer's own node, once it has caught up, is the fastest to read
 const OWN_NODE = "http://127.0.0.1:8789";
+// caught up: as far as its peers and as far as a door (a node still syncing can see only peers that
+// are behind too)
 async function ownNodeReady(): Promise<boolean> {
   if (!location.hostname.endsWith(".localhost")) return false;
   try {
-    const h = await (await fetch(`${OWN_NODE}/health`, { signal: AbortSignal.timeout(3000) })).json();
-    return h.peer_count > 0 && h.best_peer_height != null && h.best_peer_height <= h.height + 1;
+    const [h, top] = await Promise.all([
+      fetch(`${OWN_NODE}/health`, { signal: AbortSignal.timeout(3000) }).then(r => r.json()),
+      Promise.any(DOORS.map(d => fetch(`${d.replace(/\/$/, "")}/tip`, { signal: AbortSignal.timeout(4000) }).then(r => r.json()).then(t => Number(t.height) || 0))).catch(() => 0),
+    ]);
+    return h.peer_count > 0 && h.best_peer_height != null && h.best_peer_height <= h.height + 1 && h.height + 2 >= top;
   } catch { return false; }
 }
 async function pickNode(): Promise<string> {
