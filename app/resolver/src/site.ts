@@ -93,7 +93,7 @@ export async function fetchSite(cid: string, doors: string[] = []): Promise<{ fi
     ]);
   } catch {
     console.warn("site not fetched:", cid, errors);
-    throw new Error(errors.some(e => /answered 404/.test(e))
+    throw new Error(errors.length && errors.filter(e => !/stopped/i.test(e)).every(e => /answered 404/.test(e))
       ? "This site isn't on the doors yet. If it was just put up, it gets there within a few minutes, from the Doorway that put it up."
       : "No door sent this site just now.");
   } finally { stop.abort(); }
