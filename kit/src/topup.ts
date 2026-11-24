@@ -213,11 +213,11 @@ export async function topUp(args: { provider: Provider; buyer: Address; key: Csd
   const { read, wallet } = eth(provider);
   const sign: Signer = args.sign ?? (a => wallet.signTypedData({ account: buyer, ...a } as any) as Promise<Hex>);
   if (((await read.readContract({ address: USDC, abi: usdcAbi, functionName: "balanceOf", args: [buyer] })) as bigint) < spend) throw new Error("NOT_ENOUGH_USDC");
-  // the easiest CSD difficulty a payment proof may use: the real one with 10% slack, from the
+  // the easiest CSD difficulty a payment proof may use: the real one with a quarter's slack, from the
   // CSD node this page reads, not from the maker (easier would make fake CSD blocks cheap)
   const tip = await csdNode.tip();
   const bits = Number((await csdNode.header(tip.height)).bits);
-  const csdMaxTarget = bitsToTarget(bits) * 11n / 10n;
+  const csdMaxTarget = bitsToTarget(bits) * 4n / 3n; // (the market maker's own suggestion: a 3/4 difficulty, so a normal swing still counts)
 
   const tried = new Set<string>();
   let declined = "";
