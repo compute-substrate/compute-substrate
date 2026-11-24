@@ -2,7 +2,7 @@
 import { wallet } from "../src/main";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3";
-import { hexToBytes, bytesToHex, concat, utf8, keyFromPrivate } from "../../../kit/src/core";
+import { hexToBytes, bytesToHex, concat, utf8, keyFromPrivate, buildAppTx, serializeTx, txid } from "../../../kit/src/core";
 import { resolve } from "@inversealtruism/cairnx-core";
 
 let failures = 0;
@@ -69,5 +69,22 @@ ok(keyFromPrivate(hexToBytes(key as any)).addr20 === address, "and it's this add
   ok(refusedLost && st.owner === other, "outbid by an earlier commit: no finalize, so no fee lost");
   const n = wallet.renewAsk(name, T + 100);
   ok(n.pay && n.pay.value === 300_000_000n && JSON.parse(n.app.kind === "propose" ? n.app.uri : "{}").t === "nrenew", "another year is a renewal with the fee");
+}
+// step 3 reads the reservation straight from a node's records (real signed transactions, as a
+// node serves them), so it sees step 2 even when the name server doesn't list the name yet
+{
+  const { key: k2, address: me2 } = wallet.newKey();
+  const ck = keyFromPrivate(hexToBytes(k2 as any));
+  const coin = (i: number) => [{ txid: ("0x" + String(i).padStart(64, "0")) as any, vout: 0, value: 100_000_000n }];
+  const H = 148_500, salt = wallet.newSalt(), name = "doorwaytest2";
+  const txs = [
+    { h: H, a: wallet.commitAsk(name, salt, me2 as any, H) },
+    { h: H + 1, a: wallet.revealAsk(name, salt, H + 1) },
+  ].map(({ h, a }, i) => { const tx = buildAppTx(coin(i + 1), ck, a.app, a.fee); return { txid: txid(tx), height: h, pos: 1, tx_raw: bytesToHex(serializeTx(tx)) }; });
+  (globalThis as any).fetch = async () => new Response(JSON.stringify({ ok: true, events: txs }));
+  const st = await wallet.reservation("http://node.test", name, H, H + wallet.FINALIZE_FROM);
+  ok(st?.pending && st.owner.toLowerCase() === me2.toLowerCase(), "the node's own records show the reservation as ours");
+  let ok3 = true; try { wallet.finalizeAsk(name, salt, st, me2 as any, H, H + wallet.FINALIZE_FROM); } catch { ok3 = false; }
+  ok(ok3, "so step 3 goes ahead");
 }
 console.log(failures ? `\n${failures} failed` : "\nall passed"); process.exit(failures ? 1 : 0);

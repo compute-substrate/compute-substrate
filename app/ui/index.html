@@ -752,7 +752,11 @@
     if (!r) return;
     const save = x => store.set("doorway.reg", { ...r, ...x });
     const again = (ms = 30_000) => { regTimer = setTimeout(regTick, ms); };
-    const restart = why => { save({ salt: W.newSalt(), step: "commit", at: Date.now(), commitTx: null, commitH: null, revealTx: null }); regSay(`${why} Trying again.`); again(5_000); };
+    const restart = why => {
+      // one fresh start at most: a second miss stops, so the small step costs can't repeat
+      if ((r.tries ?? 0) >= 1) { store.set("doorway.reg", null); regSay(`${why} Getting ${r.name}.csd stopped here; nothing more is spent. Try again from Publish later.`); return; }
+      save({ salt: W.newSalt(), step: "commit", at: Date.now(), commitTx: null, commitH: null, revealTx: null, tries: (r.tries ?? 0) + 1 }); regSay(`${why} Trying once more.`); again(5_000);
+    };
     try {
       if (!wallet) await loadWallet();
       const node = await readingNode();
@@ -782,9 +786,11 @@
         if (tip > r.commitH + W.FINALIZE_BY) return restart("The last step's time ran out.");
         const mins = Math.max(1, (r.commitH + W.FINALIZE_FROM - tip) * 2);
         if (tip < r.commitH + W.FINALIZE_FROM) { regSay(`Getting ${r.name}.csd: step 3 of 3 in about ${mins} minutes, once nobody can claim it first.`); return again(); }
-        const n = await CsdResolver.readName(r.name, { doors: await doorList() });
+        // the reservation as the network's own records say (not a name server, which may not list
+        // a name until it's finished)
+        const st = await W.reservation(node, r.name, r.commitH, tip);
         try {
-          const tx = await W.send(node, wallet.key, W.finalizeAsk(r.name, r.salt, n.st, me, r.commitH, tip));
+          const tx = await W.send(node, wallet.key, W.finalizeAsk(r.name, r.salt, st, me, r.commitH, tip));
           save({ step: "finalized", finalTx: tx, at: Date.now() });
           regSay(`Getting ${r.name}.csd: step 3 of 3, paying for the year…`);
         } catch (err) {
@@ -795,8 +801,9 @@
           throw err;
         }
       } else if (r.step === "finalized") {
-        const o = await CsdResolver.lookup(r.name, { doors: await doorList() }).catch(() => null);
-        if (o?.owner?.toLowerCase() === me.toLowerCase()) {
+        const st = await W.reservation(node, r.name, r.commitH, tip).catch(() => null);
+        const o = st && !st.pending && String(st.owner).toLowerCase() === me.toLowerCase() ? { owner: st.owner, profile: st.profile ?? {} } : null;
+        if (o) {
           const names = store.get("doorway.names") ?? [];
           if (!names.includes(r.name)) store.set("doorway.names", [...names, r.name]);
           store.set("doorway.reg", null);

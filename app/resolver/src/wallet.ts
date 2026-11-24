@@ -4,7 +4,7 @@
 import { connect, claimInvite, openInvites } from "../../../kit/src/index";
 import { buildAppTx, buildSplitTx, bytesToHex, concat, hexToBytes, keyFromPrivate, sha256d, utf8, EPOCH_LEN, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
 import { DIRECTORY } from "./directory";
-import { nameProfile, nameCommit, nameCommitRecord, nameClaim, nameFinalize, nameRenew, nameRegFee, finalizeWinnerCheck, TREASURY_ADDR, REG_COMMIT_MAX_BLOCKS, REG_FINALIZE_GRACE_BLOCKS, FINALIZE_TIP_MARGIN, NAME_TERM_EPOCHS, DOMAIN as CAIRNX } from "@inversealtruism/cairnx-core";
+import { nameProfile, nameCommit, nameCommitRecord, nameClaim, nameFinalize, nameRenew, nameRegFee, finalizeWinnerCheck, resolve, TREASURY_ADDR, REG_COMMIT_MAX_BLOCKS, REG_FINALIZE_GRACE_BLOCKS, FINALIZE_TIP_MARGIN, NAME_TERM_EPOCHS, DOMAIN as CAIRNX } from "@inversealtruism/cairnx-core";
 import { keepRecord, keptSites, heightToDate, monthYear } from "../../../kit/src/keep";
 export { keptSites, heightToDate, monthYear };
 import { secp256k1 } from "@noble/curves/secp256k1";
@@ -160,6 +160,20 @@ export function renewAsk(name: string, tip: number): Ask {
   return { app: cx(nameRenew({ name }), tip), fee: MIN_FEE_PROPOSE, burn: 0n, pay: { to: TREASURY_ADDR as Hex, value: nameRegFee(name, tip + 30) } };
 }
 export const NAME_YEAR_EPOCHS = NAME_TERM_EPOCHS;
+// A reservation, as the network's own records say: read straight from `node` (every CairnX record
+// from a little before the commit up to now, replayed by cairnx-core), not from a name server,
+// which may not list a name until its registration is finished. Enough for a name that was free:
+// any rival that could win had to commit within REG_COMMIT_MAX_BLOCKS before ours.
+export async function reservation(node: string, name: string, commitHeight: number, tip: number): Promise<any> {
+  const { eventOf, parseTx, hex } = await import("./main");
+  const from = Math.max(0, commitHeight - REG_COMMIT_MAX_BLOCKS - 2);
+  const r = await fetch(`${node.replace(/\/$/, "")}/events/${encodeURIComponent(CAIRNX)}/${from}/${Math.min(2000, tip - from + 1)}`, { signal: AbortSignal.timeout(30_000) });
+  const j = r.ok ? await r.json() : null;
+  if (!j?.ok) throw new Error("NODE_EVENTS_UNAVAILABLE");
+  const events = (j.events as any[]).map(e => { try { return eventOf(e.txid, parseTx(hex(e.tx_raw)), e.height, e.pos); } catch { return null; } }).filter(Boolean);
+  return resolve(events as any, tip).names[name];
+}
+
 // the block a transaction of this key's landed in, once it has
 export async function txHeight(node: string, address: Hex, txid: string): Promise<number | null> {
   const acts = await connect({ node }).api.activity(address, 60);
