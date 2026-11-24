@@ -362,6 +362,42 @@ fn mime(path: &str) -> &'static str {
     }
 }
 
+// ── What a site may reach ───────────────────────────────────────────────────
+// A site opened here may load from itself, from this computer (other .localhost sites, a local
+// model), from the network's doors, and from the outside services it lists in its own doorway.json
+// ({"connect": ["https://arweave.net", ...]}), which anyone can read. Anything else, an ad network
+// or a tracker, the browser refuses. For now the rule only reports (Content-Security-Policy-Report-
+// Only): what it would have refused is noted (see Settings) and nothing is blocked yet.
+fn allowed_source(h: &str) -> bool {
+    let Some(rest) = h.strip_prefix("https://") else { return false };
+    let rest = rest.trim_end_matches('/');
+    let (host, port) = match rest.split_once(':') { Some((a, b)) => (a, Some(b)), None => (rest, None) };
+    !host.is_empty() && host.len() <= 253
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '*')
+        && (!host.contains('*') || (host.starts_with("*.") && !host[2..].contains('*')))
+        && port.map_or(true, |p| !p.is_empty() && p.len() <= 5 && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn site_policy(root: &Path) -> String {
+    let mut hosts: Vec<String> = doors();
+    let listed: Vec<String> = fs::read_to_string(root.join("doorway.json")).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["connect"].as_array().cloned())
+        .unwrap_or_default().iter().filter_map(|v| v.as_str()).filter(|h| allowed_source(h))
+        .take(64).map(|h| h.trim_end_matches('/').to_ascii_lowercase()).collect();
+    hosts.extend(listed);
+    format!("default-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data: blob: http://localhost:* http://127.0.0.1:* http://*.localhost:* {}; report-uri /.doorway/csp", hosts.join(" "))
+}
+
+// What the rule would have refused, per site: kept to show in Settings, and in csp.log
+static REPORTED: std::sync::OnceLock<Mutex<std::collections::BTreeSet<(String, String)>>> = std::sync::OnceLock::new();
+fn reported() -> &'static Mutex<std::collections::BTreeSet<(String, String)>> { REPORTED.get_or_init(Default::default) }
+
+#[tauri::command]
+fn outside_reports() -> Vec<(String, String)> {
+    reported().lock().unwrap().iter().cloned().collect()
+}
+
 // Serves a folder at `addr`, on this computer only. `root` can change while it runs (a name that
 // points to a newer site keeps its address). Only files inside the folder, nothing else.
 fn serve_dir(server: tiny_http::Server, root: Arc<Mutex<PathBuf>>) {
@@ -398,10 +434,16 @@ fn respond_from(req: tiny_http::Request, root: &Path) {
             (None, 404)
         };
         let resp = match file.and_then(|f| fs::read(&f).ok().map(|b| (f, b))) {
-            Some((f, bytes)) => tiny_http::Response::from_data(bytes)
-                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], mime(&f.to_string_lossy()).as_bytes()).unwrap())
-                .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap())
-                .with_status_code(status),
+            Some((f, bytes)) => {
+                let kind = mime(&f.to_string_lossy());
+                let r = tiny_http::Response::from_data(bytes)
+                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], kind.as_bytes()).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap())
+                    .with_status_code(status);
+                if kind.starts_with("text/html") {
+                    r.with_header(tiny_http::Header::from_bytes(&b"Content-Security-Policy-Report-Only"[..], site_policy(&root).as_bytes()).unwrap())
+                } else { r }
+            }
             None => tiny_http::Response::from_data(b"not found".to_vec()).with_status_code(404),
         };
         let _ = req.respond(resp);
@@ -646,6 +688,27 @@ fn doorway_request(app: &tauri::AppHandle, mut req: tiny_http::Request, name: St
                 };
                 let _ = req.respond(r);
             });
+        }
+        // what the site rule would have refused (the browser reports it): noted, never acted on
+        (Post, "/.doorway/csp") => {
+            let mut body = Vec::new();
+            let _ = req.as_reader().take(16_384).read_to_end(&mut body);
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let r = if v["csp-report"].is_object() { &v["csp-report"] } else if v[0]["body"].is_object() { &v[0]["body"] } else { &v };
+            let blocked = r["blocked-uri"].as_str().or(r["blockedURL"].as_str()).unwrap_or("");
+            // just where it went (scheme and host), not the whole address
+            if let Some(origin) = blocked.split_once("://").map(|(sc, rest)| format!("{sc}://{}", rest.split(['/', '?', '#']).next().unwrap_or(""))) {
+                let mut seen = reported().lock().unwrap();
+                if seen.len() < 500 && seen.insert((name.clone(), origin.clone())) {
+                    if let Ok(dir) = app.path().app_data_dir() {
+                        use std::io::Write;
+                        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("csp.log")) {
+                            let _ = writeln!(f, "{name}\t{origin}");
+                        }
+                    }
+                }
+            }
+            let _ = req.respond(tiny_http::Response::empty(204));
         }
         // a site short of CSD: Doorway's window comes forward with its way to add some (by card).
         // Nothing is signed or spent; the person decides there. Only the site's own page may ask.
@@ -1421,7 +1484,7 @@ fn main() {
         .manage(Arc::new(Asks::default()))
         .manage(AskShown::default())
         .manage(AskFromMain::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url, buy_link])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url, buy_link, outside_reports])
         .setup({
             let node = node.clone();
             move |app| {
@@ -1545,6 +1608,23 @@ mod tests {
         c.read_to_string(&mut out).unwrap();
         let status = out[9..12].parse().unwrap();
         (status, out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn a_site_reaches_only_what_it_lists() {
+        assert!(allowed_source("https://arweave.net"));
+        assert!(allowed_source("https://*.aon.network"));
+        assert!(allowed_source("https://node2.aon.network:8443/"));
+        for bad in ["http://tracker.example", "https://a.com; script-src *", "*", "https://*", "https://a*.com", "'unsafe-inline'", "https://a.com/path"] {
+            assert!(!allowed_source(bad), "{bad}");
+        }
+        let dir = std::env::temp_dir().join(format!("doorway-policy-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("doorway.json"), r#"{"connect":["https://arweave.net","https://evil.example; default-src *","http://plain.example"]}"#).unwrap();
+        let p = site_policy(&dir);
+        assert!(p.contains(" https://arweave.net") && !p.contains("evil") && !p.contains("plain.example"), "{p}");
+        assert!(p.starts_with("default-src 'self'") && p.ends_with("report-uri /.doorway/csp"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

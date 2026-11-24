@@ -1,0 +1,12 @@
+{
+  "about": "The front page reads the network and its doors, the newest Doorway release on GitHub, and doorway.place's hide list.",
+  "connect": [
+    "https://*.aon.network",
+    "https://api.github.com",
+    "https://doorway.place",
+    "https://trustless-gateway.link",
+    "https://ipfs.io",
+    "https://dweb.link",
+    "https://*.ipfs.dweb.link"
+  ]
+}

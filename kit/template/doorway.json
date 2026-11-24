@@ -1,0 +1,4 @@
+{
+  "about": "What this site connects to besides the network. Doorway lets a site reach only the network, its doors and the services listed here, so no site can quietly track the people who open it. Add any service your site uses (https:// and a host, * allowed for subdomains).",
+  "connect": ["https://*.aon.network"]
+}

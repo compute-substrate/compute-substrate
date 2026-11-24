@@ -1,0 +1,7 @@
+{
+  "about": "Chess talks to the network, and to Cairn's name server to find a friend by .csd name.",
+  "connect": [
+    "https://*.aon.network",
+    "https://cairn-substrate.com"
+  ]
+}

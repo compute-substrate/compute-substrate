@@ -265,6 +265,11 @@
         <button id="put">Choose</button>
       </div>
     </div>
+    <div class="group" id="outsideBox" hidden>
+      <h3>Outside connections</h3>
+      <p class="sub" style="margin:2px 0 6px">Sites here may reach only the network and the services they list. These went elsewhere. Nothing is blocked yet; soon Doorway will stop connections like these, so no site can track you.</p>
+      <p class="hint" id="outsideList" style="margin:0 0 10px;overflow-wrap:anywhere"></p>
+    </div>
     <div class="group">
       <h3>This computer's part of the network</h3>
       <p class="sub" style="margin:2px 0 6px">Doorway runs a node: it keeps a copy of the network and checks every block itself, so what you open is checked here, not taken on trust.</p>
@@ -1046,6 +1051,13 @@
     };
   }
   $("walletAdd").onclick = () => openAdd();
+  // what the site rule would have refused so far (main.rs, site_policy)
+  async function showOutside() {
+    const list = await invoke("outside_reports").catch(() => []);
+    $("outsideBox").hidden = !list.length;
+    $("outsideList").innerHTML = list.map(([site, to]) => `${esc(site)}.csd → ${esc(to)}`).join("<br>");
+  }
+  $("settingsBox").addEventListener("toggle", () => { if ($("settingsBox").open) showOutside(); });
   // after a payment: check every 30 seconds for the USDC, and trade it as soon as it's there
   let buyTimer = null;
   function watchBuying() {

@@ -158,3 +158,17 @@ download too much; newer versions of the package carry newer anchors.
 
 Lifted from [Commonplace](https://github.com/intervalplace/commonplace), one example of an app on the
 network, which uses the same code. MIT licensed.
+
+## What your site connects to
+
+Opened through Doorway, a site may reach only itself, this computer, the network and its doors, and
+the services it lists in a `doorway.json` at its root (the template has one):
+
+```json
+{ "connect": ["https://*.aon.network", "https://arweave.net"] }
+```
+
+Each entry is `https://` and a host (`*.` for its subdomains). Anything else, an ad network or a
+tracker, the browser refuses, so people know a site can't quietly follow them. For now Doorway only
+notes what it would refuse (Settings, Outside connections); it starts refusing in a later release.
+

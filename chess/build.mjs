@@ -10,5 +10,6 @@ await build({
   logLevel: "warning",
 });
 cpSync("index.html", "out/index.html");
+cpSync("doorway.json", "out/doorway.json"); // what it connects to besides the network (Doorway allows these)
 cpSync("icon.svg", "out/icon.svg");
 console.log("built out/");
