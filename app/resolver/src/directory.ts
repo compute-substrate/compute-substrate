@@ -78,8 +78,12 @@ const recCache = new Map<string, { to: number; byId: Map<string, string>; recs: 
 async function recommendations(base: string, tip: number) {
   let c = recCache.get(base);
   if (!c) recCache.set(base, c = { to: DIRECTORY_FROM - 1, byId: new Map(), recs: new Map() });
-  for (let from = c.to + 1; from <= tip; from += 2000) {
-    const j = await getJson(`${base}/events/${encodeURIComponent(DIRECTORY)}/${from}/2000`);
+  const froms: number[] = [];
+  for (let from = c.to + 1; from <= tip; from += 2000) froms.push(from);
+  // fetched several at once, read in order
+  const pages: any[] = [];
+  for (let i = 0; i < froms.length; i += 6) pages.push(...await Promise.all(froms.slice(i, i + 6).map(from => getJson(`${base}/events/${encodeURIComponent(DIRECTORY)}/${from}/2000`, 60_000).catch(() => null))));
+  for (const [k, j] of pages.entries()) {
     if (!j?.ok) break; // an older node: no recommendations, the list still shows
     for (const e of j.events) {
       let tx; try { tx = parseTx(hex(e.tx_raw)); } catch { continue; }
@@ -99,7 +103,7 @@ async function recommendations(base: string, tip: number) {
         if (name) c.recs.get(name)?.who.add(who.toLowerCase());
       }
     }
-    c.to = Math.min(tip, from + 1999);
+    c.to = Math.min(tip, froms[k] + 1999);
   }
   return c.recs;
 }

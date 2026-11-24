@@ -13,7 +13,17 @@ const say = (t: string) => { $("status").textContent = t; };
 const HEART = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" fill="currentColor"/></svg>';
 
 const asked = new URLSearchParams(location.search).get("node");
+// Opened in Doorway: this computer's own node, once it has caught up, is the fastest to read
+const OWN_NODE = "http://127.0.0.1:8789";
+async function ownNodeReady(): Promise<boolean> {
+  if (!location.hostname.endsWith(".localhost")) return false;
+  try {
+    const h = await (await fetch(`${OWN_NODE}/health`, { signal: AbortSignal.timeout(3000) })).json();
+    return h.peer_count > 0 && h.best_peer_height != null && h.best_peer_height <= h.height + 1;
+  } catch { return false; }
+}
 async function pickNode(): Promise<string> {
+  if (!asked && await ownNodeReady()) return OWN_NODE;
   for (const d of asked ? [asked, ...DOORS] : DOORS) {
     try { const r = await fetch(`${d.replace(/\/$/, "")}/tip`, { signal: AbortSignal.timeout(6000) }); if (r.ok) return d.replace(/\/$/, ""); } catch {}
   }
@@ -112,7 +122,9 @@ function keepPanel(s: Listed) {
 async function load() {
   try {
     if (!net) { net = connect({ node: await pickNode() }); }
-    const [r, k, hide] = await Promise.all([listSites(net.node), net.kept().catch(() => kept), hiddenList()]);
+    // the hide list (doorway.place) never holds the page up: a few seconds, else none this time
+    const hidden = Promise.race([hiddenList(), new Promise<Set<string>>(ok => setTimeout(() => ok(new Set()), 5000))]).catch(() => new Set<string>());
+    const [r, k, hide] = await Promise.all([listSites(net.node), net.kept().catch(() => kept), hidden]);
     // sites a name points to, less the hide list: a list chooses what it shows (see listed)
     sites = listed(hide, r.sites);
     kept = k;

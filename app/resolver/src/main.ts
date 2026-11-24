@@ -108,11 +108,17 @@ const histories = new Map<string, { to: number; events: any[] }>();
 export async function allEvents(tip: number, base = NODE): Promise<any[]> {
   let history = histories.get(base);
   if (!history) histories.set(base, history = { to: ACTIVATION_HEIGHT - 1, events: [] });
-  for (let from = history.to + 1; from <= tip; from += 2000) {
-    const j = await getJson(`${base}/events/${encodeURIComponent("cairnx:v1")}/${from}/2000`);
-    if (!j?.ok) throw new Error("Cairn's server didn't answer, and the node can't list the names' history (it needs a newer node).");
-    for (const e of j.events) { const ev = eventOf(e.txid, parseTx(hex(e.tx_raw)), e.height, e.pos); if (ev) history.events.push(ev); }
-    history.to = Math.min(tip, from + 1999);
+  // several ranges at once (each a scan of 2000 blocks on the node), kept in order
+  const froms: number[] = [];
+  for (let from = history.to + 1; from <= tip; from += 2000) froms.push(from);
+  for (let i = 0; i < froms.length; i += 6) {
+    const parts = await Promise.all(froms.slice(i, i + 6).map(async from => {
+      const j = await getJson(`${base}/events/${encodeURIComponent("cairnx:v1")}/${from}/2000`, 60_000);
+      if (!j?.ok) throw new Error("Cairn's server didn't answer, and the node can't list the names' history (it needs a newer node).");
+      return j.events.map((e: any) => eventOf(e.txid, parseTx(hex(e.tx_raw)), e.height, e.pos)).filter(Boolean);
+    }));
+    for (const evs of parts) history.events.push(...evs);
+    history.to = Math.min(tip, froms[Math.min(i + 5, froms.length - 1)] + 1999);
   }
   return history.events;
 }
