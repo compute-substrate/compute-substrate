@@ -428,7 +428,7 @@
   }
   async function openAddress(cid, show = true) {
     const st = $("nameStatus");
-    st.textContent = `Getting the site at ${cid.slice(0, 12)}… and checking it…`;
+    st.textContent = "Opening the site…";
     try {
       const url = await fetchByAddress(cid);
       st.textContent = show ? "Opening it" : "It's ready";
@@ -455,13 +455,14 @@
       const r = await CsdResolver.lookup(input, { doors: await doorList() });
       // no site or link: its holder's page in Commonplace, read where the name was
       if (r.page) r.open = `${await invoke("site_url", { node: r.node })}#/p/${r.page}`;
-      if (!r.open) { st.textContent = r.why; if (!show) invoke("name_answer", { name: r.name, why: r.why }).catch(() => {}); return; }
+      // a free name: where to get it, right here
+      if (!r.open) { st.textContent = r.free ? `${r.why} It's free: make it yours under Publish.` : r.why; if (!show) invoke("name_answer", { name: r.name, why: r.why }).catch(() => {}); return; }
       let url = r.open;
       const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(r.open)?.[1];
       if (ipfs) {
         // its site: downloaded from IPFS and checked here (once), then served from this computer
         if (!(await invoke("site_kept", { cid: ipfs }))) {
-          st.textContent = `Getting ${r.name}.csd's site from IPFS and checking it…`;
+          st.textContent = `Opening ${r.name}.csd…`;
           const { files, car } = await CsdResolver.fetchSite(ipfs, await doorList());
           for (const [path, bytes] of files) {
             await invoke("site_put", bytes, { headers: { "x-cid": ipfs, "x-path": encodeURIComponent(path) } });
@@ -884,7 +885,7 @@
       const cid = await CsdResolver.carRoot(car);
       await CsdResolver.filesFromCar(car, cid);
       await invoke("site_keep_car", car, { headers: { "x-cid": cid } });
-      st.textContent = "Giving it to the doors…";
+      st.textContent = "Putting it up…";
       const said = [];
       for (const d of await doorList()) {
         try {
@@ -1006,7 +1007,8 @@
     try {
       const got = await W.welcomeKey(await readingNode(), wallet.address);
       store.set("doorway.welcomed", wallet.address);
-      if (got) { $("walletStatus").textContent = `Welcome! Someone left you enough for about ${postsSaid(got)}. It's on its way.`; setTimeout(showBalance, 130_000); }
+      // said in the main window, where a newcomer is looking (not only in Settings)
+      if (got) { const w = `Welcome! Someone left you enough for about ${postsSaid(got)}, so you can start right away.`; $("walletStatus").textContent = w; if ($("regStatus").hidden) { $("regStatus").hidden = false; $("regStatus").textContent = w; setTimeout(() => { if ($("regStatus").textContent === w) $("regStatus").hidden = true; }, 60_000); } setTimeout(showBalance, 130_000); }
     } catch {}
   }
   // ── Adding CSD by card (buy.js, loaded when first needed) ──
