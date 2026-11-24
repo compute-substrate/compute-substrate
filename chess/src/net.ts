@@ -7,7 +7,7 @@ import { TOPIC, readGame, gameText, type GameRecord, type Attest } from "./game"
 
 // no chess record is older than this block
 const FROM = 147_000;
-export const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
+export const DOORS = ["https://csd.aon.network", "https://door1.computesubstrate.org", "https://door2.computesubstrate.org"];
 
 const store = {
   get<T>(k: string, d: T): T { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },

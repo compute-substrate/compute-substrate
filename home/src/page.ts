@@ -7,7 +7,7 @@ import { connect, lightClient, writingKey, doorwayAdd, claimInvite, openInvites,
 
 // this page's own .csd name, and the doors it starts from (it finds the rest on the network)
 const NAME = "computesubstrate";
-const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
+const DOORS = ["https://csd.aon.network", "https://door1.computesubstrate.org", "https://door2.computesubstrate.org"];
 const $ = (id: string) => document.getElementById(id)!;
 const fmt = (n: number) => n.toLocaleString("en-US");
 const CID_RE = /^b[a-z2-7]{50,61}$/;

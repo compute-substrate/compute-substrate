@@ -5,7 +5,7 @@ import { connect, writingKey, doorwayAdd, claimInvite, openInvites, welcome, hei
 
 // Doors: public nodes anyone runs (docs/public-node.md). The page reads through the first that
 // answers, and fetches each site's title and icon from any of them; everything is checked here.
-const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
+const DOORS = ["https://csd.aon.network", "https://door1.computesubstrate.org", "https://door2.computesubstrate.org"];
 const $ = (id: string) => document.getElementById(id)!;
 const esc = (t: string) => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
 const tint = (cid: string) => { let h = 0; for (const ch of cid) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 45% 52%)`; };

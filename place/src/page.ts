@@ -4,7 +4,7 @@
 import { lookup, listSites, siteFace, hiddenList, isHidden, listed, newestDoorway, wallet as W } from "../../app/resolver/src/main";
 import { cairnSigner, friendlyName, heightToDate, monthYear } from "../../kit/src/index";
 
-const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
+const DOORS = ["https://csd.aon.network", "https://door1.computesubstrate.org", "https://door2.computesubstrate.org"];
 const REPO = "compute-substrate/compute-substrate";
 const $ = (id: string) => document.getElementById(id)!;
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));

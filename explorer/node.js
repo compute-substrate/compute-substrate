@@ -3,7 +3,7 @@
 // answering. Opened in Doorway (explorer.localhost), this computer's own node once it has caught
 // up. ?node=https://… reads through that node only.
 (function () {
-  const DOORS = ["https://csd.aon.network", "https://151-240-121-186.sslip.io", "https://151-240-121-187.sslip.io"];
+  const DOORS = ["https://csd.aon.network", "https://door1.computesubstrate.org", "https://door2.computesubstrate.org"];
   const OWN = "http://127.0.0.1:8789";
   const asked = new URLSearchParams(location.search).get("node");
   const tipOf = async base => {
