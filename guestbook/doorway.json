@@ -1,0 +1,4 @@
+{
+  "about": "The guestbook reads and writes through the network and its doors, nothing else.",
+  "connect": ["https://*.aon.network"]
+}

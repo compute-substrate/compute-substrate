@@ -1,0 +1,6 @@
+{
+  "name": "csd-guestbook",
+  "private": true,
+  "description": "The guestbook at guestbook.csd: leave your name and a line for whoever comes next. A static site on Compute Substrate (the kit's template, for everyone). Build, then publish out/ with Doorway.",
+  "scripts": { "build": "node build.mjs" }
+}
