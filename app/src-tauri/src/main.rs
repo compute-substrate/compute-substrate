@@ -592,11 +592,12 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
         (None, Some(NameAnswer::Go(url))) => {
             let _ = req.respond(tiny_http::Response::empty(302).with_header(tiny_http::Header::from_bytes(&b"Location"[..], url.as_bytes()).unwrap()));
         }
-        (None, Some(NameAnswer::Why(why, again))) => {
+        (None, Some(NameAnswer::Why(why, again, detail))) => {
             let esc = why.replace('&', "&amp;").replace('<', "&lt;");
             // something that sorts itself out (a site on its way to the doors, a node catching up):
             // the page asks again by itself
-            let (refresh, more) = if again { (r#"<meta http-equiv="refresh" content="20">"#, "<br><small>This page tries again by itself.</small>") } else { ("", "") };
+            let (refresh, mut more) = if again { (r#"<meta http-equiv="refresh" content="20">"#, "<br><small>This page tries again by itself.</small>".to_string()) } else { ("", String::new()) };
+            if !detail.is_empty() { more += &format!(r#"<details style="margin-top:18px;font-size:12px;color:#999"><summary>Details</summary>{}</details>"#, detail.replace('&', "&amp;").replace('<', "&lt;")); }
             let _ = req.respond(tiny_http::Response::from_string(format!(r#"<!doctype html><meta charset="utf-8"><title>{name}.csd</title>{refresh}<style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555;padding:0 24px;text-align:center}}</style><p>{esc}{more}</p>"#))
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap()));
@@ -1032,7 +1033,8 @@ struct Sites {
 enum NameAnswer {
     Go(String),
     // why it can't open, and whether that may pass by itself
-    Why(String, bool),
+    // and what each source said, folded away (for working out what went wrong)
+    Why(String, bool, String),
 }
 
 #[derive(serde::Deserialize, Serialize)]
@@ -1392,10 +1394,10 @@ fn site_car(app: tauri::AppHandle, cid: String) -> Result<tauri::ipc::Response, 
 
 // What <name>.localhost should answer for a name with no site: a link (`go`), or why there's nothing
 #[tauri::command]
-fn name_answer(sites: tauri::State<'_, Sites>, name: String, go: Option<String>, why: Option<String>, again: Option<bool>) -> Result<(), String> {
+fn name_answer(sites: tauri::State<'_, Sites>, name: String, go: Option<String>, why: Option<String>, again: Option<bool>, detail: Option<String>) -> Result<(), String> {
     let a = match (go, why) {
         (Some(u), _) if u.starts_with("https://") || u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1") => NameAnswer::Go(u),
-        (_, Some(w)) => NameAnswer::Why(w, again.unwrap_or(false)),
+        (_, Some(w)) => NameAnswer::Why(w, again.unwrap_or(false), detail.unwrap_or_default().chars().take(2000).collect()),
         _ => return Err("nothing to answer".into()),
     };
     sites.answers.lock().unwrap().insert(name, a);

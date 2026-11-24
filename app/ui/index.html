@@ -506,7 +506,7 @@
       if (show) await invoke("plugin:opener|open_url", { url });
     } catch (e) {
       st.textContent = String(e && e.message || e);
-      if (!show) invoke("name_answer", { name: String(input).replace(/\.csd$/, ""), why: `Couldn't open ${input}.csd: ${st.textContent}`, again: true }).catch(() => {});
+      if (!show) invoke("name_answer", { name: String(input).replace(/\.csd$/, ""), why: `Couldn't open ${input}.csd: ${st.textContent}`, again: true, detail: e?.detail ?? null }).catch(() => {});
     }
   }
   $("peerForm").onsubmit = async e => {
