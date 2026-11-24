@@ -783,6 +783,13 @@ fn show_ask(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: taur
     let main_in_front = app.get_webview_window("main").map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false)).unwrap_or(false);
     // a second ask while one shows keeps what was true when the first came
     if shown.0.lock().unwrap().is_none() { *from.0.lock().unwrap() = main_in_front; }
+    // asked from a site while Doorway's window sits behind: that window steps away first. On a Mac,
+    // showing the approval would otherwise bring every open Doorway window forward with it (after
+    // the first approval hid the app, its main window still counts as open). The Dock or the menu
+    // bar opens it again.
+    if !main_in_front {
+        if let Some(m) = app.get_webview_window("main") { let _ = m.hide(); }
+    }
     *shown.0.lock().unwrap() = Some(ask.clone());
     if let Some(w) = app.get_webview_window("ask") {
         let _ = app.emit_to("ask", "ask-show", ask);

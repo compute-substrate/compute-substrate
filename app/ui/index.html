@@ -406,7 +406,20 @@
     // the very first launch: start at login from now on, and show a site working, in the browser
     try {
       if (await invoke("first_run")) {
-        setTimeout(async () => { try { await invoke("plugin:opener|open_url", { url: await invoke("name_url", { name: "computesubstrate" }) }); } catch {} }, 1500);
+        // the guestbook (somewhere to leave a line, right away), else the network's front page; opened
+        // once Doorway's own address for it answers, so the browser never gets a page that isn't there
+        setTimeout(async () => {
+          try {
+            let name = "computesubstrate";
+            try { const o = await CsdResolver.lookup("guestbook", { doors: await doorList() }); if (o.open) name = "guestbook"; } catch {}
+            const url = await invoke("name_url", { name });
+            for (let i = 0; i < 20; i++) {
+              try { if ((await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(3000) })).status < 500) break; } catch {}
+              await new Promise(r => setTimeout(r, 1000));
+            }
+            await invoke("plugin:opener|open_url", { url });
+          } catch (err) { console.warn("first open:", err); }
+        }, 1500);
       }
     } catch {}
     try { $("autostart").checked = await invoke("plugin:autostart|is_enabled"); } catch {}
