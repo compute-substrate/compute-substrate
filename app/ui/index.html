@@ -85,6 +85,8 @@
   #publishBox.done #publishSaid { font-weight: 600; }
   #publishBox.done #publishSaid::before { content: "✓ "; color: var(--accent); }
   #publishOther a { color: var(--muted); }
+  details.more > summary { cursor: pointer; color: var(--muted); font-size: 12px; list-style: none; }
+  details.more > summary::-webkit-details-marker { display: none; }
   #publishBox.done #publishOther { display: none; }
   #publishBox .go { margin: 10px 0 4px; }
   #publishBox .go input { font-size: 14px; padding: 9px 12px; border-radius: 10px; }
@@ -111,7 +113,9 @@
   .ask .btns button { border: 0; border-radius: 999px; padding: 10px 18px; font: 600 14px var(--display); cursor: pointer; }
   .ask #askYes { background: var(--accent); color: #fff; }
   .ask #askNo, .ask #keepNo { background: var(--line); color: var(--ink); }
-  .ask #keepYes { background: var(--accent); color: #fff; }
+  .ask #keepYes, .ask #addYes { background: var(--accent); color: #fff; }
+  .ask #addNo { background: var(--line); color: var(--ink); }
+  button.add { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
   .years { display: flex; gap: 8px; flex-wrap: wrap; }
   .years button { border-radius: 999px; padding: 8px 14px; font: 600 13px var(--display); }
   .years button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
@@ -165,18 +169,22 @@
   <div class="publish">
     <div id="publishBox" hidden>
       <p id="publishSaid"></p>
-      <div class="row" id="publishAddr" hidden style="border-top:0;padding:8px 0 0">
-        <code id="publishCid" style="flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-all"></code>
-        <button id="publishCopy" type="button">Copy</button>
-      </div>
+      <details id="publishAddr" hidden class="more">
+        <summary>Its address</summary>
+        <div class="row" style="border-top:0;padding:6px 0 0">
+          <code id="publishCid" style="flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-all"></code>
+          <button id="publishCopy" type="button">Copy</button>
+        </div>
+      </details>
       <form class="go" id="publishForm">
         <input id="publishName" placeholder="Your name" spellcheck="false" autocomplete="off" aria-label="Your .csd name">
         <button class="primary">Point it here</button>
       </form>
       <p class="hint" id="publishStatus"></p>
-      <p class="hint" id="publishOther"><a href="#" id="publishCarLink">Have a .car file instead? Choose it</a></p>
+      <p class="hint" id="publishOther"><a href="#" id="publishCarLink">Site already packed as a .car? Choose it</a></p>
     </div>
   </div>
+  <p class="hint" id="regStatus" hidden style="margin:10px 4px 0"></p>
   <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up from this computer. The hourglass keeps it up for years, on the doors, and anyone can add time.</p>
   <div id="discoverBox" hidden>
     <h2 style="margin-top:22px">Discover</h2>
@@ -186,6 +194,17 @@
     <button class="hint" id="discoverMore" hidden style="background:none;border:0;cursor:pointer;text-decoration:underline;margin-top:8px">Show all</button>
   </div>
 
+
+  <div class="ask" id="addDlg" hidden role="dialog" aria-modal="true" aria-labelledby="addTitle">
+    <div>
+      <h3 id="addTitle">Add CSD</h3>
+      <p style="font-size:14px">Reading is always free. Writing, recommending and keeping sites up costs a little CSD each time. There are no ads here and nobody sells what you do: this is what pays the people who keep the network running.</p>
+      <div class="years" id="addAmounts"></div>
+      <p class="hint" style="margin:0" id="addSaid"></p>
+      <div class="btns"><button id="addNo">Close</button><button id="addYes">Pay by card</button></div>
+      <p class="hint" style="margin:0">You pay on Stripe's page; the first time, it asks you to sign up with Link. Stripe sends a digital dollar (USDC) to your key, and Doorway trades it for CSD on the open market by itself. Stripe's fee comes on top.</p>
+    </div>
+  </div>
 
   <div class="ask" id="keepDlg" hidden role="dialog" aria-modal="true" aria-labelledby="keepTitle">
     <div>
@@ -205,6 +224,10 @@
       <p class="sub" style="margin:2px 0 6px">One key for every site you open here: sites ask Doorway when they want to write, and never see the key itself.</p>
       <div class="row" style="border-top:0">
         <div style="min-width:0">Balance <b id="walletBal">…</b> CSD<small><code id="walletAddr" style="overflow-wrap:anywhere"></code></small></div>
+        <button id="walletAdd" class="primary">Add CSD</button>
+      </div>
+      <div class="row">
+        <div>Its address<small>For sending CSD to it from somewhere else</small></div>
         <button id="walletCopy">Copy address</button>
       </div>
       <div class="row">
@@ -237,7 +260,7 @@
         <div>Open sites in your browser<small>Any name works as <code>name.localhost</code>, like <code>commonplace.localhost</code>. In Safari, type <code>http://</code> first: <code>http://commonplace.localhost</code></small></div>
       </div>
       <div class="row">
-        <div style="flex:1">Put your site on the doors<small id="putStatus">A .car file of your site, once a .csd name points to it</small></div>
+        <div style="flex:1">For site makers: a packed site<small id="putStatus">A .car file of your site, handed to the doors once a .csd name points to it</small></div>
         <input type="file" id="putFile" accept=".car" hidden>
         <button id="put">Choose</button>
       </div>
@@ -349,10 +372,10 @@
     $("peers").textContent = fmt(h.peer_count);
     const best = h.best_peer_height;
     const note = s.phase === "elsewhere" ? "\n" + s.message : "";
-    if (!h.peer_count) return show("busy", "Looking for the network…", "Check that this computer is online. If it stays like this, add a peer under Settings." + note);
+    if (!h.peer_count) return show("busy", "Looking for the network…", "Check that this computer is online." + note);
     if (best == null) return show("busy", "Connecting…", "Asking the network how far it is." + note);
     if (best > h.height + 1) {
-      return show("busy", `Catching up ${Math.floor(100 * h.height / best)}%`, `Block ${fmt(h.height)} of ${fmt(best)}. Each one is checked here before it's kept.` + note, h.height / best);
+      return show("busy", `Catching up ${Math.floor(100 * h.height / best)}%`, "This computer is getting its own copy of the network, and checks every part of it as it comes." + note, h.height / best);
     }
     return show("ok", "Ready", "" + note);
   }
@@ -606,6 +629,7 @@
   // page (approving once in Cairn), and the moment that record is in a block, the doors take it.
   let pending = null; // { cid, name, until }
   let pointing = null; // { name, profile }: a name Doorway's key holds, waiting for the second press
+  let getting = null;  // { name, fee }: a free name, waiting for the second press to get it
   $("publishCopy").onclick = () => navigator.clipboard.writeText($("publishCid").textContent).then(() => { $("publishCopy").textContent = "Copied"; setTimeout(() => $("publishCopy").textContent = "Copy", 1500); }).catch(() => {});
   // a site already packed (a .car, as `npx ipfs-car pack` makes): checked block by block here
   async function fromCar(file) {
@@ -642,11 +666,11 @@
       pending = { cid: r.cid, name: null, until: 0 };
       const mb = (r.bytes / 1e6).toFixed(r.bytes < 1e6 ? 2 : 1);
       $("publishBox").classList.add("done");
-      $("publishSaid").textContent = `Your site is ready (${r.files} files, ${mb} MB). Its address:`;
+      $("publishSaid").textContent = `Your site is ready (${r.files} files, ${mb} MB).`;
       $("publishCid").textContent = `ipfs://${r.cid}`; $("publishAddr").hidden = false;
       $("publishStatus").innerHTML = preview ? `<a href="#" id="publishPreview">See it here first</a>, then choose which of your names should show it.` : "Which of your names should show it?";
       if (preview) $("publishPreview").onclick = e => { e.preventDefault(); invoke("plugin:opener|open_url", { url: preview }); };
-      $("publishForm").hidden = false; $("publishName").focus(); pointing = null; $("publishForm").querySelector("button").textContent = "Point it here";
+      $("publishForm").hidden = false; $("publishName").focus(); pointing = null; getting = null; $("publishForm").querySelector("button").textContent = "Point it here";
       renderSites();
     } catch (err) { $("publishSaid").textContent = String(err && err.message || err); }
   }
@@ -662,10 +686,27 @@
       if (o?.owner && o.owner.toLowerCase() === wallet.address.toLowerCase()) {
         pointing = { name, profile: o.profile ?? {} };
         btn.textContent = "Point it here (0.25 CSD)";
-        st.textContent = `Doorway's key holds ${name}.csd. Press again to point it at this site: a record signed by that key, for 0.25 CSD. Its other profile fields stay as they are.`;
+        st.textContent = `${name}.csd is yours. Press again to show this site there, for 0.25 CSD.`;
         return;
       }
-      if (o?.why && !o.owner) { st.textContent = o.why; return; }
+      // a free name: Doorway gets it with its own key (the second press), then points it here
+      if (o?.free && getting?.name !== name) {
+        const fee = W.nameFee(name, (await (await fetch(`${await readingNode()}/tip`)).json()).height);
+        getting = { name, fee };
+        btn.textContent = `Get ${name}.csd (${fee} CSD)`;
+        st.textContent = `${name}.csd is free. Make it yours: ${fee} CSD for a year, plus 0.25 for each of three steps. It takes about 25 minutes, while Doorway is open, and then your site goes up there.`;
+        return;
+      }
+      if (o?.why && !o.owner && !o.free) { st.textContent = o.why; return; }
+    }
+    if (getting?.name === name) {
+      const need = getting.fee + 1;
+      const bal = +$("walletBal").textContent;
+      if (Number.isFinite(bal) && bal < need) { needMore(st, `That needs about ${need} CSD, and your key holds ${bal}.`); return; }
+      getting = null; btn.textContent = "Point it here";
+      startName(name, pending.cid);
+      st.textContent = `Getting ${name}.csd. You can keep using Doorway meanwhile; it shows here how it's going.`;
+      return;
     }
     if (wallet && pointing?.name === name) {
       btn.disabled = true; st.textContent = `Pointing ${name}.csd at it…`;
@@ -675,11 +716,11 @@
         await W.send(node, wallet.key, W.pointAsk(name, pointing.profile, pending.cid, tip));
         pointing = null; btn.textContent = "Point it here";
         pending.name = name; pending.until = Date.now() + 60 * 60_000;
-        st.textContent = `Sent. The doors take the site once that's in a block, about two minutes.`;
+        st.textContent = `Done. Your site goes up at ${name}.csd in about two minutes.`;
         publishTick();
       } catch (err) {
         const m = String(err && err.message || err);
-        st.textContent = /Not enough CSD/.test(m) ? "Pointing a name costs 0.25 CSD, and Doorway's key has too little. Add some in Settings, under Your key." : m;
+        if (/Not enough CSD/.test(m)) needMore(st, "Pointing a name costs 0.25 CSD, and your key has too little."); else st.textContent = m;
       }
       btn.disabled = false;
       return;
@@ -692,19 +733,129 @@
     await invoke("plugin:opener|open_url", { url: `https://commonplace.place/#/n/${name}/site/${pending.cid}` });
     publishTick();
   };
+  // ── Getting a name: commit, reveal, finalize (wallet.ts), one step every 30 seconds while Doorway
+  // is open, kept across restarts. Each step waits for the last to be in a block.
+  const regSay = t => { $("regStatus").hidden = !t; $("regStatus").textContent = t || ""; };
+  function startName(name, cid) {
+    store.set("doorway.reg", { name, cid: cid ?? null, salt: W.newSalt(), step: "commit", at: Date.now() });
+    regTick();
+  }
+  let regTimer = null;
+  async function regTick() {
+    clearTimeout(regTimer); regTimer = null;
+    const r = store.get("doorway.reg");
+    if (!r) return;
+    const save = x => store.set("doorway.reg", { ...r, ...x });
+    const again = (ms = 30_000) => { regTimer = setTimeout(regTick, ms); };
+    const restart = why => { save({ salt: W.newSalt(), step: "commit", at: Date.now(), commitTx: null, commitH: null, revealTx: null }); regSay(`${why} Trying again.`); again(5_000); };
+    try {
+      if (!wallet) await loadWallet();
+      const node = await readingNode();
+      const tip = (await (await fetch(`${node}/tip`)).json()).height;
+      const me = wallet.address;
+      if (r.step === "commit") {
+        regSay(`Getting ${r.name}.csd: step 1 of 3, a sealed claim…`);
+        const tx = await W.send(node, wallet.key, W.commitAsk(r.name, r.salt, me, tip));
+        save({ step: "committed", commitTx: tx, at: Date.now() });
+      } else if (r.step === "committed") {
+        const h = await W.txHeight(node, me, r.commitTx);
+        if (h) { save({ step: "reveal", commitH: h }); return again(1_000); }
+        if (Date.now() - r.at > 40 * 60_000) return restart("The first step didn't go through.");
+        regSay(`Getting ${r.name}.csd: step 1 of 3, waiting for it to land…`);
+      } else if (r.step === "reveal") {
+        if (tip + 1 > r.commitH + W.REVEAL_BY) return restart("Step 2 came too late.");
+        regSay(`Getting ${r.name}.csd: step 2 of 3, claiming it…`);
+        const tx = await W.send(node, wallet.key, W.revealAsk(r.name, r.salt, tip));
+        save({ step: "revealed", revealTx: tx, at: Date.now() });
+      } else if (r.step === "revealed") {
+        const h = await W.txHeight(node, me, r.revealTx);
+        if (h && h > r.commitH + W.REVEAL_BY) return restart("Step 2 landed too late.");
+        if (h) { save({ step: "finalize" }); return again(1_000); }
+        if (tip > r.commitH + W.REVEAL_BY) return restart("Step 2 didn't land in time.");
+        regSay(`Getting ${r.name}.csd: step 2 of 3, waiting for it to land…`);
+      } else if (r.step === "finalize") {
+        if (tip > r.commitH + W.FINALIZE_BY) return restart("The last step's time ran out.");
+        const mins = Math.max(1, (r.commitH + W.FINALIZE_FROM - tip) * 2);
+        if (tip < r.commitH + W.FINALIZE_FROM) { regSay(`Getting ${r.name}.csd: step 3 of 3 in about ${mins} minutes, once nobody can claim it first.`); return again(); }
+        const n = await CsdResolver.readName(r.name, { doors: await doorList() });
+        try {
+          const tx = await W.send(node, wallet.key, W.finalizeAsk(r.name, r.salt, n.st, me, r.commitH, tip));
+          save({ step: "finalized", finalTx: tx, at: Date.now() });
+          regSay(`Getting ${r.name}.csd: step 3 of 3, paying for the year…`);
+        } catch (err) {
+          const m = String(err && err.message || err);
+          if (/earlier committer won/.test(m)) { store.set("doorway.reg", null); regSay(`Someone else claimed ${r.name}.csd a moment before you did, so it's theirs. Nothing was paid for the name. Try another one.`); return; }
+          if (/already registered to you/.test(m)) { save({ step: "finalized", at: Date.now() }); return again(1_000); }
+          if (/no reservation/.test(m)) { regSay(`Getting ${r.name}.csd: step 3 of 3, waiting for the network to show step 2…`); return again(); }
+          throw err;
+        }
+      } else if (r.step === "finalized") {
+        const o = await CsdResolver.lookup(r.name, { doors: await doorList() }).catch(() => null);
+        if (o?.owner?.toLowerCase() === me.toLowerCase()) {
+          const names = store.get("doorway.names") ?? [];
+          if (!names.includes(r.name)) store.set("doorway.names", [...names, r.name]);
+          store.set("doorway.reg", null);
+          if (r.cid) {
+            regSay(`✓ ${r.name}.csd is yours. Putting your site there…`);
+            await W.send(node, wallet.key, W.pointAsk(r.name, o.profile ?? {}, r.cid, tip));
+            pending = { cid: r.cid, name: r.name, until: Date.now() + 60 * 60_000 };
+            regSay(`✓ ${r.name}.csd is yours, for a year. Your site goes up there in about two minutes.`);
+            publishTick();
+          } else regSay(`✓ ${r.name}.csd is yours, for a year.`);
+          setTimeout(showBalance, 3000);
+          return;
+        }
+        regSay(`Getting ${r.name}.csd: step 3 of 3, waiting for it to land…`);
+      }
+    } catch (err) {
+      const m = String(err && err.message || err);
+      if (/Not enough CSD/.test(m)) { needMore($("regStatus"), `Getting ${r.name}.csd stopped: your key ran short of CSD.`); $("regStatus").hidden = false; return again(120_000); }
+      regSay(`Getting ${r.name}.csd: ${m} Doorway keeps trying.`);
+    }
+    again();
+  }
+  setTimeout(() => { if (store.get("doorway.reg")) regTick(); }, 4000);
+
+  // names Doorway got: a year at a time, so a word when one has under two months left, with a way
+  // to add a year (anyone may; it's the name's fee again)
+  async function namesDue() {
+    if (store.get("doorway.reg")) return;
+    for (const name of store.get("doorway.names") ?? []) {
+      try {
+        if (!wallet) await loadWallet();
+        const o = await CsdResolver.lookup(name, { doors: await doorList() });
+        if (o.owner?.toLowerCase() !== wallet.address.toLowerCase() || typeof o.until !== "number") continue;
+        const node = await readingNode();
+        const tip = (await (await fetch(`${node}/tip`)).json()).height;
+        const end = o.until * 30;
+        if (end - tip > 60 * 720) continue; // more than about two months left
+        const fee = W.nameFee(name, tip);
+        $("regStatus").hidden = false;
+        $("regStatus").innerHTML = `${esc(name)}.csd is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${fee} CSD)</button>`;
+        $("renewName").onclick = async () => {
+          try { await W.send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year. That shows in about two minutes.`); setTimeout(showBalance, 3000); }
+          catch (err) { const m = String(err && err.message || err); if (/Not enough CSD/.test(m)) needMore($("regStatus"), `That needs ${fee} CSD, and your key has less.`); else regSay(m); }
+        };
+        return;
+      } catch {}
+    }
+  }
+  setTimeout(namesDue, 20_000);
+  setInterval(namesDue, 12 * 3600_000);
+
   // until the doors take it: they do once the name's record is in a block, about two minutes
   async function publishTick() {
     if (!pending || !pending.name) return;
-    if (Date.now() > pending.until) { $("publishStatus").textContent = "No door took it within an hour. Check that the name points to it, then use Publish again."; pending = null; return; }
+    if (Date.now() > pending.until) { $("publishStatus").textContent = "It didn't go up within an hour. Check that the name points to it, then use Publish again."; pending = null; return; }
     const n = await seed(pending.cid);
     if (n > 0) {
       const name = pending.name; pending = null;
-      $("publishStatus").textContent = `✓ Live on ${n === 1 ? "1 door" : n + " doors"}. Opening ${name}.csd…`;
+      $("publishStatus").textContent = `✓ It's up. Opening ${name}.csd…`;
       await openName(name);
       renderSites();
       return;
     }
-    $("publishStatus").textContent = `Waiting for ${pending.name}.csd to point to it. The doors take it once that's in a block, about two minutes after you approve.`;
+    $("publishStatus").textContent = `Waiting for ${pending.name}.csd to point to it. It goes up about two minutes after you approve.`;
     setTimeout(publishTick, 30_000);
   }
 
@@ -797,12 +948,12 @@
         const node = await readingNode();
         const tip = (await (await fetch(node + "/tip")).json()).height;
         await W.send(node, wallet.key, W.keepAsk(cid, years, tip));
-        $("keepSaid").textContent = `Done. It's kept up until ${fromYear + years}, from the next block, in about two minutes.`;
+        $("keepSaid").textContent = `Done. It's kept up until ${fromYear + years}. That shows in about two minutes.`;
         setTimeout(refreshKept, 130_000);
         setTimeout(showBalance, 3000);
       } catch (err) {
         const m = String(err && err.message || err);
-        $("keepSaid").textContent = /Not enough CSD/.test(m) ? `That needs ${String(years * 0.25)} CSD, and your key has less. Add some under Settings, Your key.` : m;
+        if (/Not enough CSD/.test(m)) needMore($("keepSaid"), `That needs ${String(years * 0.25)} CSD, and your key has less.`); else $("keepSaid").textContent = m;
       }
       $("keepYes").disabled = false;
     };
@@ -841,6 +992,79 @@
       if (got) { $("walletStatus").textContent = `Welcome! Someone left you ${got} CSD to write with. It's ready in about two minutes.`; setTimeout(showBalance, 130_000); }
     } catch {}
   }
+  // ── Adding CSD by card (buy.js, loaded when first needed) ──
+  // the payment page is Stripe's; the USDC it sends to this key is traded for CSD here, by itself
+  let buyLib = null;
+  const loadBuy = () => buyLib ??= new Promise((ok, no) => { const sc = document.createElement("script"); sc.src = "buy.js"; sc.onload = () => ok(window.CsdBuy); sc.onerror = no; document.head.appendChild(sc); });
+  const inEurope = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone.startsWith("Europe/"); } catch { return false; } })();
+  const money = (n, cur) => cur === "eur" ? `€${n}` : `$${n}`;
+  function needMore(el, text) {
+    el.innerHTML = `${esc(text)} <button type="button" class="add">Add CSD</button>`;
+    el.querySelector(".add").onclick = () => openAdd();
+  }
+  async function openAdd() {
+    if (!wallet) await loadWallet();
+    const cur = inEurope ? "eur" : "usd";
+    let amounts = [5, 10, 20], amount = 10, price = null;
+    const show = () => {
+      $("addAmounts").innerHTML = amounts.map(a => `<button data-a="${a}" aria-pressed="${a === amount}">${money(a, cur)}</button>`).join("");
+      $("addAmounts").querySelectorAll("[data-a]").forEach(b => b.onclick = () => { amount = +b.dataset.a; show(); });
+      // about how much that is, at the market's price now (a euro taken as about 1.1 dollars)
+      const csd = price ? Math.floor(amount * (cur === "eur" ? 1.1 : 1) / price) : null;
+      $("addSaid").textContent = csd ? `About ${csd} CSD: enough for about ${Math.floor(csd / 0.25)} posts or years of keeping a site.` : "";
+    };
+    show();
+    $("addDlg").hidden = false;
+    $("addYes").disabled = false;
+    $("addNo").onclick = () => { $("addDlg").hidden = true; };
+    loadBuy().then(B => B.market()).then(m => {
+      price = m.price;
+      // one trade takes at most what a market maker allows (the rest would wait about 40 minutes)
+      if (m.most > 0) { const fit = [5, 10, 20].filter(a => a * (cur === "eur" ? 1.1 : 1) <= m.most); if (fit.length) { amounts = fit; if (!fit.includes(amount)) amount = fit[fit.length - 1]; } }
+      show();
+    }).catch(() => {});
+    $("addYes").onclick = async () => {
+      $("addYes").disabled = true;
+      $("addSaid").textContent = "Opening Stripe…";
+      try {
+        const B = await loadBuy();
+        const url = await invoke("buy_link", { address: B.ethAddress(wallet.key), amount, currency: cur });
+        await invoke("plugin:opener|open_url", { url });
+        store.set("doorway.buying", { since: Date.now() });
+        $("addSaid").textContent = "Pay on Stripe's page in your browser. Doorway buys the CSD as soon as the payment arrives, usually within a few minutes, even with this window closed.";
+        watchBuying();
+      } catch (err) { $("addSaid").textContent = String(err && err.message || err); $("addYes").disabled = false; }
+    };
+  }
+  $("walletAdd").onclick = () => openAdd();
+  // after a payment: check every 30 seconds for the USDC, and trade it as soon as it's there
+  let buyTimer = null;
+  function watchBuying() {
+    if (buyTimer) return;
+    const tick = async () => {
+      const b = store.get("doorway.buying");
+      if (!b || Date.now() - b.since > 6 * 3600_000) { store.set("doorway.buying", null); buyTimer = null; return; }
+      try {
+        const B = await loadBuy();
+        if (!wallet) await loadWallet();
+        const r = await B.buy(await readingNode(), wallet.key, s => { if (!$("addDlg").hidden) $("addSaid").textContent = s; });
+        if (r.state === "bought") {
+          const said = `Your CSD is on its way: ${r.csd.toFixed(2)} CSD, ready in a few minutes.`;
+          $("walletStatus").textContent = said;
+          if (!$("addDlg").hidden) $("addSaid").textContent = said;
+          setTimeout(showBalance, 180_000);
+          if (r.left < 1) { store.set("doorway.buying", null); buyTimer = null; return; }
+          store.set("doorway.buying", { since: Date.now() }); // the rest, once this trade settles
+        }
+      } catch (err) {
+        const why = buyLib ? (await buyLib).why(err) : String(err);
+        if (!$("addDlg").hidden) $("addSaid").textContent = `${why} Doorway keeps trying.`;
+      }
+      buyTimer = setTimeout(tick, 30_000);
+    };
+    buyTimer = setTimeout(tick, 1000);
+  }
+  if (store.get("doorway.buying")) setTimeout(watchBuying, 5000);
   $("walletCopy").onclick = () => navigator.clipboard.writeText(wallet.address).then(() => { $("walletCopy").textContent = "Copied"; setTimeout(() => $("walletCopy").textContent = "Copy address", 1500); }).catch(() => {});
   $("walletBackup").onclick = () => navigator.clipboard.writeText(wallet.key).then(() => { $("walletStatus").textContent = "Key copied. Keep it somewhere safe: whoever has it can spend its CSD."; }).catch(() => {});
   $("walletRestore").onsubmit = async e => {
@@ -861,6 +1085,7 @@
   const asks = [];
   let replyTo = null;
   listen("ask-reply", e => replyTo && replyTo(e.payload ?? {}));
+  listen("open-add", () => openAdd());
   listen("site-ask", e => { asks.push(e.payload); if (asks.length === 1) nextAsk(); });
   async function nextAsk() {
     const a = asks[0];
@@ -889,11 +1114,13 @@
           id: a.id,
           title: W.isKeep(ask) ? `${a.site}.csd asks to keep a site up` : `${a.site}.csd asks to write`,
           what: W.describe(ask),
-          balance: /^[\d.]+$/.test(bal) ? `Your key holds ${bal} CSD.` : "",
+          balance: /^[\d.]+$/.test(bal) ? (+bal < csd ? `This needs ${csd} CSD, and your key holds ${bal}.` : `Your key holds ${bal} CSD.`) : "",
+          short: /^[\d.]+$/.test(bal) && +bal < csd,
           always: W.isKeep(ask) ? "" : `Allow ${a.site}.csd without asking, up to ${BUDGET} CSD a day`,
         } }).catch(() => resolve({ allow: false }));
       });
       replyTo = null;
+      if (reply.add) { done(null, `Not enough CSD: this needs ${csd} CSD. Adding some in Doorway.`); openAdd(); return; }
       if (!reply.allow) return done(null, "Declined in Doorway.");
       if (reply.always && !W.isKeep(ask)) { const m = allowed(); m[a.site] = { since: Date.now(), spent: [] }; store.set("doorway.allowed", m); }
       go();
@@ -942,13 +1169,13 @@
         const tip = (await (await fetch(node + "/tip")).json()).height;
         await W.send(node, wallet.key, W.recommendAsk(s, tip));
         const r = recommended(); r.push(s.key); store.set("doorway.recommended", r);
-        $("discoverNote").textContent = `You recommend ${label}. It counts from the next block, in about two minutes.`;
+        $("discoverNote").textContent = `You recommend ${label}. It counts in about two minutes.`;
         renderDiscover();
         setTimeout(showBalance, 3000);
       } catch (err) {
         b.disabled = false; b.dataset.sure = "";
         const m = String(err && err.message || err);
-        $("discoverNote").textContent = /Not enough CSD/.test(m) ? `Recommending costs ${cost} CSD, and your key has too little. Add some in Settings, under Your key (copy its address and send CSD to it).` : m;
+        if (/Not enough CSD/.test(m)) needMore($("discoverNote"), `Recommending costs ${cost} CSD, and your key has too little.`); else $("discoverNote").textContent = m;
       }
     });
   }

@@ -178,13 +178,15 @@ async function allEventsThrough(doors: string[], l: Light, tip: number): Promise
   return (await inBatches([...doorHistory.ids], 8, id => prove(l, id))).filter(Boolean);
 }
 
-export type Opened = { name: string; open?: string; why?: string; owner?: string; page?: string; node?: string; via?: string; profile?: Record<string, string> };
+export type Opened = { name: string; open?: string; why?: string; owner?: string; page?: string; node?: string; via?: string; profile?: Record<string, string>; free?: boolean; until?: number };
 
 // `doors`: where to read while this computer's node is still catching up
 // `web`: from a web page rather than Doorway, so through the doors alone, never a node on this computer
-export async function lookup(input: string, opts: { doors?: string[]; web?: boolean } = {}): Promise<Opened> {
+// A name's state as the network's records say, checked: null when nobody has ever registered it
+export type NameRead = { name: string; why?: string; st?: any; free?: boolean; tip: number; via: string };
+export async function readName(input: string, opts: { doors?: string[]; web?: boolean } = {}): Promise<NameRead> {
   const name = input.trim().toLowerCase().replace(/^web\+csd:(\/\/)?/, "").replace(/\.csd$/, "").replace(/\/+$/, "");
-  if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name." };
+  if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name.", tip: 0, via: "" };
   const own = opts.web ? false : await ownNodeReady();
   const doors = own ? [] : await answering(opts.doors ?? []);
   if (!own && !doors.length && opts.web) throw new Error("No door answered just now. Try again in a minute.");
@@ -210,22 +212,30 @@ export async function lookup(input: string, opts: { doors?: string[]; web?: bool
       if (ev) events.push(ev);
     }
   } else if (h === null) {
-    return { name, why: `Nobody holds ${name}.csd.` };
+    return { name, why: `Nobody holds ${name}.csd.`, free: true, tip, via };
   } else {
     // Cairn's server didn't answer (or its list can't decide this name alone): the whole history,
     // from this computer's own node
     events = l ? await allEventsThrough(doors, l, tip) : await allEvents(tip);
   }
   const st = resolve(events, tip).names[name];
+  return { name, st, free: !st, tip, via };
+}
+
+export async function lookup(input: string, opts: { doors?: string[]; web?: boolean } = {}): Promise<Opened> {
+  const r = await readName(input, opts);
+  const { name, st, via } = r;
+  if (r.why) return { name, why: r.why, ...(r.free ? { free: true } : {}) };
   if (st?.pending) return { name, via, why: `${name}.csd is being registered: its registration isn't finished yet.` };
-  if (!st || st.expired) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.` };
+  if (!st || st.expired) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.`, free: !st };
   const p = st.profile ?? {};
+  const until = typeof st.paidThroughEpoch === "number" ? st.paidThroughEpoch : undefined;
   const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(p["contenthash"] ?? "")?.[1];
-  if (ipfs) return { name, via, owner: st.owner, profile: p, open: `ipfs://${ipfs}` };
-  if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, via, owner: st.owner, profile: p, open: p["url"] };
+  if (ipfs) return { name, via, owner: st.owner, profile: p, until, open: `ipfs://${ipfs}` };
+  if (/^https:\/\/\S+$/.test(p["url"] ?? "")) return { name, via, owner: st.owner, profile: p, until, open: p["url"] };
   // no site or link: its holder's page, in the Commonplace this app carries, read where this was
   const addr = (st.addr ?? st.owner).toLowerCase();
-  return { name, via, owner: st.owner, profile: p, page: addr, node: via, open: `${COMMONPLACE}/?node=${encodeURIComponent(via)}#/p/${addr}` };
+  return { name, via, owner: st.owner, profile: p, until, page: addr, node: via, open: `${COMMONPLACE}/?node=${encodeURIComponent(via)}#/p/${addr}` };
 }
 
 export { fetchSite, carRoot, filesFromCar, fileFromCar } from "./site";

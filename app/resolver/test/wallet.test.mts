@@ -2,7 +2,8 @@
 import { wallet } from "../src/main";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3";
-import { hexToBytes, concat, utf8, keyFromPrivate } from "../../../kit/src/core";
+import { hexToBytes, bytesToHex, concat, utf8, keyFromPrivate } from "../../../kit/src/core";
+import { resolve } from "@inversealtruism/cairnx-core";
 
 let failures = 0;
 const ok = (c: unknown, what: string) => { console.log(`${c ? "ok  " : "FAIL"} ${what}`); if (!c) failures++; };
@@ -42,4 +43,31 @@ const sig = hexToBytes(p.sig as any);
 const pub = secp256k1.Signature.fromCompact(sig.slice(0, 64)).addRecoveryBit(sig[64] - 27).recoverPublicKey(digest).toRawBytes(false).slice(1);
 ok(Buffer.from(pub).toString("hex") === p.pubKey.slice(2), "the market's ownership proof recovers to the key");
 ok(keyFromPrivate(hexToBytes(key as any)).addr20 === address, "and it's this address's key");
+// getting a name with Doorway's key: commit, reveal, finalize, replayed by cairnx-core's own resolver
+{
+  const me = address.toLowerCase(), other = "0x" + "33".repeat(20);
+  const ev = (a: any, height: number, pos: number, who = me) => ({ kind: "propose", id: "0x" + (height * 10 + pos).toString(16).padStart(64, "0"), proposer: who,
+    uri: a.app.uri, payloadHash: bytesToHex(a.app.payloadHash), expiresEpoch: Number(a.app.expiresEpoch), height, pos,
+    paidTo: a.pay ? { [a.pay.to.toLowerCase()]: String(a.pay.value) } : {} });
+  const H = 148_400, salt = wallet.newSalt(), name = "doorwaytest";
+  const c = wallet.commitAsk(name, salt, me as any, H), r = wallet.revealAsk(name, salt, H + 1);
+  ok(!c.app.uri.includes(name), "the commit doesn't show the name");
+  let st = resolve([ev(c, H, 1), ev(r, H + 1, 1)] as any, H + 2).names[name];
+  ok(st?.pending && st.owner === me, "after the reveal it's a pending reservation, ours");
+  let refusedEarly = false; try { wallet.finalizeAsk(name, salt, st, me as any, H, H + 5); } catch { refusedEarly = true; }
+  ok(refusedEarly, "a finalize is refused before the contest is frozen");
+  const T = H + wallet.FINALIZE_FROM;
+  const f = wallet.finalizeAsk(name, salt, st, me as any, H, T);
+  ok(f.pay && f.pay.value === 300_000_000n, "the finalize pays the year's fee (3 CSD for this name)");
+  st = resolve([ev(c, H, 1), ev(r, H + 1, 1), ev(f, T + 1, 1)] as any, T + 2).names[name];
+  ok(st && !st.pending && st.owner === me && typeof st.paidThroughEpoch === "number", "and the name is ours for a year");
+  // an earlier rival commit wins the contest: then the finalize is refused, and no fee is sent
+  const rs = wallet.newSalt();
+  const rc = wallet.commitAsk(name, rs, other as any, H - 1), rr = wallet.revealAsk(name, rs, H + 2);
+  st = resolve([ev(rc, H - 1, 1, other), ev(c, H, 1), ev(r, H + 1, 1), ev(rr, H + 2, 1, other)] as any, T).names[name];
+  let refusedLost = false; try { wallet.finalizeAsk(name, salt, st, me as any, H, T); } catch { refusedLost = true; }
+  ok(refusedLost && st.owner === other, "outbid by an earlier commit: no finalize, so no fee lost");
+  const n = wallet.renewAsk(name, T + 100);
+  ok(n.pay && n.pay.value === 300_000_000n && JSON.parse(n.app.kind === "propose" ? n.app.uri : "{}").t === "nrenew", "another year is a renewal with the fee");
+}
 console.log(failures ? `\n${failures} failed` : "\nall passed"); process.exit(failures ? 1 : 0);

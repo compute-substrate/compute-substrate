@@ -54,6 +54,12 @@ export async function writingKey(app = "csd"): Promise<BrowserKey> {
   return (own ? null : await doorwayKey()) ?? browserKey(app);
 }
 
+// Under Doorway: its window comes forward with its way to add CSD by card. False elsewhere, or from a
+// Doorway too old to have it.
+export async function doorwayAdd(): Promise<boolean> {
+  try { return /\.localhost$/.test(location.hostname) && (await fetch("/.doorway/add", { method: "POST" })).ok; } catch { return false; }
+}
+
 export async function doorwayKey(): Promise<BrowserKey | null> {
   try {
     if (!/\.localhost$/.test(location.hostname)) return null;

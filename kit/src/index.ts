@@ -20,7 +20,7 @@ export { friendlyName } from "./friendly";
 export { keepRecord, keptSites, keepCost, heightToDate, KEEP_TOPIC, BURN, YEAR_BLOCKS, PER_YEAR, MAX_YEARS, monthYear } from "./keep";
 import { keepRecord, keptSites, BURN } from "./keep";
 export { discoverCairn, type CairnProvider } from "./cairn";
-export { browserKey, writingKey, doorwayKey, claimInvite, inviteKeyFrom, makeInvites, openInvites, welcome, INVITES_MAX, WELCOME_TOPIC, type BrowserKey } from "./browser";
+export { browserKey, writingKey, doorwayKey, doorwayAdd, claimInvite, inviteKeyFrom, makeInvites, openInvites, welcome, INVITES_MAX, WELCOME_TOPIC, type BrowserKey } from "./browser";
 
 export const PUBLIC_NODE = "https://csd.aon.network";
 // how long a record stays open for attestations: far beyond any reader's lifetime

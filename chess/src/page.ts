@@ -9,6 +9,9 @@ const say = (t: string) => { $("status").textContent = t; };
 const GLYPH: Record<string, string> = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
 
 let c: ReturnType<typeof chessNet>;
+let door = "", inDoorway = false;
+// what to do when the key is short of CSD: Doorway adds it by card; elsewhere, get Doorway
+const short = () => inDoorway ? "Add some in Doorway, then try again." : "Open this in Doorway (doorway.place) to add some by card.";
 let meAddr = "";
 let games: GameRecord[] = [], attests: Attest[] = [], checked = new Set<string>();
 const states = new Map<string, State>();
@@ -101,7 +104,7 @@ function renderGame() {
   $("pBottom").innerHTML = player(flip ? "b" : "w");
   const pendingMove = s.moves.some(m => m.pending);
   $("state").textContent = s.result !== "playing" ? `${s.result.replace("1/2-1/2", "½–½")}. ${s.how}.`
-    : pendingMove ? "Your move is on its way: in a block within about two minutes."
+    : pendingMove ? "Your move is on its way: it shows within about two minutes."
     : canMove ? (seat ? "Your move." : `Your move, if you take ${s.turn === "w" ? "white" : "black"}.`)
     : s.drawOffer && myColor && s.drawOffer !== meAddr ? "Your opponent offers a draw." : s.how + ".";
   // the moves, in pairs
@@ -135,7 +138,7 @@ async function send(score: number, nth: number, what: string) {
     say("");
     rebuild();
   } catch (e: any) {
-    say(/Not enough CSD/.test(String(e?.message)) ? `That needs 0.05 CSD, and your key has less. Send a little CSD to ${meAddr}, or open this in Doorway.` : String(e?.message ?? e));
+    say(/Not enough CSD/.test(String(e?.message)) ? `That needs 0.05 CSD, and your key has less. ${short()}` : String(e?.message ?? e));
   }
   sending = false; pick = null; renderGame();
 }
@@ -192,8 +195,17 @@ let asWhite = true;
 $("asW").onclick = () => { asWhite = true; $("asW").setAttribute("aria-pressed", "true"); $("asB").setAttribute("aria-pressed", "false"); };
 $("asB").onclick = () => { asWhite = false; $("asW").setAttribute("aria-pressed", "false"); $("asB").setAttribute("aria-pressed", "true"); };
 $("start").onclick = async () => {
-  const opp = ($("against") as HTMLInputElement).value.trim().toLowerCase() || null;
-  if (opp && !/^0x[0-9a-f]{40}$/.test(opp)) { say("That isn't an address: it's 0x and 40 characters."); return; }
+  let opp = ($("against") as HTMLInputElement).value.trim().toLowerCase().replace(/^@/, "") || null;
+  // a .csd name: whoever holds it plays (an address works too)
+  if (opp && !/^0x[0-9a-f]{40}$/.test(opp)) {
+    say(`Looking up ${opp.replace(/\.csd$/, "")}.csd…`);
+    try {
+      const { lookup } = await import("../../app/resolver/src/main");
+      const o = await lookup(opp, { web: true, doors: [door] });
+      if (!o.owner) { say(o.why ?? `Nobody holds ${o.name}.csd yet.`); return; }
+      opp = o.owner.toLowerCase();
+    } catch (e: any) { say(String(e?.message ?? e)); return; }
+  }
   if (opp === meAddr) { say("That's you. Leave it empty to let anyone play."); return; }
   ($("start") as HTMLButtonElement).disabled = true;
   say("Starting the game…");
@@ -203,7 +215,7 @@ $("start").onclick = async () => {
     rebuild();
     location.hash = `g/${id}`;
   } catch (e: any) {
-    say(/Not enough CSD/.test(String(e?.message)) ? `Starting a game costs 0.25 CSD, and your key has less. Send a little CSD to ${meAddr}, or open this in Doorway.` : String(e?.message ?? e));
+    say(/Not enough CSD/.test(String(e?.message)) ? `Starting a game costs 0.25 CSD, and your key has less. ${short()}` : String(e?.message ?? e));
   }
   ($("start") as HTMLButtonElement).disabled = false;
 };
@@ -228,10 +240,9 @@ async function tick() {
 (async () => {
   try {
     const node = await pickNode();
-    c = chessNet(node);
-    $("node").textContent = node.replace(/^https:\/\//, "");
+    c = chessNet(node); door = node;
     const k = await c.key();
-    meAddr = k.address.toLowerCase();
+    meAddr = k.address.toLowerCase(); inDoorway = !!k.doorway;
     $("me").innerHTML = `<span title="${esc(meAddr ?? "")}">Playing as ${esc(meAddr ? friendlyName(meAddr) : "you")}</span>`;
     if (k.doorway) { $("keyWhose").textContent = "your key in Doorway, once you allow each one there"; $("backup").hidden = true; }
     $("backup").onclick = () => navigator.clipboard?.writeText(k.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can play as you and spend its CSD.")).catch(() => {});

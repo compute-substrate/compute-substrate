@@ -3,7 +3,7 @@
 // anyone to add a year.
 import { listSites, type Listed } from "../../app/resolver/src/directory";
 import { newestDoorway } from "../../app/resolver/src/release";
-import { connect, lightClient, writingKey, claimInvite, openInvites, heightToDate, monthYear } from "../../kit/src/index";
+import { connect, lightClient, writingKey, doorwayAdd, claimInvite, openInvites, heightToDate, monthYear } from "../../kit/src/index";
 
 // this page's own .csd name, and the doors it starts from (it finds the rest on the network)
 const NAME = "computesubstrate";
@@ -106,11 +106,14 @@ $("addYear").onclick = async () => {
   try {
     me ??= await writingKey(NAME);
     await net.keep(me.signer(net as any), myCid, 1);
-    $("keepSaid").textContent = "Thank you. Your year counts from the next block, in about two minutes.";
+    $("keepSaid").textContent = "Thank you. Your year counts in about two minutes.";
     setTimeout(showKept, 130_000);
   } catch (e: any) {
     const m = String(e?.message ?? e);
-    if (/Not enough CSD/.test(m)) {
+    if (/Not enough CSD/.test(m) && me!.doorway) {
+      $("keepSaid").innerHTML = `A year costs 0.25 CSD, and your key has less. <button id="addInDoorway">Add CSD in Doorway</button>`;
+      $("addInDoorway").onclick = () => doorwayAdd();
+    } else if (/Not enough CSD/.test(m)) {
       $("keepSaid").innerHTML = `A year costs 0.25 CSD, and your key here has less. <button id="takeInvite">Take a free invite</button> someone left for newcomers, or send CSD to <code>${me!.address}</code>.`;
       $("takeInvite").onclick = async () => {
         $("keepSaid").textContent = "Looking for one…";

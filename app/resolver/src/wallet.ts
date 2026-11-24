@@ -4,7 +4,7 @@
 import { connect, claimInvite, openInvites } from "../../../kit/src/index";
 import { buildAppTx, buildSplitTx, bytesToHex, concat, hexToBytes, keyFromPrivate, sha256d, utf8, EPOCH_LEN, MIN_FEE_ATTEST, MIN_FEE_PROPOSE, type AppPayload, type Hex } from "../../../kit/src/core";
 import { DIRECTORY } from "./directory";
-import { nameProfile, DOMAIN as CAIRNX } from "@inversealtruism/cairnx-core";
+import { nameProfile, nameCommit, nameCommitRecord, nameClaim, nameFinalize, nameRenew, nameRegFee, finalizeWinnerCheck, TREASURY_ADDR, REG_COMMIT_MAX_BLOCKS, REG_FINALIZE_GRACE_BLOCKS, FINALIZE_TIP_MARGIN, NAME_TERM_EPOCHS, DOMAIN as CAIRNX } from "@inversealtruism/cairnx-core";
 import { keepRecord, keptSites, heightToDate, monthYear } from "../../../kit/src/keep";
 export { keptSites, heightToDate, monthYear };
 import { secp256k1 } from "@noble/curves/secp256k1";
@@ -25,7 +25,9 @@ export function addressOf(key: string): Hex {
 // What a site asked for, read strictly: a record (propose) or an attestation, and its fee
 // `burn`: CSD sent to the all-zero address, which nobody can spend; only for keeping a site
 // (csd.keep), a year for every 0.25 CSD
-export type Ask = { app: AppPayload; fee: bigint; burn: bigint };
+// `pay`: a payment in the same transaction, for Doorway's own name records only (a name's yearly
+// fee to the name service, as its rules require); never from a site
+export type Ask = { app: AppPayload; fee: bigint; burn: bigint; pay?: { to: Hex; value: bigint } };
 const BURN = ("0x" + "00".repeat(20)) as Hex;
 export const isKeep = (a: Ask) => a.app.kind === "propose" && a.app.domain === "csd.keep";
 export function readAsk(body: any): Ask {
@@ -65,9 +67,10 @@ export async function send(node: string, key: Hex, ask: Ask): Promise<Hex> {
   const net = connect({ node });
   const k = keyFromPrivate(hexToBytes(key));
   const utxos = await net.api.utxos(k.addr20);
-  const cost = ask.fee + (ask.burn ?? 0n);
+  const cost = ask.fee + (ask.burn ?? 0n) + (ask.pay?.value ?? 0n);
   if (utxos.reduce((s, u) => s + u.value, 0n) < cost) throw new Error(`Not enough CSD at ${k.addr20}: writing this costs ${Number(cost) / 1e8} CSD.`);
-  const tx = ask.burn ? buildSplitTx(utxos, k, [{ to: BURN, value: ask.burn }], ask.fee, ask.app) : buildAppTx(utxos, k, ask.app, ask.fee);
+  const pays = [...(ask.burn ? [{ to: BURN, value: ask.burn }] : []), ...(ask.pay ? [ask.pay] : [])];
+  const tx = pays.length ? buildSplitTx(utxos, k, pays, ask.fee, ask.app) : buildAppTx(utxos, k, ask.app, ask.fee);
   return (await net.api.submit(tx)).toLowerCase() as Hex;
 }
 
@@ -123,6 +126,43 @@ export function pointAsk(name: string, profile: Record<string, string>, cid: str
   const p = { ...profile, contenthash: `ipfs://${cid}` };
   const b = nameProfile({ name, p });
   return { app: { kind: "propose", domain: CAIRNX, payloadHash: hexToBytes(b.payloadHash), uri: b.uri, expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
+}
+
+// ── Getting a .csd name with Doorway's own key (CairnX names, sealed registration) ──
+// Three records, each a little CSD: a sealed commit (the name stays hidden), the reveal within 8
+// blocks of it, and, once the 8-block contest has passed, the finalize, which pays the name's fee
+// for a year. About 25 minutes in all. Only the winner of a contest ever pays the fee: a finalize is
+// sent only when the check says the reservation is ours (cairnx-core's finalizeWinnerCheck).
+const cx = (b: { payloadHash: string; uri: string }, tip: number): AppPayload =>
+  ({ kind: "propose", domain: CAIRNX, payloadHash: hexToBytes(b.payloadHash as Hex), uri: b.uri, expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n });
+export const REVEAL_BY = REG_COMMIT_MAX_BLOCKS;                                     // blocks after the commit
+export const FINALIZE_FROM = REG_COMMIT_MAX_BLOCKS + FINALIZE_TIP_MARGIN + 1;        // tip at least commit + this
+export const FINALIZE_BY = REG_COMMIT_MAX_BLOCKS + REG_FINALIZE_GRACE_BLOCKS - FINALIZE_TIP_MARGIN;
+// a name's fee for a year, in CSD, at about this height
+export const nameFee = (name: string, tip: number) => Number(nameRegFee(name, tip + 30)) / 1e8;
+export const newSalt = () => bytesToHex(crypto.getRandomValues(new Uint8Array(32))).slice(2);
+export function commitAsk(name: string, salt: string, owner: Hex, tip: number): Ask {
+  return { app: cx(nameCommitRecord({ commit: nameCommit(name, salt, owner) }), tip), fee: MIN_FEE_PROPOSE, burn: 0n };
+}
+export function revealAsk(name: string, salt: string, tip: number): Ask {
+  return { app: cx(nameClaim({ name, salt }), tip), fee: MIN_FEE_PROPOSE, burn: 0n };
+}
+// refuses unless the reservation is ours and the finalize window is open, so the fee can't be lost
+export function finalizeAsk(name: string, salt: string, st: any, me: Hex, commitHeight: number, tip: number): Ask {
+  const ok = finalizeWinnerCheck(st, me, commitHeight, tip);
+  if (!ok.safe) throw new Error(`FINALIZE_UNSAFE: ${ok.reason}`);
+  return { app: cx(nameFinalize({ name, salt }), tip), fee: MIN_FEE_PROPOSE, burn: 0n, pay: { to: TREASURY_ADDR as Hex, value: nameRegFee(name, tip + 30) } };
+}
+// another year for a name, from its current end (anyone may pay it while the name is live)
+export function renewAsk(name: string, tip: number): Ask {
+  return { app: cx(nameRenew({ name }), tip), fee: MIN_FEE_PROPOSE, burn: 0n, pay: { to: TREASURY_ADDR as Hex, value: nameRegFee(name, tip + 30) } };
+}
+export const NAME_YEAR_EPOCHS = NAME_TERM_EPOCHS;
+// the block a transaction of this key's landed in, once it has
+export async function txHeight(node: string, address: Hex, txid: string): Promise<number | null> {
+  const acts = await connect({ node }).api.activity(address, 60);
+  const t = acts.find(x => x.txid.toLowerCase() === txid.toLowerCase());
+  return t && t.height > 0 ? t.height : null;
 }
 
 // Keeping a site, with Doorway's own key (the kit's keepRecord)

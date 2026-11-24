@@ -22,7 +22,7 @@
   label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12.5px; }
   .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: auto; }
   button { border: 0; border-radius: 999px; padding: 9px 18px; font: 600 14px var(--display); cursor: pointer; }
-  #yes { background: var(--accent); color: #fff; }
+  #yes, #add { background: var(--accent); color: #fff; }
   #no { background: var(--line); color: var(--ink); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   [hidden] { display: none !important; }
@@ -34,7 +34,7 @@
   <p class="what" id="what"></p>
   <p class="bal" id="bal"></p>
   <label id="alwaysRow"><input type="checkbox" id="always"> <span id="alwaysText"></span></label>
-  <div class="btns"><button id="no">Decline</button><button id="yes">Allow</button></div>
+  <div class="btns"><button id="no">Decline</button><button id="add" hidden>Add CSD</button><button id="yes">Allow</button></div>
 </main>
 <script>
   const { invoke } = window.__TAURI__.core;
@@ -47,11 +47,13 @@
     $("title").textContent = a.title;
     $("what").textContent = a.what;
     $("bal").textContent = a.balance || "";
-    $("alwaysRow").hidden = !a.always;
+    // too little CSD for this: the way to add some instead of Allow
+    $("yes").hidden = !!a.short; $("add").hidden = !a.short;
+    $("alwaysRow").hidden = !a.always || !!a.short;
     $("alwaysText").textContent = a.always || "";
     $("always").checked = false;
-    $("yes").disabled = $("no").disabled = false;
-    $("yes").focus();
+    $("yes").disabled = $("no").disabled = $("add").disabled = false;
+    (a.short ? $("add") : $("yes")).focus();
   }
   const reply = allow => {
     if (!current) return;
@@ -61,6 +63,7 @@
   };
   $("yes").onclick = () => reply(true);
   $("no").onclick = () => reply(false);
+  $("add").onclick = () => { if (!current) return; $("add").disabled = $("no").disabled = true; invoke("ask_reply", { reply: { id: current.id, allow: false, add: true } }); current = null; };
   addEventListener("keydown", e => { if (e.key === "Escape") reply(false); });
   listen("ask-show", e => show(e.payload));
   invoke("ask_current").then(show);

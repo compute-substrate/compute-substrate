@@ -575,6 +575,7 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
 //   POST /.doorway/write  {"app", "fee"} -> {"txid"}: shown in the window, signed once allowed
 //   POST /.doorway/prove  {"authHash"} -> {"pubKey","sig"}: that the key controls its address, for
 //                         buying CSD with USDC (CSD can only be delivered to it)
+//   POST /.doorway/add    -> {"ok"}: Doorway's window comes forward with its way to add CSD by card
 // A POST must come from the site's own page (its Origin is its own address, and it's JSON, which
 // another page can't send without asking first), so no site can ask in another's name. The window
 // does the signing; the key never leaves this computer, and never reaches a site.
@@ -646,11 +647,23 @@ fn doorway_request(app: &tauri::AppHandle, mut req: tiny_http::Request, name: St
                 let _ = req.respond(r);
             });
         }
+        // a site short of CSD: Doorway's window comes forward with its way to add some (by card).
+        // Nothing is signed or spent; the person decides there. Only the site's own page may ask.
+        (Post, "/.doorway/add") => {
+            let own = header(&req, "Origin").is_some_and(|o| o.eq_ignore_ascii_case(&format!("http://{host}")));
+            if !own {
+                let _ = req.respond(json_response(403, serde_json::json!({ "error": "Only the site's own page can ask." })));
+                return;
+            }
+            show_main(app);
+            let _ = app.emit_to("main", "open-add", serde_json::json!({ "site": name }));
+            let _ = req.respond(json_response(200, serde_json::json!({ "ok": true })));
+        }
         (Options, _) => {
             let _ = req.respond(tiny_http::Response::empty(204));
         }
         _ => {
-            let _ = req.respond(json_response(404, serde_json::json!({ "error": "Doorway answers /.doorway/key, /.doorway/write and /.doorway/prove." })));
+            let _ = req.respond(json_response(404, serde_json::json!({ "error": "Doorway answers /.doorway/key, /.doorway/write, /.doorway/prove and /.doorway/add." })));
         }
     }
 }
@@ -737,10 +750,13 @@ fn ask_current(shown: tauri::State<'_, AskShown>) -> Option<serde_json::Value> {
 #[tauri::command]
 fn ask_reply(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: tauri::State<'_, AskFromMain>, reply: serde_json::Value) {
     *shown.0.lock().unwrap() = None;
+    // short of CSD and asked to add some: Doorway's window comes forward, with the way to add it
+    let add = reply.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
     let _ = app.emit_to("main", "ask-reply", reply);
     if let Some(w) = app.get_webview_window("ask") {
         let _ = w.hide();
     }
+    if add { show_main(&app); return; }
     // asked from a site: back to the site. On a Mac, showing the approval brought all of Doorway
     // forward, so Doorway as a whole steps back (its window comes again from the menu bar)
     if !*from.0.lock().unwrap() {
@@ -749,6 +765,43 @@ fn ask_reply(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: tau
         #[cfg(not(target_os = "macos"))]
         if let Some(m) = app.get_webview_window("main") { if m.is_focused().unwrap_or(false) { let _ = m.minimize(); } }
     }
+}
+
+// ── Adding CSD by card ──────────────────────────────────────────────────────
+// A Stripe checkout that sells USDC on Ethereum, sent to the Ethereum address of Doorway's own key;
+// Doorway's window then trades it for CSD on the open market (resolver/src/buy.ts). Asked from here
+// rather than the window, which can't call Stripe's endpoint from its own origin.
+const ONRAMP: &str = "https://crypto.link.com/agents/create_session";
+
+#[tauri::command]
+async fn buy_link(address: String, amount: f64, currency: String) -> Result<String, String> {
+    if !(address.len() == 42 && address.starts_with("0x") && address[2..].chars().all(|c| c.is_ascii_hexdigit())) {
+        return Err("bad address".into());
+    }
+    if !(2.0..=300.0).contains(&amount) { return Err("The amount is 2 to 300.".into()); }
+    let currency = if currency == "eur" { "eur" } else { "usd" };
+    tauri::async_runtime::spawn_blocking(move || {
+        let amount = format!("{:.2}", amount);
+        let r = ureq::post(ONRAMP).timeout(Duration::from_secs(30)).send_form(&[
+            ("destination_currency", "usdc"),
+            ("destination_network", "ethereum"),
+            ("source_amount", amount.as_str()),
+            ("source_currency", currency),
+            ("wallet_addresses[ethereum]", address.as_str()),
+        ]);
+        let body: serde_json::Value = match r {
+            Ok(r) => r.into_json().map_err(|e| e.to_string())?,
+            Err(ureq::Error::Status(code, r)) => {
+                let j: serde_json::Value = r.into_json().unwrap_or_default();
+                let why = j["error"]["message"].as_str().unwrap_or("").to_string();
+                return Err(format!("Stripe didn't make a payment page ({code}{}{why}).", if why.is_empty() { "" } else { ": " }));
+            }
+            Err(e) => return Err(format!("Couldn't reach Stripe: {e}")),
+        };
+        body["redirect_url"].as_str().or(body["url"].as_str()).map(String::from).ok_or_else(|| "Stripe didn't make a payment page.".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Living in the menu bar ──────────────────────────────────────────────────
@@ -1368,7 +1421,7 @@ fn main() {
         .manage(Arc::new(Asks::default()))
         .manage(AskShown::default())
         .manage(AskFromMain::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url])
+        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url, buy_link])
         .setup({
             let node = node.clone();
             move |app| {

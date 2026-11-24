@@ -1,7 +1,7 @@
 // The directory's page: the list (app/resolver/src/directory.ts), and recommending, signed by a
 // key kept in this browser (the kit's browserKey), with the usual ways to get the little CSD it costs.
 import { listSites, siteFace, hiddenList, listed, DIRECTORY, type Listed } from "../../app/resolver/src/directory";
-import { connect, writingKey, claimInvite, openInvites, welcome, heightToDate, monthYear } from "../../kit/src/index";
+import { connect, writingKey, doorwayAdd, claimInvite, openInvites, welcome, heightToDate, monthYear } from "../../kit/src/index";
 
 // Doors: public nodes anyone runs (docs/public-node.md). The page reads through the first that
 // answers, and fetches each site's title and icon from any of them; everything is checked here.
@@ -30,6 +30,9 @@ $("howOpen").innerHTML = viaDoorway
   : 'Sites open in <a href="https://doorway.place">Doorway</a>, from your own computer at <code>name.localhost</code>, checked.';
 
 const me = await writingKey("directory");
+// under Doorway, CSD is added in Doorway (by card), not here
+if (me.doorway) $("needCsd").innerHTML = `<p style="margin:0"><strong>Recommending costs a little CSD</strong> <small>(0.05, or 0.25 to be the first for a site), and your key has too little.</small></p><div class="row"><button id="addInDoorway">Add CSD in Doorway</button><small>by card</small></div>`;
+if (me.doorway) $("addInDoorway").onclick = () => doorwayAdd();
 if (me.doorway) $("keyBtn").closest("span")!.textContent = "Each recommendation is a record on Compute Substrate, signed by your key in Doorway once you allow it there. A key counts once per site.";
 let net: ReturnType<typeof connect>;
 let sites: Listed[] = [];
@@ -142,7 +145,7 @@ $("grid").addEventListener("click", async e => {
     try {
       await net.keep(me.signer(net as any), cid, years);
       $("needCsd").hidden = true;
-      say(`Done. It's kept up for ${years} more year${years === 1 ? "" : "s"}, from the next block, in about two minutes.`);
+      say(`Done. It's kept up for ${years} more year${years === 1 ? "" : "s"}. That shows in about two minutes.`);
       keeping = null; render();
       setTimeout(load, 130_000);
     } catch (err: any) {
@@ -166,7 +169,7 @@ $("grid").addEventListener("click", async e => {
     else await net.write(me.signer(net as any), DIRECTORY, s.key);
     mine.add(s.key);
     $("needCsd").hidden = true;
-    say(`Thanks. Your recommendation of ${label} counts from the next block, in about two minutes.`);
+    say(`Thanks. Your recommendation of ${label} counts in about two minutes.`);
     render();
     setTimeout(load, 130_000);
   } catch (err: any) {

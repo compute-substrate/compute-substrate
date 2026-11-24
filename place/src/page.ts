@@ -61,7 +61,7 @@ async function peek(input: string) {
     if (isHidden(hide, { name, cid: f.open?.startsWith("ipfs://") ? f.open.slice(7) : "" })) { box.innerHTML = `<p class="msg">doorway.place doesn't show this one.</p>`; return; }
     if (!f.owner) {
       const free = /^Nobody holds/.test(f.why ?? "");
-      box.innerHTML = `<p class="msg">${free ? `Nothing is here yet. <b>${esc(name)}</b> is free: <a href="https://cairn-substrate.com" target="_blank" rel="noopener">make it yours</a>.` : esc(f.why ?? "Nothing is here.")}</p>`;
+      box.innerHTML = `<p class="msg">${free ? `Nothing is here yet. <b>${esc(name)}</b> is free: <a href="#get">get Doorway</a>, publish your site and pick this name.` : esc(f.why ?? "Nothing is here.")}</p>`;
       return;
     }
     const cid = f.open?.startsWith("ipfs://") ? f.open.slice(7) : null;
@@ -106,7 +106,7 @@ function render(f: Found, year: number | null) {
   const out = $("result");
   if (!f.owner) {
     const free = /^Nobody holds/.test(f.why ?? "");
-    out.innerHTML = `<div class="card"><h3>${esc(f.name)}<span>.csd</span></h3><p class="said">${esc(f.why ?? "No one holds it.")}</p>${free ? `<div class="row"><a class="btn main" href="https://cairn-substrate.com" target="_blank" rel="noopener">Register it on Cairn</a></div>` : ""}</div>`;
+    out.innerHTML = `<div class="card"><h3>${esc(f.name)}<span>.csd</span></h3><p class="said">${esc(f.why ?? "No one holds it.")}</p>${free ? `<div class="row"><a class="btn main" href="#get">Get it in Doorway</a></div><p class="said">Publish your site in Doorway and choose this name: Doorway gets it for you, for a year at a time.</p>` : ""}</div>`;
     return;
   }
   const cid = f.open?.startsWith("ipfs://") ? f.open.slice(7) : null;
@@ -149,7 +149,7 @@ async function point(f: Found) {
     if (s.address.toLowerCase() !== f.owner!.toLowerCase()) throw new Error(`Cairn Wallet's account (${friendlyName(s.address)}) doesn't hold ${f.name}.csd; ${friendlyName(f.owner!)} does.`);
     const ask = W.pointAsk(f.name, f.profile ?? {}, cid, await tipOf());
     await s.send(ask.app, ask.fee);
-    said.className = "said ok"; said.textContent = `Sent. ${f.name}.csd points to it from the next block, in about two minutes, and the doors take the site once Doorway hands it to them.`;
+    said.className = "said ok"; said.textContent = `Sent. ${f.name}.csd points to it in about two minutes.`;
   } catch (e: any) { said.className = "said bad"; said.textContent = String(e?.message ?? e); }
   btn.disabled = false;
 }
@@ -161,7 +161,7 @@ async function keep(cid: string) {
     const s = await cairnSigner();
     const ask = W.keepAsk(cid, 1, await tipOf());
     await s.send(ask.app, ask.fee);
-    said.className = "said ok"; said.textContent = "Done. Another year counts from the next block, in about two minutes.";
+    said.className = "said ok"; said.textContent = "Done. The extra year shows in about two minutes.";
   } catch (e: any) { said.className = "said bad"; said.textContent = String(e?.message ?? e); }
   btn.disabled = false;
 }

@@ -3,7 +3,7 @@
   "private": true,
   "description": "Opens .csd names (web+csd: links) through the app's own node, or the doors while it catches up; bundled into app/ui/resolver.js. Uses the kit (../../kit) for the light client.",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js",
+    "build": "esbuild src/main.ts --bundle --format=iife --global-name=CsdResolver --minify --target=es2020 --outfile=../ui/resolver.js && esbuild src/buy.ts --bundle --format=iife --global-name=CsdBuy --minify --target=es2020 --outfile=../ui/buy.js",
     "test": "esbuild test/door.test.mts --bundle --platform=node --format=esm --outfile=test/.out.mjs --log-level=warning && node test/.out.mjs && esbuild test/directory.test.mts --bundle --platform=node --format=esm --outfile=test/.out.mjs --log-level=warning && node test/.out.mjs && esbuild test/wallet.test.mts --bundle --platform=node --format=esm --outfile=test/.out.mjs --log-level=warning && node test/.out.mjs"
   },
   "dependencies": {
@@ -14,7 +14,8 @@
     "@noble/hashes": "1.8.0",
     "ipfs-car": "3.1.0",
     "ipfs-unixfs": "11.2.5",
-    "multiformats": "13.4.2"
+    "multiformats": "13.4.2",
+    "viem": "2.57.17"
   },
   "devDependencies": {
     "esbuild": "0.25.10"
