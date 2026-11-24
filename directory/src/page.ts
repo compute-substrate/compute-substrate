@@ -145,7 +145,7 @@ $("grid").addEventListener("click", async e => {
     try {
       await net.keep(me.signer(net as any), cid, years);
       $("needCsd").hidden = true;
-      say(`Done. It's kept up for ${years} more year${years === 1 ? "" : "s"}. That shows in about two minutes.`);
+      say(`Done. It's kept up for ${years} more year${years === 1 ? "" : "s"}.`);
       keeping = null; render();
       setTimeout(load, 130_000);
     } catch (err: any) {
@@ -169,7 +169,7 @@ $("grid").addEventListener("click", async e => {
     else await net.write(me.signer(net as any), DIRECTORY, s.key);
     mine.add(s.key);
     $("needCsd").hidden = true;
-    say(`Thanks. Your recommendation of ${label} counts in about two minutes.`);
+    say(`Thanks for recommending ${label}.`);
     render();
     setTimeout(load, 130_000);
   } catch (err: any) {
@@ -187,7 +187,7 @@ $("freeInvite").onclick = async () => {
     if (!open.length) { $("freeSaid").textContent = "None left right now."; return; }
     const r = await claimInvite(net as any, open[Math.floor(Math.random() * open.length)].code, me.address);
     $("freeSaid").textContent = "Taken.";
-    say(`${r.csd} CSD is on its way. Recommend again in about two minutes.`);
+    say(`It's on its way. Recommend again in a moment.`);
   } catch (e: any) { $("freeSaid").textContent = String(e?.message ?? e); }
 };
 $("buyUsdc").onclick = async () => {
@@ -197,7 +197,7 @@ $("buyUsdc").onclick = async () => {
     try {
       await topUpWithUsdc(net as any, me, 1, (step: string) => { $("buySaid").textContent = step; });
       $("buySaid").textContent = "Bought.";
-      say("Your top-up arrives in a few minutes. Recommend again then.");
+      say("Your top-up is on its way. Recommend again in a moment.");
     } catch (e) { $("buySaid").textContent = topUpError(e); }
   } catch (e: any) { $("buySaid").textContent = "Couldn't load the market: " + String(e?.message ?? e); }
 };

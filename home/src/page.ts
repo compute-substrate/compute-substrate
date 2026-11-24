@@ -106,7 +106,7 @@ $("addYear").onclick = async () => {
   try {
     me ??= await writingKey(NAME);
     await net.keep(me.signer(net as any), myCid, 1);
-    $("keepSaid").textContent = "Thank you. Your year counts in about two minutes.";
+    $("keepSaid").textContent = "Thank you. The year is added.";
     setTimeout(showKept, 130_000);
   } catch (e: any) {
     const m = String(e?.message ?? e);
@@ -121,7 +121,7 @@ $("addYear").onclick = async () => {
           const open = await openInvites(net as any);
           if (!open.length) { $("keepSaid").textContent = "None are left right now. Try again later."; return; }
           const r = await claimInvite(net as any, open[Math.floor(Math.random() * open.length)].code, me!.address);
-          $("keepSaid").textContent = `${r.csd} CSD is on its way. Add the year again in about two minutes.`;
+          $("keepSaid").textContent = `It's on its way. Add the year again in a moment.`;
         } catch (err: any) { $("keepSaid").textContent = String(err?.message ?? err); }
       };
     } else $("keepSaid").textContent = m;

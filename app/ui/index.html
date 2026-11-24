@@ -694,7 +694,7 @@
         const fee = W.nameFee(name, (await (await fetch(`${await readingNode()}/tip`)).json()).height);
         getting = { name, fee };
         btn.textContent = `Get ${name}.csd`;
-        st.textContent = `${name}.csd is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth. It takes about 25 minutes while Doorway is open, and then your site goes up there.`;
+        st.textContent = `${name}.csd is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth (the yearly fee goes to CairnX, which runs the name service). It takes about 25 minutes while Doorway is open, and then your site goes up there.`;
         return;
       }
       if (o?.why && !o.owner && !o.free) { st.textContent = o.why; return; }
@@ -716,7 +716,7 @@
         await W.send(node, wallet.key, W.pointAsk(name, pointing.profile, pending.cid, tip));
         pointing = null; btn.textContent = "Point it here";
         pending.name = name; pending.until = Date.now() + 60 * 60_000;
-        st.textContent = `Done. Your site goes up at ${name}.csd in about two minutes.`;
+        st.textContent = `Putting your site up at ${name}.csd…`;
         publishTick();
       } catch (err) {
         const m = String(err && err.message || err);
@@ -799,7 +799,7 @@
             regSay(`✓ ${r.name}.csd is yours. Putting your site there…`);
             await W.send(node, wallet.key, W.pointAsk(r.name, o.profile ?? {}, r.cid, tip));
             pending = { cid: r.cid, name: r.name, until: Date.now() + 60 * 60_000 };
-            regSay(`✓ ${r.name}.csd is yours, for a year. Your site goes up there in about two minutes.`);
+            regSay(`✓ ${r.name}.csd is yours, for a year. Putting your site up there…`);
             publishTick();
           } else regSay(`✓ ${r.name}.csd is yours, for a year.`);
           setTimeout(showBalance, 3000);
@@ -833,7 +833,7 @@
         $("regStatus").hidden = false;
         $("regStatus").innerHTML = `${esc(name)}.csd is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${postsSaid(fee)}' worth)</button>`;
         $("renewName").onclick = async () => {
-          try { await W.send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year. That shows in about two minutes.`); setTimeout(showBalance, 3000); }
+          try { await W.send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year.`); setTimeout(showBalance, 3000); }
           catch (err) { const m = String(err && err.message || err); if (/Not enough CSD/.test(m)) needMore($("regStatus"), "You don't have enough left for that."); else regSay(m); }
         };
         return;
@@ -855,7 +855,7 @@
       renderSites();
       return;
     }
-    $("publishStatus").textContent = `Waiting for ${pending.name}.csd to point to it. It goes up about two minutes after you approve.`;
+    $("publishStatus").textContent = `Putting your site up at ${pending.name}.csd, as soon as you've approved it…`;
     setTimeout(publishTick, 30_000);
   }
 
@@ -948,7 +948,9 @@
         const node = await readingNode();
         const tip = (await (await fetch(node + "/tip")).json()).height;
         await W.send(node, wallet.key, W.keepAsk(cid, years, tip));
-        $("keepSaid").textContent = `Done. It's kept up until ${fromYear + years}. That shows in about two minutes.`;
+        $("keepSaid").textContent = `Done. It's kept up until ${fromYear + years}.`;
+        // shown at once; the network's own count replaces it once the record is in
+        if (keptInfo) { const u = keptInfo.until.get(cid); keptInfo.until.set(cid, Math.max(u ?? 0, keptInfo.tip) + years * 262_800); renderSites(); renderDiscover(); }
         setTimeout(refreshKept, 130_000);
         setTimeout(showBalance, 3000);
       } catch (err) {
@@ -992,7 +994,7 @@
     try {
       const got = await W.welcomeKey(await readingNode(), wallet.address);
       store.set("doorway.welcomed", wallet.address);
-      if (got) { $("walletStatus").textContent = `Welcome! Someone left you enough for about ${postsSaid(got)}. It's ready in about two minutes.`; setTimeout(showBalance, 130_000); }
+      if (got) { $("walletStatus").textContent = `Welcome! Someone left you enough for about ${postsSaid(got)}. It's on its way.`; setTimeout(showBalance, 130_000); }
     } catch {}
   }
   // ── Adding CSD by card (buy.js, loaded when first needed) ──
@@ -1018,7 +1020,7 @@
       $("addAmounts").querySelectorAll("[data-a]").forEach(b => b.onclick = () => { amount = +b.dataset.a; show(); });
       // about how much that is, at the market's price now (a euro taken as about 1.1 dollars)
       const csd = price ? Math.floor(amount * (cur === "eur" ? 1.1 : 1) / price) : null;
-      $("addSaid").textContent = csd ? `Enough for about ${postsSaid(csd)}, or ${(posts(csd) * 5).toLocaleString("en-US")} likes.` : "";
+      $("addSaid").textContent = csd ? `Enough for about ${postsSaid(csd)}.` : "";
     };
     show();
     $("addDlg").hidden = false;
@@ -1038,7 +1040,7 @@
         const url = await invoke("buy_link", { address: B.ethAddress(wallet.key), amount, currency: cur });
         await invoke("plugin:opener|open_url", { url });
         store.set("doorway.buying", { since: Date.now() });
-        $("addSaid").textContent = "Pay on Stripe's page in your browser. Your top-up arrives a few minutes after you've paid, even with this window closed.";
+        $("addSaid").textContent = "Pay on Stripe's page in your browser. Your top-up comes in shortly after you've paid, even with this window closed.";
         watchBuying();
       } catch (err) { $("addSaid").textContent = String(err && err.message || err); $("addYes").disabled = false; }
     };
@@ -1056,7 +1058,7 @@
         if (!wallet) await loadWallet();
         const r = await B.buy(await readingNode(), wallet.key, s => { if (!$("addDlg").hidden) $("addSaid").textContent = s; });
         if (r.state === "bought") {
-          const said = `Your top-up is on its way: enough for about ${postsSaid(r.csd)}, ready in a few minutes.`;
+          const said = `Your top-up is on its way: enough for about ${postsSaid(r.csd)}.`;
           $("walletStatus").textContent = said;
           if (!$("addDlg").hidden) $("addSaid").textContent = said;
           setTimeout(showBalance, 180_000);
@@ -1176,7 +1178,7 @@
         const tip = (await (await fetch(node + "/tip")).json()).height;
         await W.send(node, wallet.key, W.recommendAsk(s, tip));
         const r = recommended(); r.push(s.key); store.set("doorway.recommended", r);
-        $("discoverNote").textContent = `You recommend ${label}. It counts in about two minutes.`;
+        $("discoverNote").textContent = `You recommend ${label}.`;
         renderDiscover();
         setTimeout(showBalance, 3000);
       } catch (err) {

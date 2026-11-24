@@ -149,7 +149,7 @@ async function point(f: Found) {
     if (s.address.toLowerCase() !== f.owner!.toLowerCase()) throw new Error(`Cairn Wallet's account (${friendlyName(s.address)}) doesn't hold ${f.name}.csd; ${friendlyName(f.owner!)} does.`);
     const ask = W.pointAsk(f.name, f.profile ?? {}, cid, await tipOf());
     await s.send(ask.app, ask.fee);
-    said.className = "said ok"; said.textContent = `Sent. ${f.name}.csd points to it in about two minutes.`;
+    said.className = "said ok"; said.textContent = `Done. ${f.name}.csd points to it now.`;
   } catch (e: any) { said.className = "said bad"; said.textContent = String(e?.message ?? e); }
   btn.disabled = false;
 }
@@ -161,7 +161,7 @@ async function keep(cid: string) {
     const s = await cairnSigner();
     const ask = W.keepAsk(cid, 1, await tipOf());
     await s.send(ask.app, ask.fee);
-    said.className = "said ok"; said.textContent = "Done. The extra year shows in about two minutes.";
+    said.className = "said ok"; said.textContent = "Done. Another year is added.";
   } catch (e: any) { said.className = "said bad"; said.textContent = String(e?.message ?? e); }
   btn.disabled = false;
 }

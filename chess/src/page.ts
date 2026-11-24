@@ -104,7 +104,7 @@ function renderGame() {
   $("pBottom").innerHTML = player(flip ? "b" : "w");
   const pendingMove = s.moves.some(m => m.pending);
   $("state").textContent = s.result !== "playing" ? `${s.result.replace("1/2-1/2", "½–½")}. ${s.how}.`
-    : pendingMove ? "Your move is on its way: it shows within about two minutes."
+    : pendingMove ? "Sent."
     : canMove ? (seat ? "Your move." : `Your move, if you take ${s.turn === "w" ? "white" : "black"}.`)
     : s.drawOffer && myColor && s.drawOffer !== meAddr ? "Your opponent offers a draw." : s.how + ".";
   // the moves, in pairs
