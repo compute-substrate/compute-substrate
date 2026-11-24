@@ -124,6 +124,9 @@
   th {
     font-weight: 600;
   }
+  /* long unbroken text (an invite code, an address) wraps in its cell instead of crushing the others */
+  td { overflow-wrap: anywhere; }
+  td.small { min-width: 14ch; }
 
   .section-note {
     margin-top: -2px;

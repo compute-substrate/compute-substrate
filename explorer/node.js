@@ -27,9 +27,12 @@
     ranked ??= rank();
     let last;
     for (const b of await ranked) {
-      try { const r = await fetch(b + path, opts); if (r.status < 500) return r; last = new Error(`${path} → HTTP ${r.status}`); }
+      // a node that doesn't serve this path (404) or fails: the next one is asked; if every node
+      // says 404, that answer stands
+      try { const r = await fetch(b + path, opts); if (r.ok || (r.status < 500 && r.status !== 404)) return r; last = r; }
       catch (e) { last = e; }
     }
+    if (last instanceof Response) return last;
     throw last ?? new Error("No node answered.");
   };
   window.csdDoors = DOORS;
