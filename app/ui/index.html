@@ -1075,7 +1075,8 @@
       try {
         const B = await loadBuy();
         if (!wallet) await loadWallet();
-        const r = await B.buy(await readingNode(), wallet.key, s => { if (!$("addDlg").hidden) $("addSaid").textContent = s; });
+        // the steps of the trade stay out of sight: someone topping up only needs to know it's happening
+        const r = await B.buy(await readingNode(), wallet.key, () => { if (!$("addDlg").hidden) $("addSaid").textContent = "Topping up…"; });
         if (r.state === "bought") {
           const said = `Your top-up is on its way: enough for about ${postsSaid(r.csd)}.`;
           $("walletStatus").textContent = said;
@@ -1085,8 +1086,10 @@
           store.set("doorway.buying", { since: Date.now() }); // the rest, once this trade settles
         }
       } catch (err) {
-        const why = buyLib ? (await buyLib).why(err) : String(err);
-        if (!$("addDlg").hidden) $("addSaid").textContent = `${why} Doorway keeps trying.`;
+        // the reason (no seller just now, a busy moment) matters to nobody topping up: it's kept
+        // for the console, and the person hears that nothing is lost
+        console.warn("top-up:", buyLib ? (await buyLib).why(err) : String(err));
+        if (!$("addDlg").hidden) $("addSaid").textContent = "It can't go through just yet. Doorway keeps trying, and nothing is lost.";
       }
       buyTimer = setTimeout(tick, 30_000);
     };
