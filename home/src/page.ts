@@ -111,7 +111,7 @@ $("addYear").onclick = async () => {
   } catch (e: any) {
     const m = String(e?.message ?? e);
     if (/Not enough CSD/.test(m) && me!.doorway) {
-      $("keepSaid").innerHTML = `A year costs 0.25 CSD, and your key has less. <button id="addInDoorway">Add CSD in Doorway</button>`;
+      $("keepSaid").innerHTML = `You've run out for now. <button id="addInDoorway">Top up in Doorway</button>`;
       $("addInDoorway").onclick = () => doorwayAdd();
     } else if (/Not enough CSD/.test(m)) {
       $("keepSaid").innerHTML = `A year costs 0.25 CSD, and your key here has less. <button id="takeInvite">Take a free invite</button> someone left for newcomers, or send CSD to <code>${me!.address}</code>.`;

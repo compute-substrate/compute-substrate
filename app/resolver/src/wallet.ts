@@ -101,15 +101,17 @@ export async function welcomeKey(node: string, address: Hex): Promise<number | n
 }
 
 // Words for what a site asks
+// (what it costs is said beside it, counted in posts: a post is 0.25 CSD)
 export function describe(ask: Ask): string {
-  const csd = `${Number(ask.fee + (ask.burn ?? 0n)) / 1e8} CSD`;
+  const posts = Number(ask.fee + (ask.burn ?? 0n)) / Number(MIN_FEE_PROPOSE);
+  const worth = posts >= 2 ? `, ${Math.round(posts)} posts' worth` : "";
   if (isKeep(ask) && ask.app.kind === "propose") {
     const years = 1 + Number((ask.burn ?? 0n) / MIN_FEE_PROPOSE);
-    return `Keep the site ${ask.app.uri.slice(7, 19)}… up for ${years} more year${years === 1 ? "" : "s"}, for ${csd}`;
+    return `Keep the site ${ask.app.uri.slice(7, 19)}… up for ${years} more year${years === 1 ? "" : "s"}${worth}`;
   }
-  if (ask.app.kind === "propose") return `Write "${ask.app.uri.length > 140 ? ask.app.uri.slice(0, 140) + "…" : ask.app.uri}" under ${ask.app.domain}, for ${csd}`;
-  if (ask.app.kind === "attest") return `Attest ${ask.app.score} to record ${ask.app.proposalId.slice(0, 10)}…, for ${csd}`;
-  return csd;
+  if (ask.app.kind === "propose") return `Write "${ask.app.uri.length > 140 ? ask.app.uri.slice(0, 140) + "…" : ask.app.uri}"${worth}`;
+  if (ask.app.kind === "attest") return `Back a post (${ask.app.proposalId.slice(0, 10)}…)${worth}`;
+  return worth.slice(2);
 }
 
 // Recommending a site in the directory: the first recommendation is a record naming it, the rest

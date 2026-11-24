@@ -11,7 +11,7 @@ const GLYPH: Record<string, string> = { k: "♚", q: "♛", r: "♜", b: "♝", 
 let c: ReturnType<typeof chessNet>;
 let door = "", inDoorway = false;
 // what to do when the key is short of CSD: Doorway adds it by card; elsewhere, get Doorway
-const short = () => inDoorway ? "Add some in Doorway, then try again." : "Open this in Doorway (doorway.place) to add some by card.";
+const short = () => inDoorway ? "Top up in Doorway, then try again." : "Open this in Doorway (doorway.place) to top up by card.";
 let meAddr = "";
 let games: GameRecord[] = [], attests: Attest[] = [], checked = new Set<string>();
 const states = new Map<string, State>();
@@ -138,7 +138,7 @@ async function send(score: number, nth: number, what: string) {
     say("");
     rebuild();
   } catch (e: any) {
-    say(/Not enough CSD/.test(String(e?.message)) ? `That needs 0.05 CSD, and your key has less. ${short()}` : String(e?.message ?? e));
+    say(/Not enough CSD/.test(String(e?.message)) ? `You've run out for now. ${short()}` : String(e?.message ?? e));
   }
   sending = false; pick = null; renderGame();
 }
@@ -215,7 +215,7 @@ $("start").onclick = async () => {
     rebuild();
     location.hash = `g/${id}`;
   } catch (e: any) {
-    say(/Not enough CSD/.test(String(e?.message)) ? `Starting a game costs 0.25 CSD, and your key has less. ${short()}` : String(e?.message ?? e));
+    say(/Not enough CSD/.test(String(e?.message)) ? `You've run out for now. ${short()}` : String(e?.message ?? e));
   }
   ($("start") as HTMLButtonElement).disabled = false;
 };
@@ -245,7 +245,7 @@ async function tick() {
     meAddr = k.address.toLowerCase(); inDoorway = !!k.doorway;
     $("me").innerHTML = `<span title="${esc(meAddr ?? "")}">Playing as ${esc(meAddr ? friendlyName(meAddr) : "you")}</span>`;
     if (k.doorway) { $("keyWhose").textContent = "your key in Doorway, once you allow each one there"; $("backup").hidden = true; }
-    $("backup").onclick = () => navigator.clipboard?.writeText(k.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can play as you and spend its CSD.")).catch(() => {});
+    $("backup").onclick = () => navigator.clipboard?.writeText(k.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can play as you and use your balance.")).catch(() => {});
     await tick();
     setInterval(tick, 30_000);
   } catch (e: any) { say(String(e?.message ?? e)); }

@@ -31,7 +31,7 @@ $("howOpen").innerHTML = viaDoorway
 
 const me = await writingKey("directory");
 // under Doorway, CSD is added in Doorway (by card), not here
-if (me.doorway) $("needCsd").innerHTML = `<p style="margin:0"><strong>Recommending costs a little CSD</strong> <small>(0.05, or 0.25 to be the first for a site), and your key has too little.</small></p><div class="row"><button id="addInDoorway">Add CSD in Doorway</button><small>by card</small></div>`;
+if (me.doorway) $("needCsd").innerHTML = `<p style="margin:0"><strong>Recommending takes a tiny amount</strong> <small>and you've run out for now.</small></p><div class="row"><button id="addInDoorway">Top up in Doorway</button><small>by card</small></div>`;
 if (me.doorway) $("addInDoorway").onclick = () => doorwayAdd();
 if (me.doorway) $("keyBtn").closest("span")!.textContent = "Each recommendation is a record on Compute Substrate, signed by your key in Doorway once you allow it there. A key counts once per site.";
 let net: ReturnType<typeof connect>;
@@ -105,7 +105,7 @@ function keepPanel(s: Listed) {
   return `<div class="keep">
     <small>${lifeOf(s.cid) ? `Kept up until ${lifeSaid(s.cid)}.` : "Nobody keeps it up yet: it stays only while its name points to it."} Anyone can add time, and the doors keep it until it runs out, name or not.</small>
     <div class="years">${choices.map(y => `<button class="rec" data-years="${y}" aria-pressed="${y === keepYears}">${from + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("")}</div>
-    <div class="row"><small>Until ${from + keepYears}, for ${(keepYears * 0.25).toLocaleString()} CSD. The first 0.25 pays for the record; the rest is burned.</small><button class="rec go" data-keepgo="${esc(s.cid)}">Keep it</button></div>
+    <div class="row"><small>Until ${from + keepYears}, for ${keepYears} posts' worth. Nobody is paid for it.</small><button class="rec go" data-keepgo="${esc(s.cid)}">Keep it</button></div>
   </div>`;
 }
 
@@ -150,7 +150,7 @@ $("grid").addEventListener("click", async e => {
       setTimeout(load, 130_000);
     } catch (err: any) {
       go.disabled = false;
-      if (/Not enough CSD/.test(String(err?.message))) { say(`That needs ${(years * 0.25).toLocaleString()} CSD.`); $("needCsd").hidden = false; }
+      if (/Not enough CSD/.test(String(err?.message))) { say("You don't have enough left for that many years."); $("needCsd").hidden = false; }
       else say(String(err?.message ?? err));
     }
     return;
@@ -197,13 +197,13 @@ $("buyUsdc").onclick = async () => {
     try {
       await topUpWithUsdc(net as any, me, 1, (step: string) => { $("buySaid").textContent = step; });
       $("buySaid").textContent = "Bought.";
-      say("The CSD arrives a few minutes after the market maker's lock. Recommend again then.");
+      say("Your top-up arrives in a few minutes. Recommend again then.");
     } catch (e) { $("buySaid").textContent = topUpError(e); }
   } catch (e: any) { $("buySaid").textContent = "Couldn't load the market: " + String(e?.message ?? e); }
 };
 $("copyAddr").onclick = () => navigator.clipboard?.writeText(me.address).then(() => { $("copyAddr").textContent = "copied"; }).catch(() => {});
 // through Doorway there's no key here to back up (the line about it says so instead)
-if (!me.doorway) $("keyBtn").onclick = () => navigator.clipboard?.writeText(me.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can spend its CSD.")).catch(() => {});
+if (!me.doorway) $("keyBtn").onclick = () => navigator.clipboard?.writeText(me.backup()).then(() => say("Key copied. Keep it somewhere safe: whoever has it can use your balance.")).catch(() => {});
 
 const setOrder = (o: "rec" | "new") => { order = o; $("byRec").setAttribute("aria-pressed", String(o === "rec")); $("byNew").setAttribute("aria-pressed", String(o === "new")); render(); };
 $("byRec").onclick = () => setOrder("rec");

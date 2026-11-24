@@ -197,12 +197,12 @@
 
   <div class="ask" id="addDlg" hidden role="dialog" aria-modal="true" aria-labelledby="addTitle">
     <div>
-      <h3 id="addTitle">Add CSD</h3>
-      <p style="font-size:14px">Reading is always free. Writing, recommending and keeping sites up costs a little CSD each time. There are no ads here and nobody sells what you do: this is what pays the people who keep the network running.</p>
+      <h3 id="addTitle">Top up</h3>
+      <p style="font-size:14px">This is a web with no ads, and nobody selling your data. Reading is always free; posting, recommending and keeping sites up cost a tiny amount, which pays the people who keep the network running.</p>
       <div class="years" id="addAmounts"></div>
       <p class="hint" style="margin:0" id="addSaid"></p>
       <div class="btns"><button id="addNo">Close</button><button id="addYes">Pay by card</button></div>
-      <p class="hint" style="margin:0">You pay on Stripe's page; the first time, it asks you to sign up with Link. Stripe sends a digital dollar (USDC) to your key, and Doorway trades it for CSD on the open market by itself. Stripe's fee comes on top.</p>
+      <p class="hint" style="margin:0">You pay by card on Stripe's page (the first time, it asks you to sign up with Link), and Doorway does the rest by itself. Stripe's fee comes on top.</p>
     </div>
   </div>
 
@@ -223,15 +223,15 @@
       <h3>Your key</h3>
       <p class="sub" style="margin:2px 0 6px">One key for every site you open here: sites ask Doorway when they want to write, and never see the key itself.</p>
       <div class="row" style="border-top:0">
-        <div style="min-width:0">Balance <b id="walletBal">…</b> CSD<small><code id="walletAddr" style="overflow-wrap:anywhere"></code></small></div>
-        <button id="walletAdd" class="primary">Add CSD</button>
+        <div style="min-width:0">Enough for about <b id="walletPosts">…</b><small><span id="walletBal" hidden>…</span><span id="walletCsd"></span></small></div>
+        <button id="walletAdd" class="primary">Top up</button>
       </div>
       <div class="row">
-        <div>Its address<small>For sending CSD to it from somewhere else</small></div>
+        <div>Its address<small><code id="walletAddr" style="overflow-wrap:anywhere"></code></small></div>
         <button id="walletCopy">Copy address</button>
       </div>
       <div class="row">
-        <div>Back it up<small>Whoever has the key can spend its CSD. Keep the copy somewhere safe.</small></div>
+        <div>Back it up<small>Whoever has the key can use your balance. Keep the copy somewhere safe.</small></div>
         <button id="walletBackup">Copy key</button>
       </div>
       <form class="row" id="walletRestore">
@@ -685,16 +685,16 @@
       let o = null; try { o = await CsdResolver.lookup(name, { doors: await doorList() }); } catch {}
       if (o?.owner && o.owner.toLowerCase() === wallet.address.toLowerCase()) {
         pointing = { name, profile: o.profile ?? {} };
-        btn.textContent = "Point it here (0.25 CSD)";
-        st.textContent = `${name}.csd is yours. Press again to show this site there, for 0.25 CSD.`;
+        btn.textContent = "Show it there";
+        st.textContent = `${name}.csd is yours. Press again to show this site there (one post's worth).`;
         return;
       }
       // a free name: Doorway gets it with its own key (the second press), then points it here
       if (o?.free && getting?.name !== name) {
         const fee = W.nameFee(name, (await (await fetch(`${await readingNode()}/tip`)).json()).height);
         getting = { name, fee };
-        btn.textContent = `Get ${name}.csd (${fee} CSD)`;
-        st.textContent = `${name}.csd is free. Make it yours: ${fee} CSD for a year, plus 0.25 for each of three steps. It takes about 25 minutes, while Doorway is open, and then your site goes up there.`;
+        btn.textContent = `Get ${name}.csd`;
+        st.textContent = `${name}.csd is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth. It takes about 25 minutes while Doorway is open, and then your site goes up there.`;
         return;
       }
       if (o?.why && !o.owner && !o.free) { st.textContent = o.why; return; }
@@ -702,7 +702,7 @@
     if (getting?.name === name) {
       const need = getting.fee + 1;
       const bal = +$("walletBal").textContent;
-      if (Number.isFinite(bal) && bal < need) { needMore(st, `That needs about ${need} CSD, and your key holds ${bal}.`); return; }
+      if (Number.isFinite(bal) && bal < need) { needMore(st, `That needs about ${postsSaid(need)}' worth, and you have about ${postsSaid(bal)} left.`); return; }
       getting = null; btn.textContent = "Point it here";
       startName(name, pending.cid);
       st.textContent = `Getting ${name}.csd. You can keep using Doorway meanwhile; it shows here how it's going.`;
@@ -809,7 +809,7 @@
       }
     } catch (err) {
       const m = String(err && err.message || err);
-      if (/Not enough CSD/.test(m)) { needMore($("regStatus"), `Getting ${r.name}.csd stopped: your key ran short of CSD.`); $("regStatus").hidden = false; return again(120_000); }
+      if (/Not enough CSD/.test(m)) { needMore($("regStatus"), `Getting ${r.name}.csd paused: you've run low.`); $("regStatus").hidden = false; return again(120_000); }
       regSay(`Getting ${r.name}.csd: ${m} Doorway keeps trying.`);
     }
     again();
@@ -831,10 +831,10 @@
         if (end - tip > 60 * 720) continue; // more than about two months left
         const fee = W.nameFee(name, tip);
         $("regStatus").hidden = false;
-        $("regStatus").innerHTML = `${esc(name)}.csd is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${fee} CSD)</button>`;
+        $("regStatus").innerHTML = `${esc(name)}.csd is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${postsSaid(fee)}' worth)</button>`;
         $("renewName").onclick = async () => {
           try { await W.send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year. That shows in about two minutes.`); setTimeout(showBalance, 3000); }
-          catch (err) { const m = String(err && err.message || err); if (/Not enough CSD/.test(m)) needMore($("regStatus"), `That needs ${fee} CSD, and your key has less.`); else regSay(m); }
+          catch (err) { const m = String(err && err.message || err); if (/Not enough CSD/.test(m)) needMore($("regStatus"), "You don't have enough left for that."); else regSay(m); }
         };
         return;
       } catch {}
@@ -935,7 +935,7 @@
     const show = () => {
       $("keepYears").innerHTML = choices.map(y => `<button data-y="${y}" aria-pressed="${y === years}">${fromYear + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("");
       $("keepYears").querySelectorAll("[data-y]").forEach(b => b.onclick = () => { years = +b.dataset.y; show(); });
-      $("keepSaid").textContent = `Until ${fromYear + years}, for ${String(years * 0.25)} CSD from your key${/^[\d.]+$/.test($("walletBal").textContent) ? ` (it holds ${$("walletBal").textContent})` : ""}. The first 0.25 pays for the record; the rest is burned, so nobody gets it.`;
+      $("keepSaid").textContent = `Until ${fromYear + years}, for ${postsSaid(years * 0.25)}' worth${/^[\d.]+$/.test($("walletBal").textContent) ? ` (you have about ${postsSaid(+$("walletBal").textContent)} left)` : ""}. Nobody is paid for this: it's set aside for good, so keeping a site up makes nobody money.`;
     };
     show();
     $("keepDlg").hidden = false;
@@ -953,7 +953,7 @@
         setTimeout(showBalance, 3000);
       } catch (err) {
         const m = String(err && err.message || err);
-        if (/Not enough CSD/.test(m)) needMore($("keepSaid"), `That needs ${String(years * 0.25)} CSD, and your key has less.`); else $("keepSaid").textContent = m;
+        if (/Not enough CSD/.test(m)) needMore($("keepSaid"), "You don't have enough left for that many years."); else $("keepSaid").textContent = m;
       }
       $("keepYes").disabled = false;
     };
@@ -978,6 +978,9 @@
   }
   async function showBalance() {
     try { $("walletBal").textContent = String(await W.balance(await readingNode(), wallet.address)); } catch { $("walletBal").textContent = "?"; }
+    const b = +$("walletBal").textContent;
+    $("walletPosts").textContent = Number.isFinite(b) ? postsSaid(b) : "…";
+    $("walletCsd").textContent = Number.isFinite(b) ? `${b} CSD` : "";
     const a = Object.keys(allowed());
     $("walletAllowedRow").hidden = !a.length;
     $("walletAllowed").innerHTML = a.map(s => `${esc(s)}.csd <button class="link" data-unallow="${esc(s)}" style="background:none;border:0;padding:0;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit">stop</button>`).join(", ");
@@ -989,7 +992,7 @@
     try {
       const got = await W.welcomeKey(await readingNode(), wallet.address);
       store.set("doorway.welcomed", wallet.address);
-      if (got) { $("walletStatus").textContent = `Welcome! Someone left you ${got} CSD to write with. It's ready in about two minutes.`; setTimeout(showBalance, 130_000); }
+      if (got) { $("walletStatus").textContent = `Welcome! Someone left you enough for about ${postsSaid(got)}. It's ready in about two minutes.`; setTimeout(showBalance, 130_000); }
     } catch {}
   }
   // ── Adding CSD by card (buy.js, loaded when first needed) ──
@@ -998,8 +1001,12 @@
   const loadBuy = () => buyLib ??= new Promise((ok, no) => { const sc = document.createElement("script"); sc.src = "buy.js"; sc.onload = () => ok(window.CsdBuy); sc.onerror = no; document.head.appendChild(sc); });
   const inEurope = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone.startsWith("Europe/"); } catch { return false; } })();
   const money = (n, cur) => cur === "eur" ? `€${n}` : `$${n}`;
+  // what's left, counted in posts (a post is 0.25 CSD; a like or a move is a fifth of one), since
+  // a number of CSD means nothing to someone new
+  const posts = csd => Math.floor(Number(csd) / 0.25 + 1e-9);
+  const postsSaid = csd => { const n = posts(csd); return n === 1 ? "1 post" : `${n.toLocaleString("en-US")} posts`; };
   function needMore(el, text) {
-    el.innerHTML = `${esc(text)} <button type="button" class="add">Add CSD</button>`;
+    el.innerHTML = `${esc(text)} <button type="button" class="add">Top up</button>`;
     el.querySelector(".add").onclick = () => openAdd();
   }
   async function openAdd() {
@@ -1011,7 +1018,7 @@
       $("addAmounts").querySelectorAll("[data-a]").forEach(b => b.onclick = () => { amount = +b.dataset.a; show(); });
       // about how much that is, at the market's price now (a euro taken as about 1.1 dollars)
       const csd = price ? Math.floor(amount * (cur === "eur" ? 1.1 : 1) / price) : null;
-      $("addSaid").textContent = csd ? `About ${csd} CSD: enough for about ${Math.floor(csd / 0.25)} posts or years of keeping a site.` : "";
+      $("addSaid").textContent = csd ? `Enough for about ${postsSaid(csd)}, or ${(posts(csd) * 5).toLocaleString("en-US")} likes.` : "";
     };
     show();
     $("addDlg").hidden = false;
@@ -1031,7 +1038,7 @@
         const url = await invoke("buy_link", { address: B.ethAddress(wallet.key), amount, currency: cur });
         await invoke("plugin:opener|open_url", { url });
         store.set("doorway.buying", { since: Date.now() });
-        $("addSaid").textContent = "Pay on Stripe's page in your browser. Doorway buys the CSD as soon as the payment arrives, usually within a few minutes, even with this window closed.";
+        $("addSaid").textContent = "Pay on Stripe's page in your browser. Your top-up arrives a few minutes after you've paid, even with this window closed.";
         watchBuying();
       } catch (err) { $("addSaid").textContent = String(err && err.message || err); $("addYes").disabled = false; }
     };
@@ -1049,7 +1056,7 @@
         if (!wallet) await loadWallet();
         const r = await B.buy(await readingNode(), wallet.key, s => { if (!$("addDlg").hidden) $("addSaid").textContent = s; });
         if (r.state === "bought") {
-          const said = `Your CSD is on its way: ${r.csd.toFixed(2)} CSD, ready in a few minutes.`;
+          const said = `Your top-up is on its way: enough for about ${postsSaid(r.csd)}, ready in a few minutes.`;
           $("walletStatus").textContent = said;
           if (!$("addDlg").hidden) $("addSaid").textContent = said;
           setTimeout(showBalance, 180_000);
@@ -1066,7 +1073,7 @@
   }
   if (store.get("doorway.buying")) setTimeout(watchBuying, 5000);
   $("walletCopy").onclick = () => navigator.clipboard.writeText(wallet.address).then(() => { $("walletCopy").textContent = "Copied"; setTimeout(() => $("walletCopy").textContent = "Copy address", 1500); }).catch(() => {});
-  $("walletBackup").onclick = () => navigator.clipboard.writeText(wallet.key).then(() => { $("walletStatus").textContent = "Key copied. Keep it somewhere safe: whoever has it can spend its CSD."; }).catch(() => {});
+  $("walletBackup").onclick = () => navigator.clipboard.writeText(wallet.key).then(() => { $("walletStatus").textContent = "Key copied. Keep it somewhere safe: whoever has it can use your balance."; }).catch(() => {});
   $("walletRestore").onsubmit = async e => {
     e.preventDefault();
     const t = $("walletRestoreText").value.trim();
@@ -1114,13 +1121,13 @@
           id: a.id,
           title: W.isKeep(ask) ? `${a.site}.csd asks to keep a site up` : `${a.site}.csd asks to write`,
           what: W.describe(ask),
-          balance: /^[\d.]+$/.test(bal) ? (+bal < csd ? `This needs ${csd} CSD, and your key holds ${bal}.` : `Your key holds ${bal} CSD.`) : "",
+          balance: /^[\d.]+$/.test(bal) ? (+bal < csd ? "You've run low: top up to do this." : `You have enough for about ${postsSaid(+bal)}.`) : "",
           short: /^[\d.]+$/.test(bal) && +bal < csd,
-          always: W.isKeep(ask) ? "" : `Allow ${a.site}.csd without asking, up to ${BUDGET} CSD a day`,
+          always: W.isKeep(ask) ? "" : `Allow ${a.site}.csd without asking, up to ${postsSaid(BUDGET)}' worth a day`,
         } }).catch(() => resolve({ allow: false }));
       });
       replyTo = null;
-      if (reply.add) { done(null, `Not enough CSD: this needs ${csd} CSD. Adding some in Doorway.`); openAdd(); return; }
+      if (reply.add) { done(null, `Not enough CSD: this needs ${csd} CSD. Topping up in Doorway.`); openAdd(); return; }
       if (!reply.allow) return done(null, "Declined in Doorway.");
       if (reply.always && !W.isKeep(ask)) { const m = allowed(); m[a.site] = { since: Date.now(), spent: [] }; store.set("doorway.allowed", m); }
       go();
@@ -1143,7 +1150,7 @@
       const f = faceOf.get(s.cid) ?? {}, title = f.title || s.name || `${s.cid.slice(0, 10)}…`;
       const mine = !!wallet && (s.recommenders.includes(wallet.address) || recommended().includes(s.key));
       const n = s.recommenders.length + (mine && !s.recommenders.includes(wallet.address) ? 1 : 0);
-      const tip = mine ? "You recommend it" : s.listing ? "Recommend it, for 0.05 CSD" : "Be the first to recommend it, for 0.25 CSD (after that, 0.05)";
+      const tip = mine ? "You recommend it" : "Recommend it";
       return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.key)}" title="Open ${esc(s.name ? s.name + ".csd" : title)}">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
         <b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeSaid(s.cid, true)}</small>` : ""}
@@ -1161,7 +1168,7 @@
       const label = s && (s.name ? `${s.name}.csd` : (faceOf.get(s.cid)?.title || "this site"));
       if (!s || !wallet) return;
       const cost = s.listing ? "0.05" : "0.25";
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = s.listing ? `Press the star again to recommend ${label}, for 0.05 CSD.` : `Nobody has recommended ${label} yet. Press the star again to be the first, for 0.25 CSD: the first one puts it on the list, and each one after costs 0.05.`; return; }
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = s.listing ? `Press the star again to recommend ${label}.` : `Nobody has recommended ${label} yet. Press the star again to be the first and put it on the list (one post's worth).`; return; }
       b.disabled = true;
       $("discoverNote").textContent = `Recommending ${label}…`;
       try {
@@ -1175,7 +1182,7 @@
       } catch (err) {
         b.disabled = false; b.dataset.sure = "";
         const m = String(err && err.message || err);
-        if (/Not enough CSD/.test(m)) needMore($("discoverNote"), `Recommending costs ${cost} CSD, and your key has too little.`); else $("discoverNote").textContent = m;
+        if (/Not enough CSD/.test(m)) needMore($("discoverNote"), "You don't have enough left to recommend it."); else $("discoverNote").textContent = m;
       }
     });
   }
