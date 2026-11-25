@@ -421,15 +421,16 @@
     // the very first launch: start at login from now on, and show a site working, in the browser
     try {
       if (await invoke("first_run")) {
-        // the guestbook (somewhere to leave a line, right away), else the network's front page; opened
-        // once Doorway's own address for it answers, so the browser never gets a page that isn't there
+        // the guestbook, somewhere to leave a line right away. Opened as soon as Doorway's own address
+        // for it answers (its page says "Opening guestbook.csd…" while it's fetched). The check is a
+        // no-cors request, since an ordinary one can be refused as cross-origin. The name isn't looked
+        // up first: that waited on the network, the slow part of a first launch, and the guestbook's
+        // page does it anyway. (On fresh installs, Windows especially, nothing used to open.)
         setTimeout(async () => {
           try {
-            let name = "computesubstrate";
-            try { const o = await CsdResolver.lookup("guestbook", { doors: await doorList() }); if (o.open) name = "guestbook"; } catch {}
-            const url = await invoke("name_url", { name });
-            for (let i = 0; i < 20; i++) {
-              try { if ((await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(3000) })).status < 500) break; } catch {}
+            const url = await invoke("name_url", { name: "guestbook" });
+            for (let i = 0; i < 30; i++) {
+              try { await fetch(url, { method: "HEAD", mode: "no-cors", signal: AbortSignal.timeout(3000) }); break; } catch {}
               await new Promise(r => setTimeout(r, 1000));
             }
             await invoke("plugin:opener|open_url", { url });
