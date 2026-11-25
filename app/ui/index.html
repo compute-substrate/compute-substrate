@@ -750,7 +750,7 @@
       try {
         const node = await readingNode();
         const tip = (await (await fetch(`${node}/tip`)).json()).height;
-        await W.send(node, wallet.key, W.pointAsk(name, pointing.profile, pending.cid, tip));
+        await send(node, wallet.key, W.pointAsk(name, pointing.profile, pending.cid, tip));
         pointing = null; btn.textContent = "Point it here";
         pending.name = name; pending.until = Date.now() + 60 * 60_000;
         st.textContent = `Putting your site up at ${name}.csd…`;
@@ -796,7 +796,7 @@
       const me = wallet.address;
       if (r.step === "commit") {
         regSay(`Getting ${r.name}.csd: step 1 of 3, a sealed claim…`);
-        const tx = await W.send(node, wallet.key, W.commitAsk(r.name, r.salt, me, tip));
+        const tx = await send(node, wallet.key, W.commitAsk(r.name, r.salt, me, tip));
         save({ step: "committed", commitTx: tx, at: Date.now() });
       } else if (r.step === "committed") {
         const h = await W.txHeight(node, me, r.commitTx);
@@ -806,7 +806,7 @@
       } else if (r.step === "reveal") {
         if (tip + 1 > r.commitH + W.REVEAL_BY) return restart("Step 2 came too late.");
         regSay(`Getting ${r.name}.csd: step 2 of 3, claiming it…`);
-        const tx = await W.send(node, wallet.key, W.revealAsk(r.name, r.salt, tip));
+        const tx = await send(node, wallet.key, W.revealAsk(r.name, r.salt, tip));
         save({ step: "revealed", revealTx: tx, at: Date.now() });
       } else if (r.step === "revealed") {
         const h = await W.txHeight(node, me, r.revealTx);
@@ -822,7 +822,7 @@
         // a name until it's finished)
         const st = await W.reservation(node, r.name, r.commitH, tip);
         try {
-          const tx = await W.send(node, wallet.key, W.finalizeAsk(r.name, r.salt, st, me, r.commitH, tip));
+          const tx = await send(node, wallet.key, W.finalizeAsk(r.name, r.salt, st, me, r.commitH, tip));
           save({ step: "finalized", finalTx: tx, at: Date.now() });
           regSay(`Getting ${r.name}.csd: step 3 of 3, paying for the year…`);
         } catch (err) {
@@ -841,7 +841,7 @@
           store.set("doorway.reg", null);
           if (r.cid) {
             regSay(`✓ ${r.name}.csd is yours. Putting your site there…`);
-            await W.send(node, wallet.key, W.pointAsk(r.name, o.profile ?? {}, r.cid, tip));
+            await send(node, wallet.key, W.pointAsk(r.name, o.profile ?? {}, r.cid, tip));
             pending = { cid: r.cid, name: r.name, until: Date.now() + 60 * 60_000 };
             regSay(`✓ ${r.name}.csd is yours, for a year. Putting your site up there…`);
             publishTick();
@@ -877,7 +877,7 @@
         $("regStatus").hidden = false;
         $("regStatus").innerHTML = `${esc(name)}.csd is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${postsSaid(fee)}' worth)</button>`;
         $("renewName").onclick = async () => {
-          try { await W.send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year.`); setTimeout(showBalance, 3000); }
+          try { await send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year.`); setTimeout(showBalance, 3000); }
           catch (err) { const m = String(err && err.message || err); if (/Not enough CSD/.test(m)) needMore($("regStatus"), "You don't have enough left for that."); else regSay(m); }
         };
         return;
@@ -991,7 +991,7 @@
         if (!wallet) await loadWallet();
         const node = await readingNode();
         const tip = (await (await fetch(node + "/tip")).json()).height;
-        await W.send(node, wallet.key, W.keepAsk(cid, years, tip));
+        await send(node, wallet.key, W.keepAsk(cid, years, tip));
         $("keepSaid").textContent = `Done. It's kept up until ${fromYear + years}.`;
         // shown at once; the network's own count replaces it once the record is in
         if (keptInfo) { const u = keptInfo.until.get(cid); keptInfo.until.set(cid, Math.max(u ?? 0, keptInfo.tip) + years * 262_800); renderSites(); renderDiscover(); }
@@ -1022,8 +1022,33 @@
     $("walletAddr").textContent = wallet.address;
     showBalance();
   }
+  // Writes on their way: until the next block the node lists neither the coins they spend nor the
+  // change coming back, so what's left is counted with that change, and a write that needs it
+  // waits for the block instead of failing. (A newcomer's single coin used to make a first post
+  // look like it spent everything.)
+  const inFlight = () => (store.get("doorway.inflight") ?? []).filter(f => Date.now() - f.at < 3600_000);
+  const noteSent = f => store.set("doorway.inflight", [...inFlight(), f]);
+  async function send(node, key, ask, onWait) {
+    for (let waited = 0; ; waited += 15) {
+      try { return await W.send(node, key, ask, noteSent); }
+      catch (err) {
+        if (!/Not enough CSD/.test(String(err && err.message)) || waited >= 270) throw err;
+        // only worth waiting for when the change on its way would cover it
+        const s = await W.spendable(node, wallet.address, inFlight()).catch(() => null);
+        const cost = Number(ask.fee + (ask.burn ?? 0n) + (ask.pay?.value ?? 0n)) / 1e8;
+        if (!s || !s.waiting.length || s.soon < cost) throw err;
+        onWait?.();
+        await new Promise(r => setTimeout(r, 15_000));
+      }
+    }
+  }
   async function showBalance() {
-    try { $("walletBal").textContent = String(await W.balance(await readingNode(), wallet.address)); } catch { $("walletBal").textContent = "?"; }
+    try {
+      const s = await W.spendable(await readingNode(), wallet.address, inFlight());
+      store.set("doorway.inflight", s.waiting);
+      $("walletBal").textContent = String(+s.soon.toFixed(8));
+      if (s.waiting.length) setTimeout(showBalance, 30_000);
+    } catch { $("walletBal").textContent = "?"; }
     const b = +$("walletBal").textContent;
     $("walletPosts").textContent = Number.isFinite(b) ? postsSaid(b) : "…";
     $("walletCsd").textContent = Number.isFinite(b) ? `${b} CSD` : "";
@@ -1192,7 +1217,7 @@
       const csd = Number(ask.fee + ask.burn) / 1e8;
       const go = async () => {
         try {
-          const txid = await W.send(await readingNode(), wallet.key, ask);
+          const txid = await send(await readingNode(), wallet.key, ask);
           if (allowed()[a.site]) { const m = allowed(); m[a.site].spent = [...(m[a.site].spent ?? []).filter(x => Date.now() - x.at < DAY), { at: Date.now(), csd }]; store.set("doorway.allowed", m); }
           done({ txid }, null);
           setTimeout(showBalance, 3000);
@@ -1261,7 +1286,7 @@
       try {
         const node = await readingNode();
         const tip = (await (await fetch(node + "/tip")).json()).height;
-        await W.send(node, wallet.key, W.recommendAsk(s, tip));
+        await send(node, wallet.key, W.recommendAsk(s, tip));
         const r = recommended(); r.push(s.key); store.set("doorway.recommended", r);
         $("discoverNote").textContent = `You recommend ${label}.`;
         renderDiscover();

@@ -87,4 +87,25 @@ ok(keyFromPrivate(hexToBytes(key as any)).addr20 === address, "and it's this add
   let ok3 = true; try { wallet.finalizeAsk(name, salt, st, me2 as any, H, H + wallet.FINALIZE_FROM); } catch { ok3 = false; }
   ok(ok3, "so step 3 goes ahead");
 }
+
+// a newcomer's single coin, spent by one post: until the next block the node lists the coin as
+// being spent and doesn't list the change yet; what's left counts the change on its way
+{
+  const coin = { txid: "aa".repeat(32), vout: 0, value: "100000000" };
+  const changeTx = "bb".repeat(32);
+  let block = false;
+  (globalThis as any).fetch = async (url: string) => {
+    const avail = /available=true/.test(String(url));
+    const utxos = block ? [{ txid: changeTx, vout: 1, value: "75000000" }] : avail ? [] : [coin];
+    return new Response(JSON.stringify({ ok: true, utxos }));
+  };
+  const sent = [{ txid: changeTx, inputs: [`${coin.txid}:0`], change: 0.75, at: Date.now() }];
+  const a = await wallet.spendable("http://n", "0x" + "11".repeat(20) as any, sent);
+  ok(a.now === 0 && a.soon === 0.75 && a.waiting.length === 1, "after one post, what's left counts the change on its way (0.75, not 0)");
+  block = true;
+  const b = await wallet.spendable("http://n", "0x" + "11".repeat(20) as any, sent);
+  ok(b.now === 0.75 && b.soon === 0.75 && b.waiting.length === 0, "once it's in a block, the change counts once, as spendable");
+  const c = await wallet.spendable("http://n", "0x" + "11".repeat(20) as any, [{ ...sent[0], at: Date.now() - 2 * 3600_000 }]);
+  ok(c.waiting.length === 0, "a write that never landed stops counting after an hour");
+}
 console.log(failures ? `\n${failures} failed` : "\nall passed"); process.exit(failures ? 1 : 0);

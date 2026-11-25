@@ -63,7 +63,13 @@ export function readAsk(body: any): Ask {
 
 // Sign and send, through `node`. "Not enough CSD" is worded as the kit words it, so pages show
 // their ways to get some.
-export async function send(node: string, key: Hex, ask: Ask): Promise<Hex> {
+// A write sent but not in a block yet: the coins it spends, and the change coming back. Until the
+// next block the node lists neither (the coins are being spent, the change doesn't exist yet), so
+// a balance read from the node alone drops to nothing after a single post and comes back two
+// minutes later.
+export type InFlight = { txid: string; inputs: string[]; change: number; at: number };
+
+export async function send(node: string, key: Hex, ask: Ask, sent?: (f: InFlight) => void): Promise<Hex> {
   const net = connect({ node });
   const k = keyFromPrivate(hexToBytes(key));
   const utxos = await net.api.utxos(k.addr20);
@@ -71,7 +77,27 @@ export async function send(node: string, key: Hex, ask: Ask): Promise<Hex> {
   if (utxos.reduce((s, u) => s + u.value, 0n) < cost) throw new Error(`Not enough CSD at ${k.addr20}: writing this costs ${Number(cost) / 1e8} CSD.`);
   const pays = [...(ask.burn ? [{ to: BURN, value: ask.burn }] : []), ...(ask.pay ? [ask.pay] : [])];
   const tx = pays.length ? buildSplitTx(utxos, k, pays, ask.fee, ask.app) : buildAppTx(utxos, k, ask.app, ask.fee);
-  return (await net.api.submit(tx)).toLowerCase() as Hex;
+  const txid = (await net.api.submit(tx)).toLowerCase() as Hex;
+  sent?.({
+    txid,
+    inputs: tx.inputs.map(i => `${String(i.txid).toLowerCase()}:${i.vout}`),
+    change: Number(tx.outputs.filter(o => o.addr20.toLowerCase() === k.addr20.toLowerCase()).reduce((s, o) => s + o.value, 0n)) / 1e8,
+    at: Date.now(),
+  });
+  return txid;
+}
+
+// What the key holds, counting the change of its writes that aren't in a block yet (in whole CSD):
+// `now` can be spent at once, `soon` after the next block. A write still counts as on its way while
+// a coin it spends is listed as being spent; once it's in a block (or was dropped) it doesn't.
+export async function spendable(node: string, address: Hex, inFlight: InFlight[] = []): Promise<{ now: number; soon: number; waiting: InFlight[] }> {
+  const api = connect({ node }).api;
+  const [avail, all] = await Promise.all([api.utxos(address), api.utxos(address, true)]);
+  const free = new Set(avail.map(u => `${u.txid.toLowerCase()}:${u.vout}`));
+  const spending = new Set(all.map(u => `${u.txid.toLowerCase()}:${u.vout}`).filter(o => !free.has(o)));
+  const waiting = inFlight.filter(f => Date.now() - f.at < 3600_000 && f.inputs.some(i => spending.has(i)));
+  const now = Number(avail.reduce((s, u) => s + u.value, 0n)) / 1e8;
+  return { now, soon: now + waiting.reduce((s, f) => s + f.change, 0), waiting };
 }
 
 // That this key controls its address, for a trade on the CSD/USDC market (the kit's top-up): CSD
