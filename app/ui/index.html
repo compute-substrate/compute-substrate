@@ -647,11 +647,13 @@
       if (on) { onDoors.delete(x.cid); renderSites(); await seed(x.cid); }
       renderSites();
     });
-    // the sites you help with go to any door that lacks them: a few seconds in, then every 6 hours,
-    // and one no door has taken yet (its name's record not in a block yet) every 10 minutes
+    // the sites you help with, and the ones you put up under a name, go to any door that lacks them:
+    // a few seconds in, then every 6 hours, and one no door has taken yet (its name's record not in a
+    // block yet) every 10 minutes. (A site put up here but not hearted used to stay only here once
+    // its first hand-over missed, and nobody else could open it.)
     const all = Date.now() - seededAt > (seededAt === 0 ? 3_000 : 6 * 3_600_000);
     if (all) seededAt = Date.now();
-    const due = list.filter(x => x.helping && (all || (!x.carried && !onDoors.get(x.cid) && Date.now() - (triedAt.get(x.cid) ?? 0) > 10 * 60_000)));
+    const due = list.filter(x => (x.helping || x.names.length) && (all || (!x.carried && !onDoors.get(x.cid) && Date.now() - (triedAt.get(x.cid) ?? 0) > 10 * 60_000)));
     if (due.length) {
       for (const x of due) { triedAt.set(x.cid, Date.now()); await seed(x.cid); }
       renderSites();
