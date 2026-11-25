@@ -782,8 +782,11 @@ struct AskShown(Mutex<Option<serde_json::Value>>);
 #[derive(Default)]
 struct AskFromMain(Mutex<bool>);
 
+// async: on Windows, building a window inside a synchronous command deadlocks (the new window
+// waits on the main thread, which is busy running the command), so the approval came up blank and
+// Doorway froze
 #[tauri::command]
-fn show_ask(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: tauri::State<'_, AskFromMain>, ask: serde_json::Value) -> Result<(), String> {
+async fn show_ask(app: tauri::AppHandle, shown: tauri::State<'_, AskShown>, from: tauri::State<'_, AskFromMain>, ask: serde_json::Value) -> Result<(), String> {
     let main_in_front = app.get_webview_window("main").map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false)).unwrap_or(false);
     // a second ask while one shows keeps what was true when the first came
     if shown.0.lock().unwrap().is_none() { *from.0.lock().unwrap() = main_in_front; }
