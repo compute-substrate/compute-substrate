@@ -252,3 +252,5 @@ export { newestDoorway, newer } from "./release";
 export { listSites, siteFace, hiddenList, isHidden, listed, HIDE_LIST, DIRECTORY } from "./directory";
 export { packFolder } from "./pack";
 export * as wallet from "./wallet";
+export * as letters from "./letters";
+export { friendlyName } from "../../../kit/src/friendly";
