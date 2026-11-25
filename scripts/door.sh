@@ -35,6 +35,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Running it again keeps what an earlier run set up: the door's domain (/etc/csd/door-url) and the
+# node its site store reads, unless given anew. (Without this, an update without --domain put the
+# door back on <ip>.sslip.io, and one without --node set up a second, empty node beside the one in use.)
+if [ -z "$DOMAIN" ] && [ -f /etc/csd/door-url ]; then
+  PREV="$(sed -n 's#^https://\([^/]*\).*#\1#p' /etc/csd/door-url)"
+  case "$PREV" in *.sslip.io|"") ;; *) DOMAIN="$PREV" ;; esac
+fi
+if [ -z "$NODE" ]; then
+  PREV_NODE="$(systemctl show csd-sites -p ExecStart --value 2>/dev/null | grep -o -- '--node [^ ]*' | cut -d' ' -f2 || true)"
+  if [ -n "$PREV_NODE" ]; then
+    NODE="$PREV_NODE"
+    # the node an earlier run set up is restarted on the new program; any other is left as it is
+    if systemctl show csd -p ExecStart --value 2>/dev/null | grep -q -- '--datadir /var/lib/csd/db'; then OWN_NODE=1; fi
+  fi
+fi
+
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 [ "$(id -u)" = 0 ] || { echo "Run it as root (sudo bash)." >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "This needs systemd (Debian or Ubuntu)." >&2; exit 1; }
@@ -99,10 +115,11 @@ WantedBy=multi-user.target
 EOF
 fi
 
-if [ -z "$DOMAIN" ]; then
-  IP=$(curl -fsS -4 https://api.ipify.org)
-  DOMAIN="${IP//./-}.sslip.io"
-fi
+IP=$(curl -fsS -4 https://api.ipify.org)
+SSLIP="${IP//./-}.sslip.io"
+# with a domain of its own, the door still answers on its sslip.io name, so an earlier announcement
+# of that name keeps working (some networks can't resolve sslip.io, so the domain is what's announced)
+if [ -z "$DOMAIN" ]; then DOMAIN="$SSLIP"; NAMES="$SSLIP"; else NAMES="$DOMAIN, $SSLIP"; fi
 URL="https://$DOMAIN"
 NODE_HOSTPORT="${NODE#http://}"
 
@@ -124,7 +141,7 @@ say "HTTPS, at $URL"
 cat > /etc/caddy/csd-door.caddy <<EOF
 # A Compute Substrate door (scripts/door.sh). Pages on any site may read the node and its sites:
 # everything here is public, and a transaction is only accepted if its owner signed it.
-$DOMAIN {
+$NAMES {
 	header {
 		Access-Control-Allow-Origin "*"
 		Access-Control-Allow-Methods "GET, POST, OPTIONS"
