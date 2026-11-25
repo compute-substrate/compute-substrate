@@ -107,6 +107,32 @@
   details.settings > summary::-webkit-details-marker { display: none; }
   details.settings > summary::before { content: "▸ "; }
   details.settings[open] > summary::before { content: "▾ "; }
+  /* the top-up moment: waiting for the payment, then the posts arriving */
+  .tu > div { align-items: center; text-align: center; padding: 44px 26px 24px; gap: 10px; }
+  .tu .orb { position: relative; width: 84px; height: 84px; margin-bottom: 6px; }
+  .tu .ring { position: absolute; inset: 0; border-radius: 50%; border: 3px solid var(--accent-soft); border-top-color: var(--accent); animation: tuSpin 1.1s linear infinite; }
+  .tu .ring.slow { animation-duration: 2.4s; }
+  .tu .disc { position: absolute; inset: 0; border-radius: 50%; background: var(--accent); transform: scale(0); }
+  .tu .check { position: absolute; inset: 0; width: 84px; height: 84px; }
+  .tu .check path { fill: none; stroke: #fff; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 60; stroke-dashoffset: 60; }
+  .tu.done .ring { display: none; }
+  .tu.done .disc { animation: tuPop .5s cubic-bezier(.2,1.4,.4,1) forwards; }
+  .tu.done .check path { animation: tuDraw .45s .35s ease-out forwards; }
+  .tu .bits { position: absolute; inset: 0; pointer-events: none; }
+  .tu .bits i { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px; border-radius: 2px; opacity: 0; }
+  .tu.done .bits i { animation: tuBurst 1.1s .25s cubic-bezier(.15,.7,.3,1) forwards; }
+  .tu h3 { font-size: 22px; }
+  .tu .big { font: 700 40px/1.1 var(--display); letter-spacing: -.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .tu .big small { display: block; font-family: inherit; font-size: 14px; font-weight: 500; line-height: 1.4; letter-spacing: 0; color: var(--muted); margin-top: 2px; }
+  .tu p { color: var(--muted); font-size: 14px; max-width: 320px; }
+  .tu .btns { justify-content: center; margin-top: 8px; }
+  .tu .btns button { background: var(--accent); color: #fff; min-width: 120px; }
+  .tu .btns button.quiet { background: var(--line); color: var(--ink); }
+  @keyframes tuSpin { to { transform: rotate(360deg); } }
+  @keyframes tuPop { to { transform: scale(1); } }
+  @keyframes tuDraw { to { stroke-dashoffset: 0; } }
+  @keyframes tuBurst { 0% { opacity: 1; transform: translate(0,0) rotate(0); } 100% { opacity: 0; transform: translate(var(--x), var(--y)) rotate(var(--r)); } }
+  @media (prefers-reduced-motion: reduce) { .tu .ring { animation: none; } .tu.done .disc { animation: none; transform: scale(1); } .tu.done .check path { animation: none; stroke-dashoffset: 0; } .tu.done .bits i { animation: none; } }
   .ask { position: fixed; inset: 0; background: rgba(30,22,14,.35); display: grid; place-items: center; padding: 20px; z-index: 20; }
   .ask > div { background: var(--card); border-radius: 18px; padding: 20px; max-width: 420px; width: 100%; box-shadow: 0 10px 40px rgba(0,0,0,.25); display: flex; flex-direction: column; gap: 12px; }
   .ask h3 { margin: 0; font: 700 18px/1.3 var(--display); }
@@ -213,6 +239,16 @@
       <p class="hint" style="margin:0" id="addSaid"></p>
       <div class="btns"><button id="addNo">Close</button><button id="addYes">Pay by card</button></div>
       <p class="hint" style="margin:0">You pay by card on Stripe's page (the first time, it asks you to sign up with Link), and Doorway does the rest by itself. Stripe's fee comes on top. Stripe will know this payment went to your key, so for writing under another name, use a separate key.</p>
+    </div>
+  </div>
+
+  <div class="ask tu" id="tuDlg" hidden role="dialog" aria-modal="true" aria-labelledby="tuTitle" aria-live="polite">
+    <div>
+      <div class="orb"><div class="ring" id="tuRing"></div><div class="disc"></div><svg class="check" viewBox="0 0 84 84" aria-hidden="true"><path d="M27 43 l10 10 l21 -22"/></svg><div class="bits" id="tuBits"></div></div>
+      <h3 id="tuTitle"></h3>
+      <div class="big" id="tuBig" hidden></div>
+      <p id="tuSaid"></p>
+      <div class="btns"><button id="tuOk" type="button"></button></div>
     </div>
   </div>
 
@@ -1140,7 +1176,8 @@
         const url = await invoke("buy_link", { address: B.ethAddress(wallet.key), amount, currency: cur });
         await invoke("plugin:opener|open_url", { url });
         store.set("doorway.buying", { since: Date.now() });
-        $("addSaid").textContent = "Pay on Stripe's page in your browser. Your top-up comes in shortly after you've paid, even with this window closed.";
+        $("addDlg").hidden = true;
+        topup("waiting");
         watchBuying();
       } catch (err) { $("addSaid").textContent = String(err && err.message || err); $("addYes").disabled = false; }
     };
@@ -1153,6 +1190,39 @@
     $("outsideList").innerHTML = list.map(([site, to]) => `${esc(site)}.csd → ${esc(to)}`).join("<br>");
   }
   $("settingsBox").addEventListener("toggle", () => { if ($("settingsBox").open) showOutside(); });
+  // The top-up, as a moment rather than a status line: waiting for the payment (a slow ring), the
+  // trade under way (a quick one), then the posts arriving (a check, a small burst, the number
+  // counting up). Shown while Doorway's window is open; with it closed, it all happens anyway.
+  function topup(state, n) {
+    const d = $("tuDlg"), done = state === "done";
+    d.classList.toggle("done", done);
+    $("tuRing").classList.toggle("slow", state === "waiting" || state === "later");
+    const said = {
+      waiting: ["Waiting for your payment", "Pay on Stripe's page in your browser. You can close this: your top-up comes in by itself, even with Doorway's window closed."],
+      trading: ["Payment received", "Topping up…"],
+      later: ["Almost there", "It's taking a little longer than usual. Doorway keeps trying by itself, and nothing is lost."],
+      done: ["You're topped up", "Ready to use in a minute or two. Every post you write pays the people who keep the network running."],
+    }[state];
+    $("tuTitle").textContent = said[0];
+    $("tuSaid").textContent = said[1];
+    $("tuOk").textContent = done ? "Done" : "Close";
+    $("tuOk").className = done ? "" : "quiet";
+    $("tuOk").onclick = () => { d.hidden = true; };
+    $("tuBig").hidden = !done;
+    if (done) {
+      // the number counts up, and a small burst goes off around the check
+      const big = $("tuBig"), to = Math.max(1, Math.floor((n ?? 0) / 0.25)), t0 = performance.now(), ms = 900;
+      const step = t => { const k = Math.min(1, (t - t0) / ms), v = Math.round(to * (1 - Math.pow(1 - k, 3))); big.innerHTML = `+${v.toLocaleString()}<small>posts' worth, added</small>`; if (k < 1) requestAnimationFrame(step); };
+      requestAnimationFrame(step);
+      const colours = ["var(--accent)", "#e8b04b", "#7aa874", "#d9774b", "#8a7bd1"];
+      $("tuBits").innerHTML = Array.from({ length: 18 }, (_, i) => {
+        const a = (i / 18) * Math.PI * 2 + Math.random() * .3, r = 70 + Math.random() * 40;
+        return `<i style="background:${colours[i % colours.length]};--x:${(Math.cos(a) * r).toFixed(0)}px;--y:${(Math.sin(a) * r).toFixed(0)}px;--r:${Math.round(Math.random() * 360)}deg"></i>`;
+      }).join("");
+    }
+    d.hidden = false;
+  }
+
   // after a payment: check every 30 seconds for the USDC, and trade it as soon as it's there
   let buyTimer = null;
   function watchBuying() {
@@ -1164,11 +1234,10 @@
         const B = await loadBuy();
         if (!wallet) await loadWallet();
         // the steps of the trade stay out of sight: someone topping up only needs to know it's happening
-        const r = await B.buy(await readingNode(), wallet.key, () => { if (!$("addDlg").hidden) $("addSaid").textContent = "Topping up…"; });
+        const r = await B.buy(await readingNode(), wallet.key, () => { if (!$("tuDlg").hidden) topup("trading"); });
         if (r.state === "bought") {
-          const said = `Your top-up is on its way: enough for about ${postsSaid(r.csd)}.`;
-          $("walletStatus").textContent = said;
-          if (!$("addDlg").hidden) $("addSaid").textContent = said;
+          $("walletStatus").textContent = `Topped up: enough for about ${postsSaid(r.csd)} more.`;
+          topup("done", r.csd);
           setTimeout(showBalance, 180_000);
           if (r.left < 1) { store.set("doorway.buying", null); buyTimer = null; return; }
           store.set("doorway.buying", { since: Date.now() }); // the rest, once this trade settles
@@ -1177,7 +1246,7 @@
         // the reason (no seller just now, a busy moment) matters to nobody topping up: it's kept
         // for the console, and the person hears that nothing is lost
         console.warn("top-up:", buyLib ? (await buyLib).why(err) : String(err));
-        if (!$("addDlg").hidden) $("addSaid").textContent = "It can't go through just yet. Doorway keeps trying, and nothing is lost.";
+        if (!$("tuDlg").hidden) topup("later");
       }
       buyTimer = setTimeout(tick, 30_000);
     };
