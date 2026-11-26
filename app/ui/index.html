@@ -1185,7 +1185,7 @@
           if (!(await LT.findBox(node, wallet.address).catch(() => null))) {
             letterSay("Opening your letterbox…");
             const tip = (await (await fetch(node + "/tip")).json()).height;
-            await W.send(node, wallet.key, await LT.openBoxAsk(wallet.key, tip));
+            await send(node, wallet.key, await LT.openBoxAsk(wallet.key, tip));
           }
           store.set("doorway.letterbox", wallet.address);
           letterSay(`Your letterbox is open. Anyone can write to you${(store.get("doorway.names") ?? [])[0] ? " at " + store.get("doorway.names")[0] + ".csd" : " once you have a .csd name"}.`);
@@ -1247,21 +1247,14 @@
         mineOpen = store.get("doorway.letterbox") === wallet.address || !!(await LT.findBox(node, wallet.address).catch(() => null));
         if (!mineOpen) {
           letterSay("Opening your letterbox, so they can write back…");
-          await W.send(node, wallet.key, await LT.openBoxAsk(wallet.key, tip));
+          await send(node, wallet.key, await LT.openBoxAsk(wallet.key, tip));
           store.set("doorway.letterbox", wallet.address);
         }
         letterSay("Sealing it for them and sending it…");
         const ask = await LT.letterAsk(wallet.key, addr, box, { subject: $("lsubj").value.trim(), body, ...(re ? { re } : {}) }, tip);
-        // just after opening the letterbox, its change may not be spendable until the next block
-        let txid = null;
-        for (let i = 0; !txid; i++) {
-          try { txid = await W.send(node, wallet.key, ask); }
-          catch (err) {
-            if (mineOpen || i >= 15 || !/Not enough CSD/.test(String(err && err.message))) throw err;
-            letterSay("Your letterbox is open. The letter goes out with the next block, in a minute or two…");
-            await new Promise(r => setTimeout(r, 20_000));
-          }
-        }
+        // just after opening the letterbox, its change can't be spent until the next block: the
+        // letter waits for it
+        const txid = await send(node, wallet.key, ask, () => letterSay("Your letterbox is open. The letter goes out with the next block, in a minute or two…"));
         if (name) store.set("doorway.contacts", { ...contacts(), [addr]: name });
         // shown at once among the sent letters; the network's own copy replaces it when read back
         keepLetters([{ id: txid, from: wallet.address.toLowerCase(), to: addr, at: Date.now(), subject: $("lsubj").value.trim(), body, ...(re ? { re } : {}), signedBy: wallet.address.toLowerCase(), height: 0, time: 0 }]);
