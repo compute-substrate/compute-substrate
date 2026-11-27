@@ -3,7 +3,8 @@
 // copy of. So anyone can find every kept copy of an address from the records alone, with nobody
 // running an index.
 //
-// A record's text is "<cid> <address>" (the address cut to fit the 512 bytes a record holds), and
+// A record's text is "<cid> <address> <title>" (the title, then the address, cut to fit the 512 bytes
+// a record holds; an address in its standard form has no spaces, so the title is all after it), and
 // its payload hash is the hash of the address in a standard form, which is what a lookup matches.
 // A record only says that its writer kept that copy, at that time: the copy is checked against its
 // own address, so nobody can change it later, but whether it matches the page as it really was rests
@@ -45,15 +46,18 @@ export function isPrivate(input: string): boolean {
 const keyHash = (url: string) => sha256d(utf8(`${PAGES} ${pageKey(url)}`));
 
 // The record saying `cid` is a copy of `url`
-export function pageAsk(cid: string, url: string, tip: number): { app: AppPayload; fee: bigint; burn: bigint } {
+export function pageAsk(cid: string, url: string, tip: number, title = ""): { app: AppPayload; fee: bigint; burn: bigint } {
   if (!CID_RE.test(cid)) throw new Error("That isn't a site's address.");
   const key = pageKey(url);
-  let uri = `${cid} ${key}`;
+  let t = Array.from(title.replace(/\s+/g, " ").trim());
+  const text = () => `${cid} ${key}${t.length ? " " + t.join("") : ""}`;
+  while (t.length && utf8(text()).length > 512) t.pop();
+  let uri = text();
   while (utf8(uri).length > 512) uri = uri.slice(0, -1);
   return { app: { kind: "propose", domain: PAGES, payloadHash: keyHash(url), uri, expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
 }
 
-export type Copy = { cid: string; url: string; by: Hex; height: number };
+export type Copy = { cid: string; url: string; title: string; by: Hex; height: number };
 
 // Every kept page's record, read from `node` (and cached, extended as the network grows)
 const caches = new Map<string, { next: number; all: (Copy & { hash: string })[] }>();
@@ -68,12 +72,12 @@ export async function allCopies(node: string): Promise<(Copy & { hash: string })
     for (const e of j.events ?? []) {
       let tx; try { tx = deserializeTx(Uint8Array.from((String(e.tx_raw).replace(/^0x/, "").match(/../g) ?? []).map(h => parseInt(h, 16)))); } catch { continue; }
       if (tx.app.kind !== "propose" || tx.app.domain !== PAGES) continue;
-      const sp = tx.app.uri.indexOf(" ");
-      const cid = tx.app.uri.slice(0, sp), url = tx.app.uri.slice(sp + 1);
+      const sp = tx.app.uri.indexOf(" "), sp2 = tx.app.uri.indexOf(" ", sp + 1);
+      const cid = tx.app.uri.slice(0, sp), url = sp2 < 0 ? tx.app.uri.slice(sp + 1) : tx.app.uri.slice(sp + 1, sp2), title = sp2 < 0 ? "" : tx.app.uri.slice(sp2 + 1);
       const by = signerOf(tx);
       if (sp < 0 || !CID_RE.test(cid) || !by) continue;
       const hash = Array.from(tx.app.payloadHash, b => b.toString(16).padStart(2, "0")).join("");
-      c.all.push({ cid, url, by: by.toLowerCase() as Hex, height: e.height, hash });
+      c.all.push({ cid, url, title, by: by.toLowerCase() as Hex, height: e.height, hash });
     }
     if (typeof j.to !== "number" || j.to < c.next) break;
     c.next = j.to + 1;
@@ -85,6 +89,24 @@ export async function allCopies(node: string): Promise<(Copy & { hash: string })
 export async function copiesOf(node: string, url: string): Promise<Copy[]> {
   const want = Array.from(keyHash(url), b => b.toString(16).padStart(2, "0")).join("");
   return (await allCopies(node)).filter(x => x.hash === want).sort((a, b) => b.height - a.height).map(({ hash, ...x }) => x);
+}
+
+// Kept pages matching a search: words in the title or address, or a site ("nytimes.com"), newest
+// copy of each address first, with how many copies it has
+export async function search(node: string, words: string): Promise<(Copy & { copies: number })[]> {
+  const terms = words.toLowerCase().split(/\s+/).filter(Boolean).map(w => w.replace(/^https?:\/\//, "").replace(/^www\./, ""));
+  const byUrl = new Map<string, (Copy & { hash: string })[]>();
+  for (const c of await allCopies(node)) byUrl.set(c.hash, [...(byUrl.get(c.hash) ?? []), c]);
+  const out: (Copy & { copies: number })[] = [];
+  for (const copies of byUrl.values()) {
+    copies.sort((a, b) => b.height - a.height);
+    const title = copies.find(c => c.title)?.title ?? "";
+    const hay = `${copies.map(c => c.title).join(" ")} ${copies[0].url.replace(/^https?:\/\/(www\.)?/, "")}`.toLowerCase();
+    if (!terms.every(t => hay.includes(t))) continue;
+    const { hash, ...newest } = copies[0];
+    out.push({ ...newest, title, copies: copies.length });
+  }
+  return out.sort((a, b) => b.height - a.height);
 }
 
 // What a kept page's own files say about it (kept.json, written beside index.html)

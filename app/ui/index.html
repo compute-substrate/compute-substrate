@@ -260,6 +260,10 @@
   .kprow .what b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kprow .what small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kpempty { padding: 16px; color: var(--muted); font-size: 13px; text-align: center; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chips button { border-radius: 999px; padding: 5px 12px; font-size: 12.5px; }
+  .kpres .kprow { cursor: default; }
+  .kpres .count { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .years button { border-radius: 999px; padding: 8px 14px; font: 600 13px var(--display); }
   .years button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
   .tile .life { color: var(--accent); }
@@ -306,7 +310,7 @@
   </section>
 
   <form class="go" id="nameForm">
-    <input id="nameInput" placeholder="Where to?" spellcheck="false" autocomplete="off" aria-label="A name, like commonplace">
+    <input id="nameInput" placeholder="Where to?" spellcheck="false" autocomplete="off" aria-label="A name, like commonplace, or a page's link">
     <button class="primary">Open</button>
   </form>
   <p class="hint" id="nameStatus">Type a name, like <b>commonplace</b></p>
@@ -338,7 +342,7 @@
   <h2 style="margin-top:22px">Kept pages</h2>
   <p class="hint" style="margin:-4px 4px 10px;font-size:13px;line-height:1.55;max-width:62ch">Save a copy of any page on the web, as it is right now, so it can't disappear or be quietly changed. Paste its link. The copy is kept on the doors for years, and anyone can open it.</p>
   <div class="kp">
-    <form id="kpForm"><input id="kpUrl" placeholder="Paste a link, like https://…" spellcheck="false" autocomplete="off" aria-label="A page's link"><button class="primary" id="kpGo">Keep</button></form>
+    <form id="kpForm"><input id="kpUrl" placeholder="Paste a link to keep it, or search what's been kept" spellcheck="false" autocomplete="off" aria-label="A page's link, or words to search for"><button class="primary" id="kpGo">Keep</button></form>
     <div class="kpnow" id="kpNow"></div>
     <div id="kpList"></div>
   </div>
@@ -707,7 +711,10 @@
     wanted.set(n, Date.now());
     openName(n, false);
   });
-  $("nameForm").onsubmit = e => { e.preventDefault(); const v = $("nameInput").value.trim(); if (v) openName(v); };
+  // a name opens its site; a web address (it has a dot or a slash, which names don't) shows its
+  // kept copies
+  const webAddress = v => /^https?:\/\//i.test(v) ? v : /^[^\s\/]+\.[a-z]{2,}(\/|$)/i.test(v) && !/\.csd$/i.test(v) ? "https://" + v : null;
+  $("nameForm").onsubmit = e => { e.preventDefault(); const v = $("nameInput").value.trim(); if (!v) return; const w = webAddress(v); if (w) showCopies(w); else openName(v); };
   const dl = window.__TAURI__.deepLink;
   if (dl) {
     dl.getCurrent().then(urls => { if (urls && urls[0]) openName(urls[0]); }).catch(() => {});
@@ -1686,7 +1693,7 @@
       pagesToDoors(k.cid);
       // then the record of where it came from (it waits for the first write's change, if it must)
       tip = (await (await fetch(node + "/tip")).json()).height;
-      await send(node, wallet.key, PG.pageAsk(k.cid, k.url, tip));
+      await send(node, wallet.key, PG.pageAsk(k.cid, k.url, tip, k.title));
       store.set("doorway.keptPages", keptPages().map(x => x.cid === k.cid ? { ...x, noted: true } : x));
       renderKept();
     } catch (err) {
@@ -1717,13 +1724,46 @@
       const node = await readingNode();
       const mine = new Set((await PG.allCopies(node)).filter(c => c.by === wallet.address.toLowerCase()).map(c => c.cid));
       for (const k of due) {
-        if (!mine.has(k.cid)) { const tip = (await (await fetch(node + "/tip")).json()).height; await send(node, wallet.key, PG.pageAsk(k.cid, k.url, tip)); }
+        if (!mine.has(k.cid)) { const tip = (await (await fetch(node + "/tip")).json()).height; await send(node, wallet.key, PG.pageAsk(k.cid, k.url, tip, k.title)); }
         store.set("doorway.keptPages", keptPages().map(x => x.cid === k.cid ? { ...x, noted: true } : x));
       }
       renderKept();
     } catch {}
   }
-  $("kpForm").onsubmit = e => { e.preventDefault(); keepPage($("kpUrl").value); };
+  // the box keeps a link, and searches everything else: words in kept pages' titles and addresses,
+  // or a site
+  const isLink = v => !!webAddress(v.trim());
+  $("kpUrl").oninput = () => { $("kpGo").textContent = !$("kpUrl").value.trim() || isLink($("kpUrl").value) ? "Keep" : "Search"; };
+  $("kpForm").onsubmit = e => { e.preventDefault(); const v = $("kpUrl").value.trim(); if (!v) return; if (isLink(v)) keepPage(webAddress(v)); else searchKept(v); };
+  async function searchKept(words) {
+    if (kpBusy) return;
+    kpSay(`<span class="going">Searching kept pages…</span>`);
+    try {
+      const node = await readingNode();
+      const [hits, tip] = await Promise.all([PG.search(node, words), fetch(node + "/tip").then(r => r.json()).then(j => j.height)]);
+      if (!hits.length) { kpSay(`<p class="said">No kept pages match “${esc(words)}”.</p>`); return; }
+      kpSay(`<div class="kpres">${hits.slice(0, 30).map((h, i) => `<div class="kprow" style="padding:9px 0"><span class="pg">${PAGE}</span>
+        <span class="what"><b>${esc(h.title || shortUrl(h.url))}</b><small>${esc(shortUrl(h.url))}</small></span>
+        <span class="count">${h.copies === 1 ? "" : `${h.copies} copies, `}last ${esc(keptWhen(W.heightToDate(h.height, tip)))}</span>
+        <button type="button" data-hit="${i}">Open</button></div>`).join("")}</div>${hits.length > 30 ? `<p class="said hint" style="margin:0">And ${hits.length - 30} more. Add a word to narrow it down.</p>` : ""}`);
+      $("kpNow").querySelectorAll("[data-hit]").forEach(b => b.onclick = () => openAddress(hits[+b.dataset.hit].cid));
+    } catch (err) { kpSay(`<p class="said">Couldn't search just now: ${esc(String(err && err.message || err))}</p>`); }
+  }
+  // a link typed in the main box: its kept copies, by date, or the offer to keep one
+  async function showCopies(url) {
+    const st = $("nameStatus");
+    let key; try { key = PG.pageKey(url); } catch (err) { st.textContent = String(err.message); return; }
+    st.textContent = "Looking for kept copies of that page…";
+    try {
+      const node = await readingNode();
+      const [had, tip] = await Promise.all([PG.copiesOf(node, url), fetch(node + "/tip").then(r => r.json()).then(j => j.height)]);
+      st.innerHTML = (had.length
+        ? `${had.length === 1 ? "One kept copy" : `${had.length} kept copies`} of <b>${esc(shortUrl(key))}</b>:<span class="chips">${had.slice(0, 12).map((c, i) => `<button type="button" data-copy="${i}">${esc(keptWhen(W.heightToDate(c.height, tip)))}</button>`).join("")}</span>`
+        : `Nobody has kept a copy of <b>${esc(shortUrl(key))}</b> yet.`) + ` <button type="button" class="add" id="copyKeep">Keep it as it is now</button>`;
+      st.querySelectorAll("[data-copy]").forEach(b => b.onclick = () => openAddress(had[+b.dataset.copy].cid));
+      $("copyKeep").onclick = () => { $("kpUrl").value = url; $("kpGo").textContent = "Keep"; $("kpForm").scrollIntoView({ behavior: "smooth", block: "center" }); keepPage(url, true); };
+    } catch (err) { st.textContent = `Couldn't look just now: ${String(err && err.message || err)}`; }
+  }
   setTimeout(renderKept, 1500);
   setTimeout(notePages, 60_000); setInterval(notePages, 30 * 60_000);
 
