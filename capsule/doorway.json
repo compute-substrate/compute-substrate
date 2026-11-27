@@ -1,0 +1,4 @@
+{
+  "about": "The capsule reads and writes through the network and its doors. The week's video plays from YouTube (youtube-nocookie.com), in a frame.",
+  "connect": ["https://*.aon.network"]
+}

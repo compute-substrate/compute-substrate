@@ -1,0 +1,6 @@
+{
+  "name": "csd-capsule",
+  "private": true,
+  "description": "Sunday capsules: every Sunday a capsule opens for 30 minutes. Everyone there watches the same video, picked during the week, and talks beside it; then it closes, and what was said stays. A static site on Compute Substrate. Build, then publish out/ with Doorway.",
+  "scripts": { "build": "node build.mjs" }
+}
