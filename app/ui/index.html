@@ -93,6 +93,8 @@
   .lwrite input:focus, .lwrite textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .lwrite .btns { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
   .lwrite .btns .hint { flex: 1; margin: 0; }
+  .lwrite button:disabled { opacity: .55; cursor: default; }
+  .lwrite.sending input, .lwrite.sending textarea { opacity: .7; }
   .welcome { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 16px; padding: 16px 18px; margin: 0 0 20px; }
   .welcome b { font: 700 17px/1.3 var(--display); display: block; margin-bottom: 4px; }
   .welcome p { margin: 0 0 12px; }
@@ -1348,7 +1350,9 @@
       const toIn = $("lto").value.trim(), body = $("lbody").value, subject = $("lsubj").value.trim();
       if (!toIn) return letterSay("Who is it to? Their .csd name.");
       if (!body.trim()) return letterSay("The letter is empty.");
-      lbusy = true; $("lsend").disabled = true;
+      // while it's sending, the form shows it: the button says so, and nothing in it can change
+      const busy = on => { const f = $("lform"); if (!f) return; f.classList.toggle("sending", on); $("lsend").disabled = on; $("lsend").textContent = on ? "Sending…" : "Send"; $("lcancel").disabled = on; ["lto", "lsubj", "lbody"].forEach(id => $(id).readOnly = on); };
+      lbusy = true; busy(true);
       try {
         if (!wallet) await loadWallet();
         // who it's to: a .csd name's holder, or a key's address as it is
@@ -1383,7 +1387,7 @@
         const m = String(err && err.message || err);
         if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "There isn't enough left to send it."); else letterSay(m);
       }
-      lbusy = false; const b = $("lsend"); if (b) b.disabled = false;
+      lbusy = false; busy(false);
     };
   }
 
