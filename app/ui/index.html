@@ -264,7 +264,7 @@
   </div>
 
   <h2 style="margin-top:22px">Letters <span id="lettersNew" class="hint" style="font-weight:500"></span></h2>
-  <p class="hint" style="margin:-4px 4px 10px">Private letters to anyone with a .csd name. Only the person you write to can read one: not the doors, not anyone in between. Each letter costs a post.</p>
+  <p class="hint" style="margin:-4px 4px 10px">Private letters to anyone with a .csd name, kept by the network itself. Only the person you write to can read one: not the doors, not anyone in between. A short letter costs a post.</p>
   <div class="letters" id="letters">
     <div class="lbar">
       <button class="tab" data-ltab="in" aria-pressed="true">Received</button>
@@ -1184,18 +1184,18 @@
   setTimeout(renderMyName, 1500);
 
   // ── Letters ──────────────────────────────────────────────────────────────────────────────────
-  // Private letters, sealed here for the one person they're to (resolver/src/letters.ts): stored on
-  // Arweave, recorded on the network, read back and opened only on the recipient's computer. A
-  // letterbox (one record, once) is what lets people write to you; sending your first letter opens
-  // yours too, so the reply can come back. Opened letters are kept on this computer, so they aren't
-  // fetched again.
+  // Private letters kept by the network alone (resolver/src/letters.ts): a letterbox (four records,
+  // once) lets strangers write to you; a conversation starts with an opening (four records, once
+  // per pair); every letter after that is a record per ~330 characters, sealed for the two of you.
+  // The records are public and read from the network; the letters are opened only here, and kept
+  // here once opened.
   const LT = CsdResolver.letters;
   let ltab = "in", lview = null, lbusy = false;
   const held = () => new Map(Object.entries(store.get("doorway.letters") ?? {}));
   const lseen = () => new Set(store.get("doorway.lettersSeen") ?? []);
   // who someone is: the name you wrote to them by, else the made-up name every address has
   const contacts = () => store.get("doorway.contacts") ?? {};
-  const whoIs = addr => contacts()[String(addr).toLowerCase()] ?? CsdResolver.friendlyName(addr);
+  const whoIs = addr => contacts()[String(addr).toLowerCase()] ? contacts()[String(addr).toLowerCase()] + ".csd" : CsdResolver.friendlyName(addr);
   const whenSaid = t => { const d = new Date(t); const days = (Date.now() - d) / DAY; return days < 1 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], days < 300 ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" }); };
   const letterSay = (t, html) => { if (html) $("letterStatus").innerHTML = t; else $("letterStatus").textContent = t; };
   function keepLetters(list) {
@@ -1206,8 +1206,61 @@
   function lettersOf(tab) {
     if (!wallet) return [];
     const me = wallet.address.toLowerCase();
-    return [...held().values()].filter(l => tab === "in" ? l.to === me && l.from !== me : l.from === me).sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+    return [...held().values()].filter(l => tab === "in" ? l.from !== me : l.from === me).sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   }
+  const boxOpen = () => store.get("doorway.letterbox") === wallet?.address;
+
+  // the letters' records, read from the network and kept here (they're public), each time from
+  // where the last read left off (and the last few blocks again, in case they changed)
+  async function letterRecords() {
+    const node = await readingNode(), tip = (await (await fetch(node + "/tip")).json()).height;
+    const c = store.get("doorway.lrecs") ?? { to: LT.LETTERS_FROM - 1, box: [], let: [] };
+    if (tip > c.to) {
+      const from = Math.max(LT.LETTERS_FROM, c.to - 5);
+      const [box, lets] = await Promise.all([LT.records(node, LT.LETTERBOX, from, tip), LT.records(node, LT.LETTERS, from, tip)]);
+      const add = (have, got) => { const ids = new Set(have.map(r => r.id)); for (const r of got) if (!ids.has(r.id)) have.push(r); };
+      add(c.box, box); add(c.let, lets); c.to = tip;
+      store.set("doorway.lrecs", c);
+    }
+    return { ...c, node, tip };
+  }
+
+  // records written as one: the first also makes a coin for each of the rest, so they go together
+  // with the next block; waits for change on its way, like any other write
+  async function writeRecords(node, tip, topic, uris) {
+    const asks = uris.map(u => LT.recordAsk(topic, u, tip));
+    for (let waited = 0; ; waited += 15) {
+      try { return await LT.writeAll(node, wallet.key, asks, letterSay, noteSent); }
+      catch (err) {
+        if (!/Not enough CSD/.test(String(err && err.message)) || waited >= 270) throw err;
+        const s = await W.spendable(node, wallet.address, inFlight()).catch(() => null);
+        if (!s || !s.waiting.length || s.soon < LT.costOf(asks.length) + 0.01 * asks.length) throw err;
+        letterSay("Waiting for your last post to land, then sending…");
+        await new Promise(r => setTimeout(r, 15_000));
+      }
+    }
+  }
+
+  async function openBox() {
+    if (lbusy) return; lbusy = true;
+    try {
+      if (!wallet) await loadWallet();
+      const r = await letterRecords();
+      if (!LT.letterboxes(r.box).has(wallet.address.toLowerCase())) {
+        letterSay("Opening your letterbox…");
+        await writeRecords(r.node, r.tip, LT.LETTERBOX, LT.letterboxUris(LT.letterKeys(wallet.key)));
+      }
+      store.set("doorway.letterbox", wallet.address);
+      const nm = (store.get("doorway.names") ?? [])[0];
+      letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
+      renderLetters(); setTimeout(showBalance, 3000);
+    } catch (err) {
+      const m = String(err && err.message || err);
+      if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "Opening your letterbox takes four posts' worth, and there isn't enough left."); else letterSay(m);
+    }
+    lbusy = false;
+  }
+
   function renderLetters() {
     document.querySelectorAll("[data-ltab]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.ltab === ltab && !lview)));
     const unread = lettersOf("in").filter(l => !lseen().has(l.id)).length;
@@ -1219,37 +1272,19 @@
       if (!l) { lview = null; return renderLetters(); }
       const me = wallet.address.toLowerCase(), mineSent = l.from === me;
       v.innerHTML = `<div class="lread"><h3>${esc(l.subject || "(no subject)")}</h3>
-        <div class="meta">${mineSent ? `To ${esc(whoIs(l.to))}` : `From ${esc(whoIs(l.from))}`}, ${esc(new Date(l.at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }))}. Signed by their key, checked here.</div>
+        <div class="meta">${mineSent ? `To ${esc(whoIs(l.to))}` : `From ${esc(whoIs(l.from))}`}, ${esc(new Date(l.at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }))}. Written with their key, checked here.</div>
         <div class="text">${esc(l.body)}</div>
         <div class="actions"><button type="button" id="lback">Back</button>${mineSent ? "" : `<button class="primary" type="button" id="lreply">Reply</button>`}</div></div>`;
       $("lback").onclick = () => { lview = null; renderLetters(); };
-      if (!mineSent) $("lreply").onclick = () => openWrite({ to: l.from, subject: /^re:/i.test(l.subject) ? l.subject : `Re: ${l.subject}`, re: l.id });
+      if (!mineSent) $("lreply").onclick = () => openWrite({ to: l.from, subject: /^re:/i.test(l.subject) ? l.subject : `Re: ${l.subject}`, re: LT.shortId(l) });
       if (!lseen().has(l.id)) { store.set("doorway.lettersSeen", [...lseen(), l.id]); renderLetters(); }
       return;
     }
     const list = lettersOf(ltab), seen = lseen();
     if (!list.length) {
-      const closed = ltab === "in" && store.get("doorway.letterbox") !== wallet?.address;
-      v.innerHTML = `<div class="empty" style="margin:14px;border:0">${ltab === "in" ? (closed ? `Nobody can write to you until your letterbox is open. <button type="button" class="link" id="lopen">Open it, for a post</button>` : "No letters yet. When someone writes to you, it shows up here.") : "You haven't written any letters yet."}</div>`;
-      if (closed) $("lopen").onclick = async () => {
-        if (lbusy) return; lbusy = true;
-        try {
-          if (!wallet) await loadWallet();
-          const node = await readingNode();
-          if (!(await LT.findBox(node, wallet.address).catch(() => null))) {
-            letterSay("Opening your letterbox…");
-            const tip = (await (await fetch(node + "/tip")).json()).height;
-            await send(node, wallet.key, await LT.openBoxAsk(wallet.key, tip));
-          }
-          store.set("doorway.letterbox", wallet.address);
-          letterSay(`Your letterbox is open. Anyone can write to you${(store.get("doorway.names") ?? [])[0] ? " at " + store.get("doorway.names")[0] + ".csd" : " once you have a .csd name"}.`);
-          renderLetters(); setTimeout(showBalance, 3000);
-        } catch (err) {
-          const m = String(err && err.message || err);
-          if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "There isn't enough left to open it."); else letterSay(m);
-        }
-        lbusy = false;
-      };
+      const closed = ltab === "in" && !boxOpen();
+      v.innerHTML = `<div class="empty" style="margin:14px;border:0">${ltab === "in" ? (closed ? `Nobody can write to you until your letterbox is open. <button type="button" class="link" id="lopen">Open it, for four posts' worth</button>` : "No letters yet. When someone writes to you, it shows up here.") : "You haven't written any letters yet."}</div>`;
+      if (closed) $("lopen").onclick = openBox;
       return;
     }
     v.innerHTML = list.map(l => `<button class="lrow${ltab === "in" && !seen.has(l.id) ? " new" : ""}" type="button" data-l="${esc(l.id)}">
@@ -1270,77 +1305,71 @@
       <input id="lto" placeholder="To: their .csd name" spellcheck="false" autocomplete="off" value="${esc(toSaid)}">
       <input id="lsubj" placeholder="Subject" autocomplete="off" value="${esc(subject)}">
       <textarea id="lbody" placeholder="Write your letter…"></textarea>
-      <div class="btns"><span class="hint" id="lcost">Costs a post.</span><button type="button" id="lcancel">Cancel</button><button class="primary" id="lsend">Send</button></div>
+      <div class="btns"><span class="hint" id="lcost"></span><button type="button" id="lcancel">Cancel</button><button class="primary" id="lsend">Send</button></div>
     </form>`;
     $(to ? "lbody" : "lto").focus();
+    // what it costs: a post per ~330 characters, and four more, once, to start a conversation with
+    // someone new (known here from the letters already kept with them)
+    const known = () => { const t = $("lto").value.trim().toLowerCase().replace(/\.csd$/, ""); const a = /^0x[0-9a-f]{40}$/.test(t) ? t : Object.entries(contacts()).find(([, n]) => n === t)?.[0]; return a && [...held().values()].some(l => l.from === a || l.to === a); };
+    const cost = () => {
+      const bytes = new TextEncoder().encode(`${$("lsubj").value}\u001f${$("lbody").value}`).length + (re ? 8 : 0);
+      const n = Math.max(1, Math.ceil(bytes / LT.NOTE_TEXT));
+      $("lcost").textContent = known() ? `${n === 1 ? "A post" : `${n} posts`}' worth.` : `${n + 4} posts' worth: ${n === 1 ? "one" : n} for the letter, and four, once, to start writing to someone new.`;
+    };
+    ["lto", "lsubj", "lbody"].forEach(id => $(id).addEventListener("input", cost)); cost();
     $("lcancel").onclick = () => { lview = null; letterSay(""); renderLetters(); };
     $("lform").onsubmit = async e => {
       e.preventDefault();
       if (lbusy) return;
-      const toIn = $("lto").value.trim(), body = $("lbody").value;
+      const toIn = $("lto").value.trim(), body = $("lbody").value, subject = $("lsubj").value.trim();
       if (!toIn) return letterSay("Who is it to? Their .csd name.");
       if (!body.trim()) return letterSay("The letter is empty.");
       lbusy = true; $("lsend").disabled = true;
-      let mineOpen = null;
       try {
         if (!wallet) await loadWallet();
-        const node = await readingNode();
         // who it's to: a .csd name's holder, or a key's address as it is
         let addr = /^0x[0-9a-f]{40}$/i.test(toIn) ? toIn.toLowerCase() : null, name = null;
         if (!addr) {
           letterSay("Looking them up…");
-          const o = await CsdResolver.lookup(toIn, { doors: await doorList() });
+          const o = await CsdResolver.lookup(toIn.replace(/\.csd$/i, ""), { doors: await doorList() });
           if (!o.owner) throw new Error(o.why ?? `Nobody holds ${toIn}.csd.`);
           addr = String(o.owner).toLowerCase(); name = o.name;
         }
         if (addr === wallet.address.toLowerCase()) throw new Error("That's you.");
-        const box = await LT.findBox(node, addr);
-        if (!box) throw new Error(`${name ? name + ".csd" : "They"} can't get letters yet: their letterbox isn't open. Anyone can open theirs in Doorway, under Letters, by writing a first letter.`);
-        const tip = (await (await fetch(node + "/tip")).json()).height;
-        // a reply needs your letterbox too: opened with your first letter
-        mineOpen = store.get("doorway.letterbox") === wallet.address || !!(await LT.findBox(node, wallet.address).catch(() => null));
-        if (!mineOpen) {
-          letterSay("Opening your letterbox, so they can write back…");
-          await send(node, wallet.key, await LT.openBoxAsk(wallet.key, tip));
-          store.set("doorway.letterbox", wallet.address);
+        letterSay("Reading the network…");
+        const r = await letterRecords();
+        const convs = await LT.conversations(wallet.key, r.let);
+        let conv = convs.filter(c => c.a === addr || c.b === addr).sort((x, y) => x.height - y.height)[0], uris = [];
+        if (!conv) {
+          const box = LT.letterboxes(r.box).get(addr);
+          if (!box) throw new Error(`${name ? name + ".csd" : "They"} can't get letters yet: their letterbox isn't open. They can open it in Doorway, under Letters.`);
+          const o = await LT.openingUris(wallet.key, addr, box);
+          conv = o.conversation; uris = o.uris;
         }
+        uris.push(...await LT.noteUris(conv, { subject, body, ...(re ? { re } : {}) }));
         letterSay("Sealing it for them and sending it…");
-        const ask = await LT.letterAsk(wallet.key, addr, box, { subject: $("lsubj").value.trim(), body, ...(re ? { re } : {}) }, tip);
-        // just after opening the letterbox, its change can't be spent until the next block: the
-        // letter waits for it
-        const txid = await send(node, wallet.key, ask, () => letterSay("Your letterbox is open. The letter goes out with the next block, in a minute or two…"));
+        await writeRecords(r.node, r.tip, LT.LETTERS, uris);
         if (name) store.set("doorway.contacts", { ...contacts(), [addr]: name });
-        // shown at once among the sent letters; the network's own copy replaces it when read back
-        keepLetters([{ id: txid, from: wallet.address.toLowerCase(), to: addr, at: Date.now(), subject: $("lsubj").value.trim(), body, ...(re ? { re } : {}), signedBy: wallet.address.toLowerCase(), height: 0, time: 0 }]);
         lview = null; ltab = "out"; renderLetters();
-        letterSay(`Sent. ${name ? name + ".csd" : "They"} can read it in a minute or two.`);
+        letterSay(`Sent. ${name ? name + ".csd" : "They"} can read it once it's in a block, in a minute or two.`);
         setTimeout(showBalance, 3000);
+        setTimeout(checkLetters, 150_000); setTimeout(checkLetters, 300_000);
       } catch (err) {
         const m = String(err && err.message || err);
-        if (/Not enough CSD/.test(m)) needMore($("letterStatus"), mineOpen === false ? "Your first letter costs two posts (it opens your letterbox too), and there isn't enough left." : "There isn't enough left to send it.");
-        else letterSay(m);
+        if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "There isn't enough left to send it."); else letterSay(m);
       }
       lbusy = false; const b = $("lsend"); if (b) b.disabled = false;
     };
-    // the first letter also opens your letterbox
-    (async () => {
-      try {
-        const open = store.get("doorway.letterbox") === wallet?.address || !!(await LT.findBox(await readingNode(), wallet.address).catch(() => null));
-        if (open) store.set("doorway.letterbox", wallet.address);
-        else if ($("lcost")) $("lcost").textContent = "Costs two posts this first time: it opens your letterbox too, so they can write back.";
-      } catch {}
-    })();
   }
 
   // new letters: looked for at start, then every ten minutes
   async function checkLetters() {
     try {
       if (!wallet) await loadWallet();
-      const node = await readingNode(), seen = held();
-      if (store.get("doorway.letterbox") !== wallet.address && await LT.findBox(node, wallet.address).catch(() => null)) store.set("doorway.letterbox", wallet.address);
-      const [got, sent] = await Promise.all([LT.inbox(node, wallet.key, seen), LT.sent(node, wallet.key, seen)]);
-      // a sent letter shown before it was read back is replaced by the network's copy
-      keepLetters([...got, ...sent]);
+      const r = await letterRecords(), me = wallet.address.toLowerCase();
+      if (LT.letterboxes(r.box).has(me)) store.set("doorway.letterbox", wallet.address);
+      const convs = await LT.conversations(wallet.key, r.let);
+      keepLetters(await LT.letters(convs, r.let));
       if (lview !== "write") renderLetters();
     } catch (err) { console.warn("letters:", err); }
   }
