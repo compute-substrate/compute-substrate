@@ -202,7 +202,7 @@ $("start").onclick = async () => {
     try {
       const { lookup } = await import("../../app/resolver/src/main");
       const o = await lookup(opp, { web: true, doors: [door] });
-      if (!o.owner) { say(o.why ?? `Nobody holds ${o.name}.csd yet.`); return; }
+      if (!o.owner) { say(o.why ?? `Nobody holds ${o.name} yet.`); return; }
       opp = o.owner.toLowerCase();
     } catch (e: any) { say(String(e?.message ?? e)); return; }
   }

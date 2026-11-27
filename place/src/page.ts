@@ -66,11 +66,11 @@ async function peek(input: string) {
     }
     const cid = f.open?.startsWith("ipfs://") ? f.open.slice(7) : null;
     const [face, year] = cid ? await Promise.all([faceOf(cid), keptYear(cid)]) : [{} as { title?: string; icon?: string }, null];
-    const title = face.title || `${name}.csd`;
+    const title = face.title || name;
     box.innerHTML = `
       <span class="face">${face.icon ? `<img alt="" src="${face.icon}">` : esc(name.slice(0, 1).toUpperCase())}</span>
       <b>${esc(title)}</b>
-      <span class="where">${esc(name)}.csd</span>
+      <span class="where">${esc(name)}</span>
       ${cid ? `<span class="life">${year ? `Here until ${year}` : "Here as long as its name points to it"}</span>` : ""}
       <span class="go">
         ${cid ? `<a class="in" href="${inDoorway(name)}">Step in</a>` : f.open && !f.page ? `<a class="in" href="${esc(f.open)}" target="_blank" rel="noopener">Go there</a>` : `<a class="in" href="https://commonplace.place/#/p/${esc(f.owner)}" target="_blank" rel="noopener">Its holder's page</a>`}
@@ -91,7 +91,7 @@ async function look(input: string) {
   const out = $("result");
   const name = input.trim().toLowerCase().replace(/\.csd$/, "");
   if (!name) { out.innerHTML = ""; return; }
-  out.innerHTML = `<div class="card"><p class="said">Looking up ${esc(name)}.csd, and checking its records…</p></div>`;
+  out.innerHTML = `<div class="card"><p class="said">Looking up ${esc(name)}, and checking its records…</p></div>`;
   try {
     const [f, hide] = await Promise.all([lookup(name, { doors: DOORS, web: true }), hiddenList()]);
     if (isHidden(hide, { name, cid: f.open?.startsWith("ipfs://") ? f.open.slice(7) : "" })) { out.innerHTML = `<div class="card"><p class="said">doorway.place doesn't show this one.</p></div>`; return; }
@@ -106,14 +106,14 @@ function render(f: Found, year: number | null) {
   const out = $("result");
   if (!f.owner) {
     const free = /^Nobody holds/.test(f.why ?? "");
-    out.innerHTML = `<div class="card"><h3>${esc(f.name)}<span>.csd</span></h3><p class="said">${esc(f.why ?? "No one holds it.")}</p>${free ? `<div class="row"><a class="btn main" href="#get">Get it in Doorway</a></div><p class="said">Publish your site in Doorway and choose this name: Doorway gets it for you, for a year at a time.</p>` : ""}</div>`;
+    out.innerHTML = `<div class="card"><h3>${esc(f.name)}</h3><p class="said">${esc(f.why ?? "No one holds it.")}</p>${free ? `<div class="row"><a class="btn main" href="#get">Get it in Doorway</a></div><p class="said">Publish your site in Doorway and choose this name: Doorway gets it for you, for a year at a time.</p>` : ""}</div>`;
     return;
   }
   const cid = f.open?.startsWith("ipfs://") ? f.open.slice(7) : null;
   const points = cid ? `a site, <code>ipfs://${esc(cid)}</code>` : f.open && !f.page ? `a link, <a href="${esc(f.open)}" target="_blank" rel="noopener">${esc(f.open)}</a>` : "its holder's page";
   out.innerHTML = `
     <div class="card">
-      <h3>${esc(f.name)}<span>.csd</span></h3>
+      <h3>${esc(f.name)}</h3>
       <dl class="facts">
         <dt>Held by</dt><dd title="${esc(f.owner)}">${esc(friendlyName(f.owner))}</dd>
         <dt>Points to</dt><dd>${points}</dd>
@@ -146,10 +146,10 @@ async function point(f: Found) {
   btn.disabled = true; said.className = "said"; said.textContent = "Asking Cairn Wallet…";
   try {
     const s = await cairnSigner();
-    if (s.address.toLowerCase() !== f.owner!.toLowerCase()) throw new Error(`Cairn Wallet's account (${friendlyName(s.address)}) doesn't hold ${f.name}.csd; ${friendlyName(f.owner!)} does.`);
+    if (s.address.toLowerCase() !== f.owner!.toLowerCase()) throw new Error(`Cairn Wallet's account (${friendlyName(s.address)}) doesn't hold ${f.name}; ${friendlyName(f.owner!)} does.`);
     const ask = W.pointAsk(f.name, f.profile ?? {}, cid, await tipOf());
     await s.send(ask.app, ask.fee);
-    said.className = "said ok"; said.textContent = `Done. ${f.name}.csd points to it now.`;
+    said.className = "said ok"; said.textContent = `Done. ${f.name} points to it now.`;
   } catch (e: any) { said.className = "said bad"; said.textContent = String(e?.message ?? e); }
   btn.disabled = false;
 }
@@ -186,7 +186,7 @@ async function sites() {
       const label = s.name || `${s.cid.slice(0, 10)}…`;
       return `<a class="site" href="${inDoorway(s.name || s.cid)}" data-cid="${esc(s.cid)}" title="Open in Doorway">
         <span class="ic">${esc(label.slice(0, 1).toUpperCase())}</span>
-        <span class="tx"><b>${esc(s.name || "A site with no name")}</b><small>${s.name ? `${esc(s.name)}.csd` : "kept up by its address"}</small>${until ? `<span class="until">until ${until}</span>` : ""}</span>
+        <span class="tx"><b>${esc(s.name || "A site with no name")}</b><small>${s.name ? esc(s.name) : "kept up by its address"}</small>${until ? `<span class="until">until ${until}</span>` : ""}</span>
       </a>`;
     }).join("");
     // a glimpse through the door: the top named sites

@@ -75,7 +75,7 @@ function render() {
     return `<article class="card">
       <a class="open" href="${esc(openUrl(s))}" target="_blank" rel="noopener">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${esc(f.icon)}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <span style="min-width:0"><b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name, kept up by its address"}</small></span>
+        <span style="min-width:0"><b>${esc(title)}</b><small>${s.name ? esc(s.name) : "no name, kept up by its address"}</small></span>
       </a>
       <div class="foot">
         <span class="count" title="${n} ${n === 1 ? "person recommends" : "people recommend"} it">${n ? `${HEART}${n}` : ""}${lifeOf(s.cid) ? `<span class="life" title="Kept up on the doors until ${lifeSaid(s.cid)}, name or not">until ${lifeSaid(s.cid, true)}</span>` : ""}</span>
@@ -94,12 +94,12 @@ function render() {
 // and open on any device, phone included, with nothing installed
 const wanted = () => decodeURIComponent(location.hash.replace(/^#\/?/, "")).trim().toLowerCase().replace(/\.csd$/, "");
 let opening = wanted();
-if (opening) $("grid").innerHTML = `<p class="empty">Opening ${esc(opening)}.csd…</p>`;
+if (opening) $("grid").innerHTML = `<p class="empty">Opening ${esc(opening)}…</p>`;
 function openWanted() {
   if (!opening || !sites.length) return;
   const s = sites.find(x => x.name === opening || x.key === opening || x.cid === opening);
   if (s) { location.replace(openUrl(s)); return; }
-  say(`${opening}.csd doesn't point to a site.`);
+  say(`${opening} doesn't point to a site.`);
   opening = "";
   render();
 }
@@ -108,7 +108,7 @@ addEventListener("hashchange", () => { opening = wanted(); openWanted(); });
 // and opens it in Doorway, or says where to get Doorway); a site with no name, by its address
 async function share(s: Listed) {
   const url = s.name ? `https://doorway.place/#${s.name}` : `ipfs://${s.cid}`;
-  const title = faces.get(s.cid)?.title || (s.name ? `${s.name}.csd` : "A site");
+  const title = faces.get(s.cid)?.title || (s.name || "A site");
   try { if ((navigator as any).share) { await (navigator as any).share({ title, url }); return; } } catch { return; }
   try { await navigator.clipboard.writeText(url); say(`Link copied: ${url}`); } catch { say(url); }
 }
@@ -176,7 +176,7 @@ $("grid").addEventListener("click", async e => {
   if (!b || b.disabled) return;
   const s = sites.find(x => x.key === b.dataset.name);
   if (!s) return;
-  const label = s.name ? `${s.name}.csd` : (faces.get(s.cid)?.title || "this site");
+  const label = s.name ? s.name : (faces.get(s.cid)?.title || "this site");
   b.disabled = true;
   say(`Recommending ${label}…`);
   try {
