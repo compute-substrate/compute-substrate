@@ -541,7 +541,7 @@ fn address_url(cid: String) -> Result<String, String> {
 }
 
 fn waiting_page(name: &str) -> String {
-    format!(r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name}.csd</title><meta http-equiv="refresh" content="2"><style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555}}</style><p>Opening <b>{name}.csd</b>…</p>"#)
+    format!(r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name}</title><meta http-equiv="refresh" content="2"><style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555}}</style><p>Opening <b>{name}</b>…</p>"#)
 }
 
 fn serve_names(app: tauri::AppHandle) {
@@ -576,7 +576,7 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
         return route_address(app, req, cid);
     }
     let Some(name) = name_of_host(&host) else {
-        let _ = req.respond(tiny_http::Response::from_string("Open a .csd name as http://<name>.localhost").with_status_code(404));
+        let _ = req.respond(tiny_http::Response::from_string("Open a name as http://<name>.localhost").with_status_code(404));
         return;
     };
     if req.url().starts_with("/.doorway/") {
@@ -598,7 +598,7 @@ fn route_name(app: &tauri::AppHandle, req: tiny_http::Request) {
             // the page asks again by itself
             let (refresh, mut more) = if again { (r#"<meta http-equiv="refresh" content="20">"#, "<br><small>This page tries again by itself.</small>".to_string()) } else { ("", String::new()) };
             if !detail.is_empty() { more += &format!(r#"<details style="margin-top:18px;font-size:12px;color:#999"><summary>Details</summary>{}</details>"#, detail.replace('&', "&amp;").replace('<', "&lt;")); }
-            let _ = req.respond(tiny_http::Response::from_string(format!(r#"<!doctype html><meta charset="utf-8"><title>{name}.csd</title>{refresh}<style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555;padding:0 24px;text-align:center}}</style><p>{esc}{more}</p>"#))
+            let _ = req.respond(tiny_http::Response::from_string(format!(r#"<!doctype html><meta charset="utf-8"><title>{name}</title>{refresh}<style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#555;padding:0 24px;text-align:center}}</style><p>{esc}{more}</p>"#))
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap()));
             // asked again later: the name may have been registered or pointed somewhere since

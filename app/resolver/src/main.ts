@@ -194,7 +194,7 @@ export type Opened = { name: string; open?: string; why?: string; owner?: string
 export type NameRead = { name: string; why?: string; st?: any; free?: boolean; tip: number; via: string };
 export async function readName(input: string, opts: { doors?: string[]; web?: boolean } = {}): Promise<NameRead> {
   const name = input.trim().toLowerCase().replace(/^web\+csd:(\/\/)?/, "").replace(/\.csd$/, "").replace(/\/+$/, "");
-  if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "That isn't a .csd name.", tip: 0, via: "" };
+  if (!NAME_RE.test(name) || RESERVED_NAMES.has(name)) return { name, why: "Names are letters, digits and dashes.", tip: 0, via: "" };
   const at = await answeringAt(opts.doors ?? []);
   const own = opts.web ? false : await ownNodeReady(at[0]?.h ?? 0);
   const doors = own ? [] : at.map(x => x.d);
@@ -221,7 +221,7 @@ export async function readName(input: string, opts: { doors?: string[]; web?: bo
       if (ev) events.push(ev);
     }
   } else if (h === null) {
-    return { name, why: `Nobody holds ${name}.csd.`, free: true, tip, via };
+    return { name, why: `Nobody holds ${name}.`, free: true, tip, via };
   } else {
     // Cairn's server didn't answer (or its list can't decide this name alone): the whole history,
     // from this computer's own node
@@ -235,8 +235,8 @@ export async function lookup(input: string, opts: { doors?: string[]; web?: bool
   const r = await readName(input, opts);
   const { name, st, via } = r;
   if (r.why) return { name, why: r.why, ...(r.free ? { free: true } : {}) };
-  if (st?.pending) return { name, via, why: `${name}.csd is being registered: its registration isn't finished yet.` };
-  if (!st || st.expired) return { name, via, why: `Nobody holds ${name}.csd${st?.expired ? " now; its lease lapsed" : ""}.`, free: !st };
+  if (st?.pending) return { name, via, why: `${name} is being registered, and isn't ready yet.` };
+  if (!st || st.expired) return { name, via, why: `Nobody holds ${name}${st?.expired ? " now: its year ran out" : ""}.`, free: !st };
   const p = st.profile ?? {};
   const until = typeof st.paidThroughEpoch === "number" ? st.paidThroughEpoch : undefined;
   const ipfs = /^ipfs:\/\/(b[a-z2-7]{50,100})$/.exec(p["contenthash"] ?? "")?.[1];

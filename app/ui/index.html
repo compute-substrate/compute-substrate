@@ -629,7 +629,7 @@
       if (ipfs) {
         // its site: downloaded from IPFS and checked here (once), then served from this computer
         if (!(await invoke("site_kept", { cid: ipfs }))) {
-          st.textContent = `Opening ${r.name}.csd…`;
+          st.textContent = `Opening ${r.name}…`;
           const { files, car } = await CsdResolver.fetchSite(ipfs, await doorList());
           for (const [path, bytes] of files) {
             await invoke("site_put", bytes, { headers: { "x-cid": ipfs, "x-path": encodeURIComponent(path) } });
@@ -640,12 +640,12 @@
         url = await invoke("site_open", { name: r.name, cid: ipfs });
       }
       if (!ipfs) invoke("name_answer", { name: r.name, go: url }).catch(() => {});
-      st.textContent = show ? `Opening ${r.name}.csd` : `${r.name}.csd is ready`;
+      st.textContent = show ? `Opening ${r.name}` : `${r.name} is ready`;
       renderSites();
       if (show) await invoke("plugin:opener|open_url", { url });
     } catch (e) {
       st.textContent = String(e && e.message || e);
-      if (!show) invoke("name_answer", { name: String(input).replace(/\.csd$/, ""), why: `Couldn't open ${input}.csd: ${st.textContent}`, again: true, detail: e?.detail ?? null }).catch(() => {});
+      if (!show) invoke("name_answer", { name: String(input).replace(/\.csd$/, ""), why: `Couldn't open ${input}: ${st.textContent}`, again: true, detail: e?.detail ?? null }).catch(() => {});
     }
   }
   $("peerForm").onsubmit = async e => {
@@ -856,20 +856,20 @@
     const st = $("publishStatus"), btn = $("publishForm").querySelector("button");
     // a name Doorway's key holds: pointed right here, signed by that key
     if (wallet && pointing?.name !== name) {
-      st.textContent = `Looking up ${name}.csd…`;
+      st.textContent = `Looking up ${name}…`;
       let o = null; try { o = await CsdResolver.lookup(name, { doors: await doorList() }); } catch {}
       if (o?.owner && o.owner.toLowerCase() === wallet.address.toLowerCase()) {
         pointing = { name, profile: o.profile ?? {} };
         btn.textContent = "Show it there";
-        st.textContent = `${name}.csd is yours. Press again to show this site there (one post's worth).`;
+        st.textContent = `${name} is yours. Press again to show this site there (one post's worth).`;
         return;
       }
       // a free name: Doorway gets it with its own key (the second press), then points it here
       if (o?.free && getting?.name !== name) {
         const fee = W.nameFee(name, (await (await fetch(`${await readingNode()}/tip`)).json()).height);
         getting = { name, fee };
-        btn.textContent = `Get ${name}.csd`;
-        st.textContent = `${name}.csd is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth (the yearly fee goes to CairnX, which runs the name service). It takes about 25 minutes while Doorway is open, and then your site goes up there.`;
+        btn.textContent = `Get ${name}`;
+        st.textContent = `${name} is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth (the yearly fee goes to CairnX, which runs the name service). It takes about 25 minutes while Doorway is open, and then your site goes up there.`;
         return;
       }
       if (o?.why && !o.owner && !o.free) { st.textContent = o.why; return; }
@@ -880,18 +880,18 @@
       if (Number.isFinite(bal) && bal < need) { needMore(st, `That needs about ${postsSaid(need)}' worth, and you have about ${postsSaid(bal)} left.`); return; }
       getting = null; btn.textContent = "Point it here";
       startName(name, pending.cid);
-      st.textContent = `Getting ${name}.csd. You can keep using Doorway meanwhile; it shows here how it's going.`;
+      st.textContent = `Getting ${name}. You can keep using Doorway meanwhile; it shows here how it's going.`;
       return;
     }
     if (wallet && pointing?.name === name) {
-      btn.disabled = true; st.textContent = `Pointing ${name}.csd at it…`;
+      btn.disabled = true; st.textContent = `Pointing ${name} at it…`;
       try {
         const node = await readingNode();
         const tip = (await (await fetch(`${node}/tip`)).json()).height;
         await send(node, wallet.key, W.pointAsk(name, pointing.profile, pending.cid, tip));
         pointing = null; btn.textContent = "Point it here";
         pending.name = name; pending.until = Date.now() + 60 * 60_000;
-        st.textContent = `Putting your site up at ${name}.csd…`;
+        st.textContent = `Putting your site up at ${name}…`;
         publishTick();
       } catch (err) {
         const m = String(err && err.message || err);
@@ -924,7 +924,7 @@
     const again = (ms = 30_000) => { regTimer = setTimeout(regTick, ms); };
     const restart = why => {
       // one fresh start at most: a second miss stops, so the small step costs can't repeat
-      if ((r.tries ?? 0) >= 1) { store.set("doorway.reg", null); regSay(`${why} Getting ${r.name}.csd stopped here; nothing more is spent. Try again later.`); renderMyName(); return; }
+      if ((r.tries ?? 0) >= 1) { store.set("doorway.reg", null); regSay(`${why} Getting ${r.name} stopped here; nothing more is spent. Try again later.`); renderMyName(); return; }
       save({ salt: W.newSalt(), step: "commit", at: Date.now(), commitTx: null, commitH: null, revealTx: null, tries: (r.tries ?? 0) + 1 }); regSay(`${why} Trying once more.`); again(5_000);
     };
     try {
@@ -933,17 +933,17 @@
       const tip = (await (await fetch(`${node}/tip`)).json()).height;
       const me = wallet.address;
       if (r.step === "commit") {
-        regSay(`Getting ${r.name}.csd: step 1 of 3, a sealed claim…`);
+        regSay(`Getting ${r.name}: step 1 of 3, a sealed claim…`);
         const tx = await send(node, wallet.key, W.commitAsk(r.name, r.salt, me, tip));
         save({ step: "committed", commitTx: tx, at: Date.now() });
       } else if (r.step === "committed") {
         const h = await W.txHeight(node, me, r.commitTx);
         if (h) { save({ step: "reveal", commitH: h }); return again(1_000); }
         if (Date.now() - r.at > 40 * 60_000) return restart("The first step didn't go through.");
-        regSay(`Getting ${r.name}.csd: step 1 of 3, waiting for it to land…`);
+        regSay(`Getting ${r.name}: step 1 of 3, waiting for it to land…`);
       } else if (r.step === "reveal") {
         if (tip + 1 > r.commitH + W.REVEAL_BY) return restart("Step 2 came too late.");
-        regSay(`Getting ${r.name}.csd: step 2 of 3, claiming it…`);
+        regSay(`Getting ${r.name}: step 2 of 3, claiming it…`);
         const tx = await send(node, wallet.key, W.revealAsk(r.name, r.salt, tip));
         save({ step: "revealed", revealTx: tx, at: Date.now() });
       } else if (r.step === "revealed") {
@@ -951,23 +951,23 @@
         if (h && h > r.commitH + W.REVEAL_BY) return restart("Step 2 landed too late.");
         if (h) { save({ step: "finalize" }); return again(1_000); }
         if (tip > r.commitH + W.REVEAL_BY) return restart("Step 2 didn't land in time.");
-        regSay(`Getting ${r.name}.csd: step 2 of 3, waiting for it to land…`);
+        regSay(`Getting ${r.name}: step 2 of 3, waiting for it to land…`);
       } else if (r.step === "finalize") {
         if (tip > r.commitH + W.FINALIZE_BY) return restart("The last step's time ran out.");
         const mins = Math.max(1, (r.commitH + W.FINALIZE_FROM - tip) * 2);
-        if (tip < r.commitH + W.FINALIZE_FROM) { regSay(`Getting ${r.name}.csd: step 3 of 3 in about ${mins} minutes, once nobody can claim it first.`); return again(); }
+        if (tip < r.commitH + W.FINALIZE_FROM) { regSay(`Getting ${r.name}: step 3 of 3 in about ${mins} minutes, once nobody can claim it first.`); return again(); }
         // the reservation as the network's own records say (not a name server, which may not list
         // a name until it's finished)
         const st = await W.reservation(node, r.name, r.commitH, tip);
         try {
           const tx = await send(node, wallet.key, W.finalizeAsk(r.name, r.salt, st, me, r.commitH, tip));
           save({ step: "finalized", finalTx: tx, at: Date.now() });
-          regSay(`Getting ${r.name}.csd: step 3 of 3, paying for the year…`);
+          regSay(`Getting ${r.name}: step 3 of 3, paying for the year…`);
         } catch (err) {
           const m = String(err && err.message || err);
-          if (/earlier committer won/.test(m)) { store.set("doorway.reg", null); regSay(`Someone else claimed ${r.name}.csd a moment before you did, so it's theirs. Nothing was paid for the name. Try another one.`); renderMyName(); return; }
+          if (/earlier committer won/.test(m)) { store.set("doorway.reg", null); regSay(`Someone else claimed ${r.name} a moment before you did, so it's theirs. Nothing was paid for the name. Try another one.`); renderMyName(); return; }
           if (/already registered to you/.test(m)) { save({ step: "finalized", at: Date.now() }); return again(1_000); }
-          if (/no reservation/.test(m)) { regSay(`Getting ${r.name}.csd: step 3 of 3, waiting for the network to show step 2…`); return again(); }
+          if (/no reservation/.test(m)) { regSay(`Getting ${r.name}: step 3 of 3, waiting for the network to show step 2…`); return again(); }
           throw err;
         }
       } else if (r.step === "finalized") {
@@ -978,22 +978,22 @@
           if (!names.includes(r.name)) store.set("doorway.names", [...names, r.name]);
           store.set("doorway.reg", null);
           if (r.cid) {
-            regSay(`✓ ${r.name}.csd is yours. Putting your site there…`);
+            regSay(`✓ ${r.name} is yours. Putting your site there…`);
             await send(node, wallet.key, W.pointAsk(r.name, o.profile ?? {}, r.cid, tip));
             pending = { cid: r.cid, name: r.name, until: Date.now() + 60 * 60_000 };
-            regSay(`✓ ${r.name}.csd is yours, for a year. Putting your site up there…`);
+            regSay(`✓ ${r.name} is yours, for a year. Putting your site up there…`);
             publishTick();
-          } else regSay(`✓ ${r.name}.csd is yours, for a year.`);
+          } else regSay(`✓ ${r.name} is yours, for a year.`);
           renderMyName();
           setTimeout(showBalance, 3000);
           return;
         }
-        regSay(`Getting ${r.name}.csd: step 3 of 3, waiting for it to land…`);
+        regSay(`Getting ${r.name}: step 3 of 3, waiting for it to land…`);
       }
     } catch (err) {
       const m = String(err && err.message || err);
-      if (/Not enough CSD/.test(m)) { needMore($("regStatus"), `Getting ${r.name}.csd paused: you've run low.`); $("regStatus").hidden = false; return again(120_000); }
-      regSay(`Getting ${r.name}.csd: ${m} Doorway keeps trying.`);
+      if (/Not enough CSD/.test(m)) { needMore($("regStatus"), `Getting ${r.name} paused: you've run low.`); $("regStatus").hidden = false; return again(120_000); }
+      regSay(`Getting ${r.name}: ${m} Doorway keeps trying.`);
     }
     again();
   }
@@ -1014,9 +1014,9 @@
         if (end - tip > 60 * 720) continue; // more than about two months left
         const fee = W.nameFee(name, tip);
         $("regStatus").hidden = false;
-        $("regStatus").innerHTML = `${esc(name)}.csd is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${postsSaid(fee)}' worth)</button>`;
+        $("regStatus").innerHTML = `${esc(name)} is yours until ${esc(W.monthYear(W.heightToDate(end, tip)))}. <button type="button" class="add" id="renewName">Add a year (${postsSaid(fee)}' worth)</button>`;
         $("renewName").onclick = async () => {
-          try { await send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name}.csd has another year.`); setTimeout(showBalance, 3000); }
+          try { await send(node, wallet.key, W.renewAsk(name, tip)); regSay(`✓ ${name} has another year.`); setTimeout(showBalance, 3000); }
           catch (err) { const m = String(err && err.message || err); if (/Not enough CSD/.test(m)) needMore($("regStatus"), "You don't have enough left for that."); else regSay(m); }
         };
         return;
@@ -1033,12 +1033,12 @@
     const n = await seed(pending.cid);
     if (n > 0) {
       const name = pending.name; pending = null;
-      $("publishStatus").textContent = `✓ It's up. Opening ${name}.csd…`;
+      $("publishStatus").textContent = `✓ It's up. Opening ${name}…`;
       await openName(name);
       renderSites();
       return;
     }
-    $("publishStatus").textContent = `Putting your site up at ${pending.name}.csd, as soon as you've approved it…`;
+    $("publishStatus").textContent = `Putting your site up at ${pending.name}, as soon as you've approved it…`;
     setTimeout(publishTick, 30_000);
   }
 
@@ -1193,7 +1193,7 @@
     $("walletCsd").textContent = Number.isFinite(b) ? `${b} CSD` : "";
     const a = Object.keys(allowed());
     $("walletAllowedRow").hidden = !a.length;
-    $("walletAllowed").innerHTML = a.map(s => `${esc(s)}.csd <button class="link" data-unallow="${esc(s)}" style="background:none;border:0;padding:0;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit">stop</button>`).join(", ");
+    $("walletAllowed").innerHTML = a.map(s => `${esc(s)} <button class="link" data-unallow="${esc(s)}" style="background:none;border:0;padding:0;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit">stop</button>`).join(", ");
     $("walletAllowed").querySelectorAll("[data-unallow]").forEach(b => b.onclick = () => { const m = allowed(); delete m[b.dataset.unallow]; store.set("doorway.allowed", m); showBalance(); });
   }
   // ── Your name: a .csd name of your own, with or without a site on it. Got the same way as from
@@ -1204,9 +1204,9 @@
     $("myNameHave").hidden = !names.length;
     $("myNameForm").hidden = !!names.length || !!r;
     if (names.length) {
-      $("myNameHave").innerHTML = `You're <b>${esc(names[0])}.csd</b>${names.length > 1 ? ` (and ${names.slice(1).map(n => esc(n) + ".csd").join(", ")})` : ""}.`;
+      $("myNameHave").innerHTML = `You're <b>${esc(names[0])}</b>${names.length > 1 ? ` (and ${names.slice(1).map(n => esc(n) ).join(", ")})` : ""}.`;
       $("myNameSaid").textContent = "People can find you and write to you there.";
-    } else if (r) $("myNameSaid").textContent = `Getting ${r.name}.csd. It takes about 25 minutes while Doorway is open; you can keep using it meanwhile.`;
+    } else if (r) $("myNameSaid").textContent = `Getting ${r.name}. It takes about 25 minutes while Doorway is open; you can keep using it meanwhile.`;
   }
   $("myName").oninput = () => { wanting = null; $("myNameGo").textContent = "Check"; };
   $("myNameForm").onsubmit = async e => {
@@ -1221,7 +1221,7 @@
       renderMyName();
       return;
     }
-    go.disabled = true; said.textContent = `Looking up ${name}.csd…`;
+    go.disabled = true; said.textContent = `Looking up ${name}…`;
     try {
       if (!wallet) await loadWallet();
       const o = await CsdResolver.lookup(name, { doors: await doorList() });
@@ -1231,9 +1231,9 @@
       } else if (o?.free) {
         const fee = W.nameFee(name, (await (await fetch(`${await readingNode()}/tip`)).json()).height);
         wanting = { name, fee };
-        go.textContent = `Get ${name}.csd`;
-        said.textContent = `${name}.csd is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth. It takes about 25 minutes while Doorway is open.`;
-      } else said.textContent = o?.owner ? `${name}.csd is taken. Try another.` : (o?.why ?? `${name}.csd can't be had just now.`);
+        go.textContent = `Get ${name}`;
+        said.textContent = `${name} is free. Make it yours for a year, for about ${postsSaid(fee + 0.75)}' worth. It takes about 25 minutes while Doorway is open.`;
+      } else said.textContent = o?.owner ? `${name} is taken. Try another.` : (o?.why ?? `${name} can't be had just now.`);
     } catch (err) { said.textContent = String(err && err.message || err); }
     go.disabled = false;
   };
@@ -1252,7 +1252,7 @@
   const lseen = () => new Set(store.get("doorway.lettersSeen") ?? []);
   // who someone is: the name you wrote to them by, else the made-up name every address has
   const contacts = () => store.get("doorway.contacts") ?? {};
-  const whoIs = addr => contacts()[String(addr).toLowerCase()] ? contacts()[String(addr).toLowerCase()] + ".csd" : CsdResolver.friendlyName(addr);
+  const whoIs = addr => contacts()[String(addr).toLowerCase()] ? contacts()[String(addr).toLowerCase()]  : CsdResolver.friendlyName(addr);
   const whenSaid = t => { const d = new Date(t); const days = (Date.now() - d) / DAY; return days < 1 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], days < 300 ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" }); };
   const LOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
   const BACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
@@ -1338,7 +1338,7 @@
       }
       store.set("doorway.letterbox2", { addr: wallet.address, at: Date.now(), seen: false });
       const nm = (store.get("doorway.names") ?? [])[0];
-      letterSay(`Your letterbox is opening. It's ready in a few minutes, and then anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a name"}.`);
+      letterSay(`Your letterbox is opening. It's ready in a few minutes, and then anyone can write to you${nm ? " at " + nm  : " once you have a name"}.`);
       renderLetters(); setTimeout(showBalance, 3000); setTimeout(checkLetters, 180_000); setTimeout(checkLetters, 360_000);
     } catch (err) {
       const m = String(err && err.message || err);
@@ -1371,7 +1371,7 @@
     const list = lettersOf(ltab), seen = lseen();
     if (!list.length) {
       const b = store.get("doorway.letterbox2"), mine = !!b && b.addr === wallet?.address;
-      const nm = (store.get("doorway.names") ?? [])[0], at = nm ? `${esc(nm)}.csd` : "your name";
+      const nm = (store.get("doorway.names") ?? [])[0], at = nm ? `${esc(nm)}` : "your name";
       if (ltab === "in" && !boxOpen())
         v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Open your letterbox</b><p>Before anyone can write to you, you need a letterbox. Opening it puts up a lock that only your key opens, so people can seal letters that only you can read. You do this once.</p><button class="primary" type="button" id="lopen">Open my letterbox</button><small>Four posts' worth, once.</small></div>`;
       else if (ltab === "in" && mine && !b.seen)
@@ -1398,7 +1398,7 @@
     lview = "write";
     renderLetters();
     const v = $("letterView");
-    const toSaid = to ? (contacts()[to.toLowerCase()] ? contacts()[to.toLowerCase()] + ".csd" : to) : "";
+    const toSaid = to ? (contacts()[to.toLowerCase()] ? contacts()[to.toLowerCase()]  : to) : "";
     v.innerHTML = `<form class="lc" id="lform">
       <div class="head"><b>${re ? "Reply" : "New letter"}</b><button class="lback" type="button" id="lcancel" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
       <div class="lf"><label for="lto">To</label><input id="lto" placeholder="their name, like guestbook" spellcheck="false" autocomplete="off" value="${esc(toSaid)}"></div>
@@ -1435,7 +1435,7 @@
         if (!addr) {
           letterSay("Looking them up…");
           const o = await CsdResolver.lookup(toIn.replace(/\.csd$/i, ""), { doors: await doorList() });
-          if (!o.owner) throw new Error(o.why ?? `Nobody holds ${toIn}.csd.`);
+          if (!o.owner) throw new Error(o.why ?? `Nobody holds ${toIn}.`);
           addr = String(o.owner).toLowerCase(); name = o.name;
         }
         if (addr === wallet.address.toLowerCase()) throw new Error("That's you.");
@@ -1445,8 +1445,8 @@
         let conv = convs.filter(c => c.a === addr || c.b === addr).sort((x, y) => x.height - y.height)[0], uris = [];
         if (!conv) {
           const box = LT.letterboxes(r.box).get(addr);
-          if (!box && LT.letterboxesComing(r.box).has(addr)) throw new Error(`${name ? name + ".csd is" : "They're"} still opening their letterbox. Try again in a few minutes.`);
-          if (!box) throw new Error(`${name ? name + ".csd" : "They"} can't get letters yet. They need to open their letterbox first, in Doorway under Letters.`);
+          if (!box && LT.letterboxesComing(r.box).has(addr)) throw new Error(`${name ? name + " is" : "They're"} still opening their letterbox. Try again in a few minutes.`);
+          if (!box) throw new Error(`${name ? name  : "They"} can't get letters yet. They need to open their letterbox first, in Doorway under Letters.`);
           const o = await LT.openingUris(wallet.key, addr, box);
           conv = o.conversation; uris = o.uris;
         }
@@ -1454,7 +1454,7 @@
         letterSay("Sealing it and sending…");
         // as soon as the first of it is out, it's in Sent, marked as on its way; it's put in its
         // place by the network's copy once that's read back
-        const who = name ? name + ".csd" : "They";
+        const who = name ? name  : "They";
         let shown = false;
         const show = async () => {
           if (shown) return; shown = true;
@@ -1485,7 +1485,7 @@
       const r = await letterRecords(), me = wallet.address.toLowerCase();
       const prev = store.get("doorway.letterbox2");
       if (LT.letterboxes(r.box).has(me)) {
-        if (!prev?.seen && /letterbox is opening/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a name"}.`); }
+        if (!prev?.seen && /letterbox is opening/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm  : " once you have a name"}.`); }
         store.set("doorway.letterbox2", { addr: wallet.address, at: prev?.at ?? Date.now(), seen: true });
       }
       else if (prev?.seen) store.set("doorway.letterbox2", { ...prev, seen: false });
@@ -1592,7 +1592,7 @@
   async function showOutside() {
     const list = await invoke("outside_reports").catch(() => []);
     $("outsideBox").hidden = !list.length;
-    $("outsideList").innerHTML = list.map(([site, to]) => `${esc(site)}.csd → ${esc(to)}`).join("<br>");
+    $("outsideList").innerHTML = list.map(([site, to]) => `${esc(site)} → ${esc(to)}`).join("<br>");
   }
   $("settingsBox").addEventListener("toggle", () => { if ($("settingsBox").open) showOutside(); });
   // The top-up, as a moment rather than a status line: waiting for the payment (a slow ring), the
@@ -1705,11 +1705,11 @@
         replyTo = r => { if (r.id === a.id || r.closed) resolve(r); };
         invoke("show_ask", { ask: {
           id: a.id,
-          title: W.isKeep(ask) ? `${a.site}.csd asks to keep a site up` : `${a.site}.csd asks to write`,
+          title: W.isKeep(ask) ? `${a.site} asks to keep a site up` : `${a.site} asks to write`,
           what: W.describe(ask),
           balance: /^[\d.]+$/.test(bal) ? (+bal < csd ? "You've run low: top up to do this." : `You have enough for about ${postsSaid(+bal)}.`) : "",
           short: /^[\d.]+$/.test(bal) && +bal < csd,
-          always: W.isKeep(ask) ? "" : `Allow ${a.site}.csd without asking, up to ${postsSaid(BUDGET)}' worth a day`,
+          always: W.isKeep(ask) ? "" : `Allow ${a.site} without asking, up to ${postsSaid(BUDGET)}' worth a day`,
         } }).catch(() => resolve({ allow: false }));
       });
       replyTo = null;
@@ -1737,9 +1737,9 @@
       const mine = !!wallet && (s.recommenders.includes(wallet.address) || recommended().includes(s.key));
       const n = s.recommenders.length + (mine && !s.recommenders.includes(wallet.address) ? 1 : 0);
       const tip = mine ? "You recommend it" : "Recommend it";
-      return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.key)}" title="Open ${esc(s.name ? s.name + ".csd" : title)}">
+      return `<div class="tile" role="button" tabindex="0" data-name="${esc(s.key)}" title="Open ${esc(s.name ? s.name  : title)}">
         <span class="face" style="${f.icon ? "" : `background:${tint(s.cid)}`}">${f.icon ? `<img src="${f.icon}" alt="">` : esc(title[0]?.toUpperCase() ?? "·")}</span>
-        <b>${esc(title)}</b><small>${s.name ? esc(s.name) + ".csd" : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeSaid(s.cid, true)}</small>` : ""}
+        <b>${esc(title)}</b><small>${s.name ? esc(s.name)  : "no name"}${n ? `, ${n} ★` : ""}</small>${lifeOf(s.cid) ? `<small class="life">until ${lifeSaid(s.cid, true)}</small>` : ""}
         <button class="heart star${mine ? " on" : ""}" data-rec="${esc(s.key)}" title="${esc(tip)}" aria-label="${esc(tip)}" aria-pressed="${mine}" ${mine ? "disabled" : ""}>${mine ? STAR : STAR_OFF}</button>
       </div>`;
     }).join("");
@@ -1751,7 +1751,7 @@
     $("discover").querySelectorAll("[data-rec]").forEach(b => b.onclick = async e => {
       e.stopPropagation();
       const s = discovered.find(x => x.key === b.dataset.rec);
-      const label = s && (s.name ? `${s.name}.csd` : (faceOf.get(s.cid)?.title || "this site"));
+      const label = s && (s.name ? `${s.name}` : (faceOf.get(s.cid)?.title || "this site"));
       if (!s || !wallet) return;
       const cost = s.listing ? "0.05" : "0.25";
       if (b.dataset.sure !== "1") { b.dataset.sure = "1"; $("discoverNote").textContent = s.listing ? `Press the star again to recommend ${label}.` : `Nobody has recommended ${label} yet. Press the star again to be the first and put it on the list (one post's worth).`; return; }
