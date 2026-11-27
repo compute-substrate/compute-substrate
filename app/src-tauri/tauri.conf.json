@@ -20,6 +20,7 @@
       }
     ],
     "security": {
+      "dangerousDisableAssetCspModification": ["style-src"],
       "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8789 http://*.localhost:* https: https://cairn-substrate.com https://trustless-gateway.link https://ipfs.io https://dweb.link ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'"
     }
   },
