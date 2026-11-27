@@ -1276,8 +1276,8 @@
       }
       store.set("doorway.letterbox2", { addr: wallet.address, at: Date.now(), seen: false });
       const nm = (store.get("doorway.names") ?? [])[0];
-      letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
-      renderLetters(); setTimeout(showBalance, 3000);
+      letterSay(`Opening your letterbox: it's open once all four parts are in blocks, in a few minutes. Then anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
+      renderLetters(); setTimeout(showBalance, 3000); setTimeout(checkLetters, 180_000); setTimeout(checkLetters, 360_000);
     } catch (err) {
       const m = String(err && err.message || err);
       if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "Opening your letterbox takes four posts' worth, and there isn't enough left."); else letterSay(m);
@@ -1366,6 +1366,7 @@
         let conv = convs.filter(c => c.a === addr || c.b === addr).sort((x, y) => x.height - y.height)[0], uris = [];
         if (!conv) {
           const box = LT.letterboxes(r.box).get(addr);
+          if (!box && LT.letterboxesComing(r.box).has(addr)) throw new Error(`${name ? name + ".csd's" : "Their"} letterbox is still being opened: part of it is on the network, the rest goes in with the next block or two. Try again in a few minutes.`);
           if (!box) throw new Error(`${name ? name + ".csd" : "They"} can't get letters yet: their letterbox isn't open. They can open it in Doorway, under Letters.`);
           const o = await LT.openingUris(wallet.key, addr, box);
           conv = o.conversation; uris = o.uris;
@@ -1392,7 +1393,10 @@
       if (!wallet) await loadWallet();
       const r = await letterRecords(), me = wallet.address.toLowerCase();
       const prev = store.get("doorway.letterbox2");
-      if (LT.letterboxes(r.box).has(me)) store.set("doorway.letterbox2", { addr: wallet.address, at: prev?.at ?? Date.now(), seen: true });
+      if (LT.letterboxes(r.box).has(me)) {
+        if (!prev?.seen && /Opening your letterbox/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`); }
+        store.set("doorway.letterbox2", { addr: wallet.address, at: prev?.at ?? Date.now(), seen: true });
+      }
       else if (prev?.seen) store.set("doorway.letterbox2", { ...prev, seen: false });
       await resendMissing(r).catch(() => {});
       const convs = await LT.conversations(wallet.key, r.let);

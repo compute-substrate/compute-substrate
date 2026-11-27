@@ -108,6 +108,13 @@ export function letterboxes(recs: Rec[]): Map<Hex, Letterbox> {
   return new Map([...out].map(([a, b]) => [a, { x25519: b.x25519, mlkem: b.mlkem }]));
 }
 
+// Keys with a letterbox on its way: some of its records are in blocks, not yet all
+export function letterboxesComing(recs: Rec[]): Set<Hex> {
+  const done = letterboxes(recs), out = new Set<Hex>();
+  for (const r of recs) if (r.uri.startsWith("lb2.") && !done.has(r.proposer)) out.add(r.proposer);
+  return out;
+}
+
 // A conversation between two keys: who started it, who it's with, and the secret they share
 export type Conversation = { id: string; a: Hex; b: Hex; secret: Uint8Array; height: number };
 
