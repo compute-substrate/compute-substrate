@@ -290,7 +290,7 @@
         </div>
       </details>
       <form class="go" id="publishForm">
-        <input id="publishName" placeholder="Your name" spellcheck="false" autocomplete="off" aria-label="Your .csd name">
+        <input id="publishName" placeholder="Your name" spellcheck="false" autocomplete="off" aria-label="Your name">
         <button class="primary">Point it here</button>
       </form>
       <p class="hint" id="publishStatus"></p>
@@ -314,11 +314,11 @@
       <input id="myName" placeholder="Pick a name" spellcheck="false" autocomplete="off" style="flex:1;min-width:0">
       <button class="primary" id="myNameGo">Check</button>
     </form>
-    <p class="hint" id="myNameSaid" style="margin:8px 0 0">A .csd name is yours alone: people find you and write to you there, and you can put a site on it whenever you like.</p>
+    <p class="hint" id="myNameSaid" style="margin:8px 0 0">A name is yours alone, like guestbook.csd. People find you and write to you there, and you can put a site on it whenever you like.</p>
   </div>
 
   <h2 style="margin-top:22px">Letters<span id="lettersNew" class="lpill"></span></h2>
-  <p class="lintro">Write to anyone with a .csd name. A letter is sealed on your computer and can only be opened on theirs. There's no company in the middle, so nobody else can read it, delete it or shut it down, and it's still there years from now.</p>
+  <p class="lintro">Write to anyone with a name, like guestbook.csd. A letter is sealed on your computer and can only be opened on theirs. There's no company in the middle, so nobody else can read it, delete it or shut it down, and it's still there years from now.</p>
   <div class="letters" id="letters">
     <div class="lbar">
       <div class="lseg" role="group" aria-label="Letters">
@@ -408,7 +408,7 @@
         <div>Open sites in your browser<small>Any name works as <code>name.localhost</code>, like <code>commonplace.localhost</code>. In Safari, type <code>http://</code> first: <code>http://commonplace.localhost</code></small></div>
       </div>
       <div class="row">
-        <div style="flex:1">For site makers: a packed site<small id="putStatus">A .car file of your site, handed to the doors once a .csd name points to it</small></div>
+        <div style="flex:1">For site makers: a packed site<small id="putStatus">A .car file of your site, handed to the doors once a name points to it</small></div>
         <input type="file" id="putFile" accept=".car" hidden>
         <button id="put">Choose</button>
       </div>
@@ -852,7 +852,7 @@
   $("publishForm").onsubmit = async e => {
     e.preventDefault();
     const name = $("publishName").value.trim().toLowerCase().replace(/\.csd$/, "");
-    if (!pending || !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(name)) { $("publishStatus").textContent = "That isn't a .csd name."; return; }
+    if (!pending || !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(name)) { $("publishStatus").textContent = "Names are letters, digits and dashes."; return; }
     const st = $("publishStatus"), btn = $("publishForm").querySelector("button");
     // a name Doorway's key holds: pointed right here, signed by that key
     if (wallet && pointing?.name !== name) {
@@ -1066,7 +1066,7 @@
       }
       const ok = said.filter(x => x === null).length;
       onDoors.set(cid, ok);
-      st.textContent = ok ? `On ${ok} ${ok === 1 ? "door" : "doors"}: ipfs://${cid}. It stays up as long as a .csd name points to it.`
+      st.textContent = ok ? `On ${ok} ${ok === 1 ? "door" : "doors"}: ipfs://${cid}. It stays up as long as a name points to it.`
         : `Not taken: ${said.find(Boolean) ?? "no door answered"} Its address: ipfs://${cid}`;
       renderSites();
     } catch (err) { st.textContent = String(err && err.message || err); }
@@ -1338,7 +1338,7 @@
       }
       store.set("doorway.letterbox2", { addr: wallet.address, at: Date.now(), seen: false });
       const nm = (store.get("doorway.names") ?? [])[0];
-      letterSay(`Your letterbox is opening. It's ready in a few minutes, and then anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
+      letterSay(`Your letterbox is opening. It's ready in a few minutes, and then anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a name"}.`);
       renderLetters(); setTimeout(showBalance, 3000); setTimeout(checkLetters, 180_000); setTimeout(checkLetters, 360_000);
     } catch (err) {
       const m = String(err && err.message || err);
@@ -1371,7 +1371,7 @@
     const list = lettersOf(ltab), seen = lseen();
     if (!list.length) {
       const b = store.get("doorway.letterbox2"), mine = !!b && b.addr === wallet?.address;
-      const nm = (store.get("doorway.names") ?? [])[0], at = nm ? `${esc(nm)}.csd` : "your .csd name";
+      const nm = (store.get("doorway.names") ?? [])[0], at = nm ? `${esc(nm)}.csd` : "your name";
       if (ltab === "in" && !boxOpen())
         v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Open your letterbox</b><p>Before anyone can write to you, you need a letterbox. Opening it puts up a lock that only your key opens, so people can seal letters that only you can read. You do this once.</p><button class="primary" type="button" id="lopen">Open my letterbox</button><small>Four posts' worth, once.</small></div>`;
       else if (ltab === "in" && mine && !b.seen)
@@ -1379,7 +1379,7 @@
       else if (ltab === "in")
         v.innerHTML = `<div class="lempty">${ENVELOPE}<b>No letters yet</b><p>Anyone can write to you at ${at}. When they do, it shows up here.</p></div>`;
       else
-        v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Nothing sent yet</b><p>Write to someone by their .csd name. Only they can open it.</p></div>`;
+        v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Nothing sent yet</b><p>Write to someone by their name. Only they can open it.</p></div>`;
       if ($("lopen")) $("lopen").onclick = openBox;
       return;
     }
@@ -1423,7 +1423,7 @@
       e.preventDefault();
       if (lbusy) return letterSay("Your last letter is still going out. Try again in a minute.");
       const toIn = $("lto").value.trim(), body = $("lbody").value, subject = $("lsubj").value.trim();
-      if (!toIn) return letterSay("Who is it to? Their .csd name.");
+      if (!toIn) return letterSay("Who is it to? Their name, like guestbook.csd.");
       if (!body.trim()) return letterSay("The letter is empty.");
       // while it's sending, the form shows it: the button says so, and nothing in it can change
       const busy = on => { const f = $("lform"); if (!f) return; f.classList.toggle("sending", on); $("lsend").disabled = on; $("lsend").querySelector("span").textContent = on ? "Sending…" : "Send"; $("lcancel").disabled = on; ["lto", "lsubj", "lbody"].forEach(id => $(id).readOnly = on); };
@@ -1485,7 +1485,7 @@
       const r = await letterRecords(), me = wallet.address.toLowerCase();
       const prev = store.get("doorway.letterbox2");
       if (LT.letterboxes(r.box).has(me)) {
-        if (!prev?.seen && /letterbox is opening/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`); }
+        if (!prev?.seen && /letterbox is opening/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a name"}.`); }
         store.set("doorway.letterbox2", { addr: wallet.address, at: prev?.at ?? Date.now(), seen: true });
       }
       else if (prev?.seen) store.set("doorway.letterbox2", { ...prev, seen: false });
