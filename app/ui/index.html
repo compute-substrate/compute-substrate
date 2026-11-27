@@ -163,6 +163,12 @@
   .gsay .primary { display: inline-flex; align-items: center; gap: 7px; }
   .gsay svg, .gchat .lback svg { width: 15px; height: 15px; flex: none; }
   .gchat .lback svg { width: 18px; height: 18px; }
+  .gacts { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .gcont { margin: 0; padding: 8px 16px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); }
+  .gpick { padding: 10px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+  .gpick p, .gwarn { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
+  .gwarn { padding: 10px 0 0; }
+  .gpick label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
   .gnote { padding: 0 16px 12px; color: var(--muted); font-size: 12px; display: flex; gap: 7px; align-items: center; }
   .gnote svg { width: 13px; height: 13px; color: var(--accent); }
   .namecard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 16px 18px; margin-top: 26px; display: flex; flex-direction: column; gap: 6px; }
@@ -1447,11 +1453,16 @@
   // conversation (resolver/src/letters.ts). What's kept here: each group's title and members (read
   // from the records again on every check), and a group started here until its invitations land.
   const groupsHere = () => store.get("doorway.groups") ?? [];
+  // groups left: hidden here, and nothing more from them counted as new (the member list still
+  // says they were in it, because they were)
+  const groupsLeft = () => new Set(store.get("doorway.groupsLeft") ?? []);
+  let showLeft = false;
   const groupMsgs = id => { const me = wallet?.address.toLowerCase(); return [...held().values()].filter(l => l.group === id).sort((a, b) => (a.at ?? 0) - (b.at ?? 0)); };
-  const groupNew = () => { const me = wallet?.address.toLowerCase(); return [...held().values()].filter(l => l.group && l.from !== me && !lseen().has(l.id)); };
+  const groupNew = () => { const me = wallet?.address.toLowerCase(), left = groupsLeft(); return [...held().values()].filter(l => l.group && !left.has(l.group) && l.from !== me && !lseen().has(l.id)); };
   const groupAv = g => `<span class="gav" style="background:${tint(g.id)}">${esc((g.title || "?")[0].toUpperCase())}</span>`;
   const membersSaid = g => { const me = wallet?.address.toLowerCase(); return ["You", ...g.members.filter(m => m !== me).map(m => whoIs(m))].join(", "); };
-  const asGroup = g => ({ id: g.id, a: g.by, b: g.by, secret: Uint8Array.from(g.secret), height: 0, group: { title: g.title, members: g.members, by: g.by } });
+  const asGroup = g => ({ id: g.id, a: g.by, b: g.by, secret: Uint8Array.from(g.secret), height: 0, group: { title: g.title, members: g.members, by: g.by, ...(g.prev ? { prev: g.prev } : {}) } });
+  const groupRow = (g, c) => ({ id: g.id, title: g.group.title, members: g.group.members, by: g.group.by, secret: [...g.secret], ...(g.group.prev ? { prev: g.group.prev } : {}), ...c });
 
   function renderGroups(v) {
     const me = wallet?.address.toLowerCase();
@@ -1459,13 +1470,27 @@
       const g = groupsHere().find(x => x.id === lview.slice(2));
       if (!g) { lview = null; return renderGroups(v); }
       const msgs = groupMsgs(g.id);
+      const left = groupsLeft().has(g.id), starter = g.by === me;
+      const before = g.prev && groupsHere().find(x => x.id === g.prev), after = groupsHere().find(x => x.prev === g.id);
       v.innerHTML = `<div class="gchat">
         <div class="head"><button class="lback" type="button" id="lback" aria-label="Back">${BACK}</button>${groupAv(g)}<div class="who"><b>${esc(g.title || "A group")}</b><small>${esc(membersSaid(g))}</small></div></div>
+        <div class="gacts">${starter && !g.pending ? `<button type="button" class="add" id="gadd">Add people</button><button type="button" class="add" id="gwithout">Continue without someone</button>` : ""}<button type="button" class="add" id="gleave">${left ? "Show it again" : "Leave"}</button></div>
+        ${before || g.prev ? `<p class="gcont">Continues from ${before ? `<button type="button" class="add" data-gopen="${esc(before.id)}">${esc(before.title || "an earlier group")}</button>` : "an earlier group"}.</p>` : ""}
+        ${after ? `<p class="gcont">This group carries on in <button type="button" class="add" data-gopen="${esc(after.id)}">${esc(after.title || "a new group")}</button>.</p>` : ""}
         <div class="gmsgs" id="gmsgs">${msgs.length ? msgs.map(l => `<div class="gmsg${l.from === me ? " me" : ""}">${l.from === me ? "" : avatar(l.from)}<div class="bub">${l.from === me ? "" : `<small>${whoHtml(l.from)}</small>`}<div>${esc(l.body)}</div>${l.pending ? `<span class="going">Sending</span>` : ""}</div></div>`).join("")
           : `<div class="lempty" style="padding:24px"><p>Nothing said yet. ${g.pending ? "The invitations are on their way: everyone can read along in a minute or two." : "Say hello."}</p></div>`}</div>
         <form class="gsay" id="gsay"><textarea id="gtext" placeholder="Write to the group…" rows="1"></textarea><button class="primary" id="gsend">${SEND}<span>Send</span></button></form>
         <div class="gnote">${LOCK}<span>Only the ${g.members.length} people in this group can read it.</span></div></div>`;
       $("lback").onclick = () => { lview = null; renderLetters(); };
+      v.querySelectorAll("[data-gopen]").forEach(b => b.onclick = () => { lview = "g:" + b.dataset.gopen; renderLetters(); });
+      if ($("gadd")) $("gadd").onclick = () => openGroupForm({ mode: "add", g });
+      if ($("gwithout")) $("gwithout").onclick = () => openGroupForm({ mode: "without", g });
+      $("gleave").onclick = () => {
+        const l = groupsLeft();
+        if (left) { l.delete(g.id); letterSay(""); }
+        else { l.add(g.id); lview = null; letterSay(`You've left ${g.title || "the group"}. It's hidden here; you're still listed as having been in it.`); }
+        store.set("doorway.groupsLeft", [...l]); renderLetters();
+      };
       const box = $("gmsgs"); box.scrollTop = box.scrollHeight;
       const unseen = msgs.filter(l => !lseen().has(l.id)).map(l => l.id);
       if (unseen.length) store.set("doorway.lettersSeen", [...lseen(), ...unseen]);
@@ -1474,7 +1499,8 @@
       return;
     }
     if (lview === "gnew") return;
-    const gs = groupsHere().slice().sort((a, b) => ((groupMsgs(b.id).at(-1)?.at ?? b.at ?? 0) - (groupMsgs(a.id).at(-1)?.at ?? a.at ?? 0)));
+    const leftSet = groupsLeft();
+    const gs = groupsHere().filter(g => showLeft ? leftSet.has(g.id) : !leftSet.has(g.id)).sort((a, b) => ((groupMsgs(b.id).at(-1)?.at ?? b.at ?? 0) - (groupMsgs(a.id).at(-1)?.at ?? a.at ?? 0)));
     const start = `<div class="gstart"><span>Private conversations for a few people. Only those in a group can read it.</span><button class="primary" type="button" id="gnew">Start a group</button></div>`;
     if (!gs.length) {
       v.innerHTML = start + `<div class="lempty">${ENVELOPE}<b>No groups yet</b><p>Start one with a few people by their names: a family, friends, a team. Everyone in it reads everything said, and nobody else can.</p></div>`;
@@ -1485,79 +1511,106 @@
         <span class="line">${last ? `<b>${last.from === me ? "You" : esc(whoIs(last.from))}:</b>  ${esc(last.body.slice(0, 140))}` : esc(membersSaid(g))}</span></span></button>`; }).join("");
       v.querySelectorAll("[data-g]").forEach(b => b.onclick = () => { lview = "g:" + b.dataset.g; renderLetters(); });
     }
-    $("gnew").onclick = openGroupForm;
+    if (leftSet.size) {
+      v.insertAdjacentHTML("beforeend", `<div class="gstart" style="border-bottom:0;border-top:1px solid var(--line)"><span></span><button type="button" class="add" id="gshowleft">${showLeft ? "Back to your groups" : `Groups you've left (${leftSet.size})`}</button></div>`);
+      $("gshowleft").onclick = () => { showLeft = !showLeft; renderLetters(); };
+    }
+    $("gnew").onclick = () => openGroupForm({ mode: "new" });
   }
 
-  function openGroupForm() {
+  // starting a group, adding people to one (its starter), or carrying it on without someone (a new
+  // group, saying which it continues: nobody is ever taken out of one)
+  function openGroupForm({ mode, g }) {
     lview = "gnew";
+    const me = wallet.address.toLowerCase();
     const v = $("letterView");
+    const others = g ? g.members.filter(m => m !== me) : [];
+    const head = mode === "add" ? `Add people to ${esc(g.title || "the group")}` : mode === "without" ? `Continue ${esc(g.title || "the group")} without someone` : "New group";
     v.innerHTML = `<form class="lc" id="gform">
-      <div class="head"><b>New group</b><button class="lback" type="button" id="gcancel" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
-      <div class="lf"><label for="gtitle">Name</label><input id="gtitle" placeholder="What to call it, like Sunday club" autocomplete="off" maxlength="60"></div>
-      <div class="lf"><label for="gwho">With</label><input id="gwho" placeholder="Their names, like guestbook, letterman" spellcheck="false" autocomplete="off"></div>
-      <div class="lfoot"><span class="lseal">${LOCK}<span>Up to ${LT.GROUP_MAX - 1} people. Each needs an open letterbox.</span></span><span class="lcost" id="gcost"></span><button class="primary" id="ggo"><span>Check</span></button></div>
+      <div class="head"><b>${head}</b><button class="lback" type="button" id="gcancel" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      ${mode === "add" ? "" : `<div class="lf"><label for="gtitle">Name</label><input id="gtitle" placeholder="What to call it, like Sunday club" autocomplete="off" maxlength="60" value="${esc(g?.title ?? "")}"></div>`}
+      ${mode === "without" ? `<div class="gpick"><p>Who carries on? Untick anyone the new group goes on without. The group so far stays as it is, for everyone who was in it.</p>${others.map(m => `<label><input type="checkbox" data-keep="${esc(m)}" checked> ${whoHtml(m)}</label>`).join("")}</div>`
+        : `<div class="lf"><label for="gwho">${mode === "add" ? "Add" : "With"}</label><input id="gwho" placeholder="Their names, like guestbook, letterman" spellcheck="false" autocomplete="off"></div>`}
+      ${mode === "add" ? `<p class="gwarn">They'll be able to read everything said in this group so far.</p>` : ""}
+      <div class="lfoot"><span class="lseal">${LOCK}<span>Up to ${LT.GROUP_MAX} people in a group. Each needs an open letterbox.</span></span><span class="lcost" id="gcost"></span><button class="primary" id="ggo"><span>Check</span></button></div>
     </form>`;
-    $("gtitle").focus();
+    ($("gtitle") ?? $("gwho"))?.focus();
     let ready = null; // the group and its records, once checked
     const reset = () => { ready = null; $("ggo").querySelector("span").textContent = "Check"; $("gcost").textContent = ""; };
-    ["gtitle", "gwho"].forEach(id => $(id).addEventListener("input", reset));
-    $("gcancel").onclick = () => { lview = null; letterSay(""); renderLetters(); };
+    v.querySelectorAll("input").forEach(i => i.addEventListener("input", reset));
+    $("gcancel").onclick = () => { lview = g ? "g:" + g.id : null; letterSay(""); renderLetters(); };
     $("gform").onsubmit = async e => {
       e.preventDefault();
       if (lbusy) return letterSay("Something is still going out. Try again in a minute.");
-      const busy = on => { $("ggo").disabled = on; $("gcancel").disabled = on; ["gtitle", "gwho"].forEach(id => $(id).readOnly = on); };
+      const busy = on => { $("ggo").disabled = on; $("gcancel").disabled = on; v.querySelectorAll("input").forEach(i => i.disabled = on); };
       lbusy = true; busy(true);
       try {
         if (!wallet) await loadWallet();
-        const me = wallet.address.toLowerCase();
         if (!ready) {
-          const title = $("gtitle").value.trim(), names = [...new Set($("gwho").value.split(/[\s,]+/).map(x => x.trim().toLowerCase().replace(/\.csd$/, "")).filter(Boolean))];
+          const title = mode === "add" ? g.title : $("gtitle").value.trim();
           if (!title) throw new Error("Give the group a name.");
-          if (!names.length) throw new Error("Who's in it? Their names, like guestbook.");
-          if (names.length > LT.GROUP_MAX - 1) throw new Error(`A group holds up to ${LT.GROUP_MAX} people, you included.`);
-          letterSay("Looking them up…");
+          // who: looked up by name (or kept from the group)
           const people = [];
-          for (const n of names) {
-            if (/^0x[0-9a-f]{40}$/.test(n)) { people.push({ addr: n, name: null }); continue; }
-            const o = await CsdResolver.lookup(n, { doors: await doorList() });
-            if (!o.owner) throw new Error(o.why ?? `Nobody holds ${n}.`);
-            people.push({ addr: String(o.owner).toLowerCase(), name: o.name });
+          if (mode === "without") {
+            for (const i of v.querySelectorAll("[data-keep]")) if (i.checked) people.push({ addr: i.dataset.keep, name: null });
+            if (people.length === others.length) throw new Error("Untick who the new group goes on without.");
+            if (!people.length) throw new Error("A group needs someone besides you.");
+          } else {
+            const names = [...new Set($("gwho").value.split(/[\s,]+/).map(x => x.trim().toLowerCase().replace(/\.csd$/, "")).filter(Boolean))];
+            if (!names.length) throw new Error("Who? Their names, like guestbook.");
+            letterSay("Looking them up…");
+            for (const n of names) {
+              if (/^0x[0-9a-f]{40}$/.test(n)) { people.push({ addr: n, name: null }); continue; }
+              const o = await CsdResolver.lookup(n, { doors: await doorList() });
+              if (!o.owner) throw new Error(o.why ?? `Nobody holds ${n}.`);
+              people.push({ addr: String(o.owner).toLowerCase(), name: o.name });
+            }
+            if (people.some(p => p.addr === me)) throw new Error("You're in it already: leave yourself out.");
+            if (mode === "add" && people.every(p => others.includes(p.addr))) throw new Error("They're in the group already.");
           }
-          if (people.some(p => p.addr === me)) throw new Error("You're in it already: leave yourself out.");
+          const members = mode === "add" ? [...new Set([...others, ...people.map(p => p.addr)])] : people.map(p => p.addr);
+          if (members.length + 1 > LT.GROUP_MAX) throw new Error(`A group holds up to ${LT.GROUP_MAX} people, you included.`);
+          const conv = mode === "add" ? { ...asGroup(g), group: { ...asGroup(g).group, members: [me, ...members] } } : LT.newGroup(wallet.key, title, members, mode === "without" ? g.id : undefined);
+          // an invitation to everyone in it (when adding, the others get the longer list too, or
+          // they wouldn't count the newcomers' messages)
           const r = await letterRecords();
           const convs = await LT.conversations(wallet.key, r.let);
-          const g = LT.newGroup(wallet.key, title, people.map(p => p.addr));
           const mine = (store.get("doorway.names") ?? [])[0];
           const uris = [];
-          for (const p of people) {
-            let pair = convs.filter(c => c.a === p.addr || c.b === p.addr).sort((x, y) => x.height - y.height)[0];
+          for (const addr of members) {
+            let pair = convs.filter(c => c.a === addr || c.b === addr).sort((x, y) => x.height - y.height)[0];
             if (!pair) {
-              const box = LT.letterboxes(r.box).get(p.addr);
-              if (!box) throw new Error(`${p.name ?? "One of them"} can't get letters yet: they need to open their letterbox first, in Doorway under Letters.`);
-              const o = await LT.openingUris(wallet.key, p.addr, box);
+              const box = LT.letterboxes(r.box).get(addr);
+              const who = people.find(p => p.addr === addr)?.name ?? whoIs(addr);
+              if (!box) throw new Error(`${who} can't get letters yet: they need to open their letterbox first, in Doorway under Letters.`);
+              const o = await LT.openingUris(wallet.key, addr, box);
               pair = o.conversation; uris.push(...o.uris);
             }
-            uris.push(...await LT.inviteUris(pair, g, mine));
+            uris.push(...await LT.inviteUris(pair, conv, mine));
           }
-          ready = { g, uris, people, r };
+          ready = { conv, uris, people, r };
           letterSay("");
           $("gcost").textContent = `${uris.length === 1 ? "1 post" : `${uris.length} posts`}' worth`;
-          $("gcost").title = "An invitation for each of them, and four more, once, for anyone you haven't written to before.";
-          $("ggo").querySelector("span").textContent = "Start the group";
+          $("gcost").title = "An invitation for each person in it, and four more, once, for anyone you haven't written to before.";
+          $("ggo").querySelector("span").textContent = mode === "add" ? "Add them" : mode === "without" ? "Carry on without them" : "Start the group";
         } else {
-          const { g, uris, people, r } = ready;
+          const { conv, uris, people, r } = ready;
           for (const p of people) if (p.name) store.set("doorway.contacts", { ...contacts(), [p.addr]: p.name });
           letterSay("Sending the invitations…");
-          const keep = () => store.set("doorway.groups", [...groupsHere().filter(x => x.id !== g.id), { id: g.id, title: g.group.title, members: g.group.members, by: g.group.by, secret: [...g.secret], at: Date.now(), pending: true }]);
+          const keep = () => store.set("doorway.groups", [...groupsHere().filter(x => x.id !== conv.id), groupRow(conv, { at: Date.now(), pending: mode !== "add" })]);
           let shown = false;
-          const show = () => { if (shown) return; shown = true; keep(); lview = "g:" + g.id; letterSay("Started. Everyone in it can read along in a minute or two."); renderLetters(); setTimeout(showBalance, 3000); setTimeout(checkLetters, 150_000); };
+          const show = () => {
+            if (shown) return; shown = true; keep(); lview = "g:" + conv.id;
+            letterSay(mode === "add" ? "Added. They can read along in a minute or two." : mode === "without" ? "The group carries on here. The earlier one stays as it was." : "Started. Everyone in it can read along in a minute or two.");
+            renderLetters(); setTimeout(showBalance, 3000); setTimeout(checkLetters, 150_000);
+          };
           try { await writeRecords(r.node, r.tip, LT.LETTERS, uris, show); }
           catch (err) { if (!shown) throw err; console.warn("groups:", err); }
           show();
         }
       } catch (err) {
         const m = String(err && err.message || err);
-        if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "There isn't enough left to start it."); else letterSay(m);
+        if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "There isn't enough left for that."); else letterSay(m);
       }
       lbusy = false; if ($("gform")) busy(false);
     };
@@ -1754,7 +1807,7 @@
       const found = await LT.groups(convs, r.let);
       const here = groupsHere();
       store.set("doorway.groups", [
-        ...found.map(g => ({ id: g.id, title: g.group.title, members: g.group.members, by: g.group.by, secret: [...g.secret], at: here.find(x => x.id === g.id)?.at ?? Date.now() })),
+        ...found.map(g => groupRow(g, { at: here.find(x => x.id === g.id)?.at ?? Date.now() })),
         ...here.filter(x => x.pending && !found.some(g => g.id === x.id) && Date.now() - x.at < 7 * DAY),
       ]);
       const got = [...await LT.letters(convs, r.let), ...await LT.letters(groupsHere().map(asGroup), r.let)];

@@ -122,7 +122,7 @@ export function letterboxesComing(recs: Rec[]): Set<Hex> {
 }
 
 // A conversation between two keys: who started it, who it's with, and the secret they share
-export type Conversation = { id: string; a: Hex; b: Hex; secret: Uint8Array; height: number; group?: { title: string; members: Hex[]; by: Hex } };
+export type Conversation = { id: string; a: Hex; b: Hex; secret: Uint8Array; height: number; group?: { title: string; members: Hex[]; by: Hex; prev?: string } };
 
 const secretOf = (xs: Uint8Array, ks: Uint8Array, group: string, a: Hex, b: Hex) =>
   hkdf(sha256, concat(xs, ks), utf8(group), info(`conversation ${low(a)} ${low(b)}`), 32);
@@ -251,18 +251,20 @@ async function notes(convs: Conversation[], recs: Rec[]): Promise<(Letter & { in
 export const GROUP_MAX = 12;
 const GROUP_ID = /^[A-Za-z0-9_-]{11}$/;
 
-// A new group: its id and secret (members are given them by invitations)
-export function newGroup(key: Hex, title: string, members: Hex[]): Conversation {
+// A new group: its id and secret (members are given them by invitations). `prev`: the group this
+// one continues from, when it carries on without someone (nobody is ever taken out of a group: what
+// they read, they read; a group carries on as a new one instead)
+export function newGroup(key: Hex, title: string, members: Hex[], prev?: string): Conversation {
   const me = low(keyFromPrivate(hexToBytes(key)).addr20);
   const all = [...new Set([me, ...members.map(low)])];
   if (all.length < 2) throw new Error("A group needs someone besides you.");
   if (all.length > GROUP_MAX) throw new Error(`A group holds up to ${GROUP_MAX} people.`);
-  return { id: b64u(rand(8)), a: me, b: me, secret: rand(32), height: 0, group: { title: title.replace(/[\u0000-\u001f|]/g, " ").trim().slice(0, 60), members: all, by: me } };
+  return { id: b64u(rand(8)), a: me, b: me, secret: rand(32), height: 0, group: { title: title.replace(/[\u0000-\u001f|]/g, " ").trim().slice(0, 60), members: all, by: me, ...(prev && GROUP_ID.test(prev) ? { prev } : {}) } };
 }
 
 // The invitation to `g`, as a note in a two-person conversation with one of its members
 export const inviteUris = (pair: Conversation, g: Conversation, name?: string) =>
-  noteUris(pair, { subject: "", body: `G1|${g.id}|${b64u(g.secret)}|${g.group!.title}|${g.group!.members.join(",")}`, name, invite: true });
+  noteUris(pair, { subject: "", body: `G1|${g.id}|${b64u(g.secret)}|${g.group!.title}|${g.group!.members.join(",")}${g.group!.prev ? `|${g.group!.prev}` : ""}`, name, invite: true });
 
 // The groups this key is in, from the invitations in its two-person conversations. A group is its
 // starter's: members are the union of the lists in invitations its starter wrote, and an invitation
@@ -271,14 +273,14 @@ export async function groups(pairs: Conversation[], recs: Rec[]): Promise<Conver
   const found = new Map<string, Conversation>();
   const all = (await notes(pairs, recs)).filter(l => l.invite).sort((a, b) => a.height - b.height);
   for (const l of all) {
-    const m = /^G1\|([A-Za-z0-9_-]{11})\|([A-Za-z0-9_-]{43})\|([^|]*)\|((?:0x[0-9a-f]{40},?)+)$/.exec(l.body);
+    const m = /^G1\|([A-Za-z0-9_-]{11})\|([A-Za-z0-9_-]{43})\|([^|]*)\|((?:0x[0-9a-f]{40},?)+)(?:\|([A-Za-z0-9_-]{11}))?$/.exec(l.body);
     if (!m || !GROUP_ID.test(m[1])) continue;
     let secret: Uint8Array; try { secret = unb64u(m[2]); } catch { continue; }
     if (secret.length !== 32) continue;
     const members = m[4].split(",").filter(Boolean).map(low);
     if (!members.includes(l.from)) continue;
     const had = found.get(m[1]);
-    if (!had) { found.set(m[1], { id: m[1], a: l.from, b: l.from, secret, height: l.height, group: { title: m[3], members: members.slice(0, GROUP_MAX), by: l.from } }); continue; }
+    if (!had) { found.set(m[1], { id: m[1], a: l.from, b: l.from, secret, height: l.height, group: { title: m[3], members: members.slice(0, GROUP_MAX), by: l.from, ...(m[5] ? { prev: m[5] } : {}) } }); continue; }
     if (had.group!.by !== l.from || !eq(had.secret, secret)) continue;
     had.group!.members = [...new Set([...had.group!.members, ...members])].slice(0, GROUP_MAX);
     if (m[3]) had.group!.title = m[3];

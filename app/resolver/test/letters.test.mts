@@ -106,6 +106,16 @@ ok(L.costOf(4) === 1 && L.costOf(1) === 0.25, "a record costs a post (0.25)");
   const fake = L.newGroup(bob, "Mine now", [addr(alice), eve]);
   const takeover = recs(bob, await L.inviteUris(pairsBE[0], { ...fake, id: g.id, secret: g.secret }));
   const [gA2] = await L.groups(pairsA, [...inv, ...takeover]);
+  // adding someone: the starter's new invitations (to everyone) carry the longer list
+  const dave = newKey();
+  const added = { ...g, group: { ...g.group!, members: [...g.group!.members, addr(dave)] } };
+  const more = recs(alice, [...await L.inviteUris(toBob, added), ...await L.inviteUris(toCarol, added)]);
+  const [gB3] = await L.groups(pairsB, [...inv, ...more]);
+  ok(gB3.group!.members.includes(addr(dave)) && gB3.group!.members.length === 4, "the starter adds someone: members learn of them from the new invitation");
+  // carrying on without someone: a new group, saying which one it continues
+  const next = L.newGroup(alice, "Sunday club", [addr(bob)], g.id);
+  const [gB4] = (await L.groups(pairsB, recs(alice, await L.inviteUris(toBob, next)))).filter(x => x.id === next.id);
+  ok(gB4?.group!.prev === g.id && !gB4.group!.members.includes(addr(carol)), "a group carries on without someone as a new group that says where it came from");
   ok(gA2.group!.by === addr(alice) && !gA2.group!.members.includes(eve) && gA2.group!.title !== "Mine now", "a member can't add people or rename the group: only its starter's invitations count");
 }
 
