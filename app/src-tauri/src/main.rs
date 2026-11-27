@@ -1223,6 +1223,8 @@ struct KeptSite {
     // whether its files are unpacked here (a site published here before Doorway kept them has
     // only its .car)
     files: bool,
+    // when this computer got it (its .car's time), in seconds: which of several versions is newest
+    at: u64,
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -1366,6 +1368,8 @@ fn kept_sites(app: tauri::AppHandle, sites: tauri::State<'_, Sites>) -> Vec<Kept
             helping: help.get(&cid).copied().unwrap_or(is_carried),
             carried: is_carried,
             files,
+            at: car_file(&app, &cid).and_then(|f| f.metadata().ok()).and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0),
             cid,
         }
     }).collect()

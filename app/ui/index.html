@@ -799,6 +799,19 @@
     const pagesHere = new Set((store.get("doorway.keptPages") ?? []).map(k => k.cid));
     const everything = list;
     list = list.filter(x => !pagesHere.has(x.cid) || x.names.length);
+    // versions of one site (the same title and the same icon): only the one a name points to, or else
+    // the newest here, is shown; the others still go to the doors if they're hearted
+    const family = x => x.icon && x.title ? `${x.title}\n${x.icon}` : null;
+    const fams = new Map();
+    for (const x of list) { const f = family(x); if (f) fams.set(f, [...(fams.get(f) ?? []), x]); }
+    const hide = new Set();
+    for (const g of fams.values()) {
+      if (g.length < 2) continue;
+      const named = g.filter(x => x.names.length || x.carried);
+      const keep = named.length ? named : [g.reduce((a, b) => (b.at ?? 0) > (a.at ?? 0) ? b : a)];
+      for (const x of g) if (!keep.includes(x)) hide.add(x.cid);
+    }
+    list = list.filter(x => !hide.has(x.cid));
     list.sort((a, b) => (b.carried - a.carried) || (a.title ?? a.names[0] ?? "").localeCompare(b.title ?? b.names[0] ?? ""));
     $("sites").innerHTML = list.map((x, i) => {
       const title = x.title || (x.carried ? "Commonplace" : x.names[0] ? x.names[0][0].toUpperCase() + x.names[0].slice(1) : "Your site");
