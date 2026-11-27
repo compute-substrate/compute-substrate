@@ -314,11 +314,11 @@
       <input id="myName" placeholder="Pick a name" spellcheck="false" autocomplete="off" style="flex:1;min-width:0">
       <button class="primary" id="myNameGo">Check</button>
     </form>
-    <p class="hint" id="myNameSaid" style="margin:8px 0 0">A name is yours alone, like guestbook.csd. People find you and write to you there, and you can put a site on it whenever you like.</p>
+    <p class="hint" id="myNameSaid" style="margin:8px 0 0">A name is yours alone, like guestbook. People find you and write to you there, and you can put a site on it whenever you like.</p>
   </div>
 
   <h2 style="margin-top:22px">Letters<span id="lettersNew" class="lpill"></span></h2>
-  <p class="lintro">Write to anyone with a name, like guestbook.csd. A letter is sealed on your computer and can only be opened on theirs. There's no company in the middle, so nobody else can read it, delete it or shut it down, and it's still there years from now.</p>
+  <p class="lintro">Write to anyone with a name, like guestbook. A letter is sealed on your computer and can only be opened on theirs. There's no company in the middle, so nobody else can read it, delete it or shut it down, and it's still there years from now.</p>
   <div class="letters" id="letters">
     <div class="lbar">
       <div class="lseg" role="group" aria-label="Letters">
@@ -1401,7 +1401,7 @@
     const toSaid = to ? (contacts()[to.toLowerCase()] ? contacts()[to.toLowerCase()] + ".csd" : to) : "";
     v.innerHTML = `<form class="lc" id="lform">
       <div class="head"><b>${re ? "Reply" : "New letter"}</b><button class="lback" type="button" id="lcancel" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
-      <div class="lf"><label for="lto">To</label><input id="lto" placeholder="their name, like guestbook.csd" spellcheck="false" autocomplete="off" value="${esc(toSaid)}"></div>
+      <div class="lf"><label for="lto">To</label><input id="lto" placeholder="their name, like guestbook" spellcheck="false" autocomplete="off" value="${esc(toSaid)}"></div>
       <div class="lf"><label for="lsubj">Subject</label><input id="lsubj" autocomplete="off" value="${esc(subject)}"></div>
       <div class="lpaper"><textarea id="lbody" placeholder="Dear…"></textarea></div>
       <div class="lfoot"><span class="lseal">${LOCK}<span>Sealed on this computer. Only they can open it.</span></span><span class="lcost" id="lcost"></span><button class="primary" id="lsend">${SEND}<span>Send</span></button></div>
@@ -1423,7 +1423,7 @@
       e.preventDefault();
       if (lbusy) return letterSay("Your last letter is still going out. Try again in a minute.");
       const toIn = $("lto").value.trim(), body = $("lbody").value, subject = $("lsubj").value.trim();
-      if (!toIn) return letterSay("Who is it to? Their name, like guestbook.csd.");
+      if (!toIn) return letterSay("Who is it to? Their name, like guestbook.");
       if (!body.trim()) return letterSay("The letter is empty.");
       // while it's sending, the form shows it: the button says so, and nothing in it can change
       const busy = on => { const f = $("lform"); if (!f) return; f.classList.toggle("sending", on); $("lsend").disabled = on; $("lsend").querySelector("span").textContent = on ? "Sending…" : "Send"; $("lcancel").disabled = on; ["lto", "lsubj", "lbody"].forEach(id => $(id).readOnly = on); };
