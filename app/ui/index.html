@@ -1190,6 +1190,7 @@
   // The records are public and read from the network; the letters are opened only here, and kept
   // here once opened.
   const LT = CsdResolver.letters;
+  if (store.get("doorway.letterbox") !== undefined && store.get("doorway.letterbox") !== null) { store.set("doorway.letterbox", null); store.set("doorway.letters", null); }
   let ltab = "in", lview = null, lbusy = false;
   const held = () => new Map(Object.entries(store.get("doorway.letters") ?? {}));
   const lseen = () => new Set(store.get("doorway.lettersSeen") ?? []);
@@ -1208,7 +1209,10 @@
     const me = wallet.address.toLowerCase();
     return [...held().values()].filter(l => tab === "in" ? l.from !== me : l.from === me).sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   }
-  const boxOpen = () => store.get("doorway.letterbox") === wallet?.address;
+  // whether this key's letterbox is open: seen in the records, or sent from here in the last half
+  // hour and not in a block yet. (Its own key: the first test build kept a flag of the same name for
+  // a letterbox in an older format, which made a letterbox look open that the network didn't have.)
+  const boxOpen = () => { const b = store.get("doorway.letterbox2"); return !!b && b.addr === wallet?.address && (b.seen || Date.now() - b.at < 30 * 60_000); };
 
   // the letters' records, read from the network and kept here (they're public), each time from
   // where the last read left off (and the last few blocks again, in case they changed)
@@ -1270,7 +1274,7 @@
         letterSay("Opening your letterbox…");
         await writeRecords(r.node, r.tip, LT.LETTERBOX, LT.letterboxUris(LT.letterKeys(wallet.key)));
       }
-      store.set("doorway.letterbox", wallet.address);
+      store.set("doorway.letterbox2", { addr: wallet.address, at: Date.now(), seen: false });
       const nm = (store.get("doorway.names") ?? [])[0];
       letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
       renderLetters(); setTimeout(showBalance, 3000);
@@ -1387,7 +1391,9 @@
     try {
       if (!wallet) await loadWallet();
       const r = await letterRecords(), me = wallet.address.toLowerCase();
-      if (LT.letterboxes(r.box).has(me)) store.set("doorway.letterbox", wallet.address);
+      const prev = store.get("doorway.letterbox2");
+      if (LT.letterboxes(r.box).has(me)) store.set("doorway.letterbox2", { addr: wallet.address, at: prev?.at ?? Date.now(), seen: true });
+      else if (prev?.seen) store.set("doorway.letterbox2", { ...prev, seen: false });
       await resendMissing(r).catch(() => {});
       const convs = await LT.conversations(wallet.key, r.let);
       keepLetters(await LT.letters(convs, r.let));
