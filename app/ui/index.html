@@ -139,6 +139,9 @@
   .lempty .going { color: var(--busy); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
   .lempty .going::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
   #letterStatus:empty { display: none; }
+  .noname { font-style: italic; font-weight: 450; color: var(--muted); }
+  .noname::after { content: "no name"; font-style: normal; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; margin-left: 7px; vertical-align: 1px; }
+  .lrow.new .who .noname { font-weight: 650; }
   .lwrite { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
   .lwrite input, .lwrite textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; -webkit-user-select: text; user-select: text; }
   .lwrite textarea { min-height: 180px; resize: vertical; line-height: 1.6; }
@@ -1253,13 +1256,17 @@
   // who someone is: the name you wrote to them by, else the made-up name every address has
   const contacts = () => store.get("doorway.contacts") ?? {};
   const whoIs = addr => contacts()[String(addr).toLowerCase()] ? contacts()[String(addr).toLowerCase()]  : CsdResolver.friendlyName(addr);
+  // someone's name as shown: a name that's theirs (checked on the network) plainly, else the made-up
+  // words every key has, set apart so they're never taken for a name
+  const named = addr => !!contacts()[String(addr).toLowerCase()];
+  const whoHtml = addr => named(addr) ? esc(whoIs(addr)) : `<span class="noname" title="No name yet. Doorway calls them this so you can tell people apart.">${esc(whoIs(addr))}</span>`;
   const whenSaid = t => { const d = new Date(t); const days = (Date.now() - d) / DAY; return days < 1 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], days < 300 ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" }); };
   const LOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
   const BACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
   const REPLY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v6"/></svg>';
   const SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg>';
   const ENVELOPE = '<svg class="art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="16" width="48" height="34" rx="5" fill="var(--accent-soft)"/><path d="M9 19l23 17 23-17"/><circle cx="48" cy="44" r="8" fill="var(--card)"/><rect x="44.5" y="43" width="7" height="5.5" rx="1" stroke-width="1.6"/><path d="M46 43v-1.6a2 2 0 0 1 4 0V43" stroke-width="1.6"/></svg>';
-  const avatar = addr => { const w = whoIs(addr); return `<span class="lav" style="background:${tint(String(addr))}">${esc(w.slice(0, 1).toUpperCase())}</span>`; };
+  const avatar = addr => { const w = whoIs(addr); return named(addr) ? `<span class="lav" style="background:${tint(String(addr))}">${esc(w.slice(0, 1).toUpperCase())}</span>` : `<span class="lav" style="background:var(--line);color:var(--muted)">?</span>`; };
   const letterSay = (t, html) => { if (html) $("letterStatus").innerHTML = t; else $("letterStatus").textContent = t; };
   function keepLetters(list) {
     const m = Object.fromEntries(held());
@@ -1360,7 +1367,7 @@
       const answers = l.re && [...held().values()].find(x => x.conversation === l.conversation && LT.shortId(x) === l.re);
       v.innerHTML = `<div class="lread">
         <div class="head"><button class="lback" type="button" id="lback" aria-label="Back">${BACK}</button>${avatar(other)}
-          <div class="who"><b>${mineSent ? "To " : ""}${esc(whoIs(other))}</b><small>${esc(new Date(l.at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }))}</small></div></div>
+          <div class="who"><b>${mineSent ? "To " : ""}${whoHtml(other)}</b><small>${esc(new Date(l.at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }))}</small></div></div>
         <article class="lpaper"><h3>${esc(l.subject || "(no subject)")}</h3>${answers ? `<p class="re">In reply to “${esc(answers.subject || "(no subject)")}”</p>` : ""}<div class="text">${esc(l.body)}</div></article>
         <div class="lfoot"><span class="lseal">${LOCK}${l.pending ? `On its way. ${esc(whoIs(other))} will have it in a minute or two.` : `Only you and ${esc(whoIs(other))} can read this.`}</span>${mineSent ? "" : `<button class="primary" type="button" id="lreply">${REPLY}Reply</button>`}</div></div>`;
       $("lback").onclick = () => { lview = null; renderLetters(); };
@@ -1386,7 +1393,7 @@
     v.innerHTML = list.map(l => {
       const other = ltab === "in" ? l.from : l.to, isNew = ltab === "in" && !seen.has(l.id);
       return `<button class="lrow${isNew ? " new" : ""}" type="button" data-l="${esc(l.id)}">${avatar(other)}
-        <span class="mid"><span class="ltop"><span class="who">${esc(whoIs(other))}</span>${l.pending ? `<span class="when going">Sending</span>` : `<span class="when">${esc(whenSaid(l.at))}</span>`}</span>
+        <span class="mid"><span class="ltop"><span class="who">${whoHtml(other)}</span>${l.pending ? `<span class="when going">Sending</span>` : `<span class="when">${esc(whenSaid(l.at))}</span>`}</span>
         <span class="line"><b>${esc(l.subject || "(no subject)")}</b>  ${esc(l.body.slice(0, 160))}</span></span></button>`;
     }).join("");
     v.querySelectorAll("[data-l]").forEach(b => b.onclick = () => { lview = b.dataset.l; renderLetters(); });
@@ -1450,7 +1457,8 @@
           const o = await LT.openingUris(wallet.key, addr, box);
           conv = o.conversation; uris = o.uris;
         }
-        uris.push(...await LT.noteUris(conv, { subject, body, ...(re ? { re } : {}) }));
+        const mine = (store.get("doorway.names") ?? [])[0];
+        uris.push(...await LT.noteUris(conv, { subject, body, ...(re ? { re } : {}), ...(mine ? { name: mine } : {}) }));
         letterSay("Sealing it and sending…");
         // as soon as the first of it is out, it's in Sent, marked as on its way; it's put in its
         // place by the network's copy once that's read back
@@ -1478,6 +1486,20 @@
     };
   }
 
+  // the names letters say they're from, each checked once: shown as a name only if the network says
+  // that name's holder is the key that wrote the letter
+  const nameTried = new Set();
+  async function checkNames(list) {
+    const me = wallet.address.toLowerCase();
+    for (const l of list) {
+      const t = `${l.from}:${l.name}`;
+      if (!l.name || l.from === me || contacts()[l.from] === l.name || nameTried.has(t)) continue;
+      nameTried.add(t);
+      const o = await CsdResolver.lookup(l.name, { doors: await doorList() }).catch(() => null);
+      if (o?.owner && String(o.owner).toLowerCase() === l.from) store.set("doorway.contacts", { ...contacts(), [l.from]: l.name });
+      else if (o) nameTried.add(t); else nameTried.delete(t); // couldn't ask: try again next time
+    }
+  }
   // new letters: looked for at start, then every ten minutes
   async function checkLetters() {
     try {
@@ -1491,7 +1513,9 @@
       else if (prev?.seen) store.set("doorway.letterbox2", { ...prev, seen: false });
       await resendMissing(r).catch(() => {});
       const convs = await LT.conversations(wallet.key, r.let);
-      keepLetters(await LT.letters(convs, r.let));
+      const got = await LT.letters(convs, r.let);
+      keepLetters(got);
+      await checkNames(got).catch(() => {});
       if (lview !== "write") renderLetters();
     } catch (err) { console.warn("letters:", err); }
   }

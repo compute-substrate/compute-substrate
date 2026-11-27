@@ -56,6 +56,14 @@ const replyRecs = recs(bob, reply);
 const back = (await L.letters([aliceConv], [...noteRecs, ...replyRecs])).find(l => l.subject === "Re: Hello");
 ok(back?.from === addr(bob) && back.body === "Got it." && back.re === L.shortId(h!), "Bob's reply reaches Alice and says what it answers");
 
+// a letter can say who wrote it, sealed with the rest
+{
+  const named = await L.noteUris(aliceConv, { subject: "From me", body: "Hi", name: "alice" });
+  const [got] = await L.letters([bobConv], recs(alice, named));
+  ok(got?.name === "alice" && got.subject === "From me" && got.body === "Hi", "the writer's name comes with the letter, inside the seal");
+  ok(!named.some(u => u.includes("alice")), "and isn't readable from the record");
+}
+
 // someone else replaying the notes under their own key
 const stolen = await L.letters([bobConv], recs(eve, hello));
 ok(stolen.length === 0, "the same notes written by a third key are ignored");

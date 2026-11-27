@@ -159,17 +159,20 @@ export async function conversations(key: Hex, recs: Rec[]): Promise<Conversation
 }
 
 // ── Notes ──────────────────────────────────────────────────────────────────────────────────────
-export type Letter = { id: string; conversation: string; from: Hex; to: Hex; at: number; subject: string; body: string; re?: string; height: number };
+// `name` is the name the writer says is theirs, sealed in the letter with the rest; it's only a
+// claim until the reader checks that the name's holder is the key that wrote it (Doorway does)
+export type Letter = { id: string; conversation: string; from: Hex; to: Hex; at: number; subject: string; body: string; re?: string; name?: string; height: number };
 
 const noteKey = (c: Conversation) => hkdf(sha256, c.secret, undefined, info("note"), 32);
 const noteTag = (c: Conversation, nonce: Uint8Array) => hkdf(sha256, c.secret, nonce, info("note tag"), 9);
 const NOTE = /^ln2\.([A-Za-z0-9_-]{12})\.([A-Za-z0-9_-]+)$/;
 
 // A letter in a conversation: one record per ~330 characters
-export async function noteUris(c: Conversation, letter: { subject: string; body: string; re?: string }): Promise<string[]> {
+export async function noteUris(c: Conversation, letter: { subject: string; body: string; re?: string; name?: string }): Promise<string[]> {
   const re = letter.re && /^[0-9a-f]{16}$/.test(letter.re) ? hexToBytes(`0x${letter.re}`) : null;
   const clean = (t: string) => t.replace(/[\u0000\u001f]/g, " ");
-  const text = utf8(`${clean(letter.subject)}\u001f${letter.body.replace(/\u0000/g, "")}`);
+  const name = letter.name && /^[a-z0-9-]{1,32}$/.test(letter.name) ? letter.name : "";
+  const text = utf8(`${name ? name + "\u001e" : ""}${clean(letter.subject).replace(/\u001e/g, " ")}\u001f${letter.body.replace(/\u0000/g, "")}`);
   const room0 = NOTE_TEXT - (re ? 8 : 0);
   const chunks: Uint8Array[] = [text.slice(0, room0)];
   for (let o = room0; o < text.length; o += NOTE_TEXT) chunks.push(text.slice(o, o + NOTE_TEXT));
@@ -179,7 +182,7 @@ export async function noteUris(c: Conversation, letter: { subject: string; body:
     const plain = new Uint8Array(NOTE_PLAIN);
     plain.set(id, 0); plain[8] = i; plain[9] = chunks.length;
     for (let j = 0, t = at; j < 6; j++, t = Math.floor(t / 256)) plain[10 + j] = t % 256;
-    plain[16] = i === 0 && re ? 1 : 0;
+    plain[16] = i === 0 ? (re ? 1 : 0) | (name ? 2 : 0) : 0;
     let o = NOTE_HEAD;
     if (i === 0 && re) { plain.set(re, o); o += 8; }
     plain.set(chunks[i], o);
@@ -194,7 +197,7 @@ export async function noteUris(c: Conversation, letter: { subject: string; body:
 // A note counts only when its writer is one of the conversation's two keys.
 export async function letters(convs: Conversation[], recs: Rec[]): Promise<Letter[]> {
   const keys = convs.map(c => ({ c, k: noteKey(c) }));
-  const msgs = new Map<string, { c: Conversation; from: Hex; n: number; at: number; re?: string; got: Map<number, Uint8Array>; height: number }>();
+  const msgs = new Map<string, { c: Conversation; from: Hex; n: number; at: number; re?: string; named: boolean; got: Map<number, Uint8Array>; height: number }>();
   for (const r of recs) {
     const m = NOTE.exec(r.uri);
     if (!m) continue;
@@ -210,10 +213,11 @@ export async function letters(convs: Conversation[], recs: Rec[]): Promise<Lette
       const id = `${c.id}.${bytesToHex(plain.slice(0, 8)).slice(2)}`;
       const i = plain[8], n = plain[9];
       let at = 0; for (let j = 5; j >= 0; j--) at = at * 256 + plain[10 + j];
-      const g = msgs.get(id) ?? { c, from: r.proposer, n, at, re: undefined as string | undefined, got: new Map<number, Uint8Array>(), height: r.height };
+      const g = msgs.get(id) ?? { c, from: r.proposer, n, at, re: undefined as string | undefined, named: false, got: new Map<number, Uint8Array>(), height: r.height };
       if (g.from !== r.proposer || g.n !== n || i >= n) break;
       let o = NOTE_HEAD;
       if (i === 0 && plain[16] & 1) { g.re = bytesToHex(plain.slice(o, o + 8)).slice(2); o += 8; }
+      if (i === 0 && plain[16] & 2) g.named = true;
       let end = plain.length; while (end > o && plain[end - 1] === 0) end--;
       g.got.set(i, plain.slice(o, end));
       g.height = Math.max(g.height, r.height);
@@ -224,10 +228,12 @@ export async function letters(convs: Conversation[], recs: Rec[]): Promise<Lette
   const out: Letter[] = [];
   for (const [id, g] of msgs) {
     if (g.got.size !== g.n) continue;
-    const text = new TextDecoder().decode(concat(...Array.from({ length: g.n }, (_, i) => g.got.get(i)!)));
+    let text = new TextDecoder().decode(concat(...Array.from({ length: g.n }, (_, i) => g.got.get(i)!)));
+    let name: string | undefined;
+    if (g.named) { const e = text.indexOf("\u001e"); if (e > 0 && /^[a-z0-9-]{1,32}$/.test(text.slice(0, e))) name = text.slice(0, e); if (e >= 0) text = text.slice(e + 1); }
     const cut = text.indexOf("\u001f");
     const other = g.from === g.c.a ? g.c.b : g.c.a;
-    out.push({ id, conversation: g.c.id, from: g.from, to: other, at: g.at, subject: cut < 0 ? "" : text.slice(0, cut), body: cut < 0 ? text : text.slice(cut + 1), ...(g.re ? { re: g.re } : {}), height: g.height });
+    out.push({ id, conversation: g.c.id, from: g.from, to: other, at: g.at, subject: cut < 0 ? "" : text.slice(0, cut), body: cut < 0 ? text : text.slice(cut + 1), ...(g.re ? { re: g.re } : {}), ...(name ? { name } : {}), height: g.height });
   }
   return out.sort((a, b) => b.at - a.at);
 }
