@@ -1732,7 +1732,8 @@
   }
   // the box keeps a link, and searches everything else: words in kept pages' titles and addresses,
   // or a site
-  const isLink = v => !!webAddress(v.trim());
+  // (a bare site, "nytimes.com", is a search for everything kept from it)
+  const isLink = v => !!webAddress(v.trim()) && (/^https?:\/\//i.test(v.trim()) || v.trim().includes("/"));
   $("kpUrl").oninput = () => { $("kpGo").textContent = !$("kpUrl").value.trim() || isLink($("kpUrl").value) ? "Keep" : "Search"; };
   $("kpForm").onsubmit = e => { e.preventDefault(); const v = $("kpUrl").value.trim(); if (!v) return; if (isLink(v)) keepPage(webAddress(v)); else searchKept(v); };
   async function searchKept(words) {
