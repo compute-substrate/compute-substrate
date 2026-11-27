@@ -1227,7 +1227,27 @@
 
   // records written as one: the first also makes a coin for each of the rest, so they go together
   // with the next block; waits for change on its way, like any other write
+  // Every write of letter records is remembered until all its parts are in blocks: a part that
+  // never landed (dropped by the network, or Doorway closed halfway) is sent again by itself, since
+  // a letter with a part missing can't be read. The same record again is harmless: it's put
+  // together by its parts' numbers.
+  const outgoing = () => store.get("doorway.lout") ?? [];
+  function remember(topic, uris) { store.set("doorway.lout", [...outgoing(), { topic, uris, at: Date.now() }]); }
+  async function resendMissing(r) {
+    const me = wallet.address.toLowerCase(), still = [];
+    for (const o of outgoing()) {
+      const have = new Set((o.topic === LT.LETTERBOX ? r.box : r.let).filter(x => x.proposer === me).map(x => x.uri));
+      const missing = o.uris.filter(u => !have.has(u));
+      if (!missing.length) continue;
+      // give it a few blocks before sending again, and stop after a week
+      if (Date.now() - o.at < 10 * 60_000 || Date.now() - o.at > 7 * DAY) { if (Date.now() - o.at <= 7 * DAY) still.push(o); continue; }
+      try { await LT.writeAll(r.node, wallet.key, missing.map(u => LT.recordAsk(o.topic, u, r.tip)), () => {}, noteSent); still.push({ ...o, at: Date.now() }); }
+      catch { still.push(o); }
+    }
+    store.set("doorway.lout", still);
+  }
   async function writeRecords(node, tip, topic, uris) {
+    remember(topic, uris);
     const asks = uris.map(u => LT.recordAsk(topic, u, tip));
     for (let waited = 0; ; waited += 15) {
       try { return await LT.writeAll(node, wallet.key, asks, letterSay, noteSent); }
@@ -1368,6 +1388,7 @@
       if (!wallet) await loadWallet();
       const r = await letterRecords(), me = wallet.address.toLowerCase();
       if (LT.letterboxes(r.box).has(me)) store.set("doorway.letterbox", wallet.address);
+      await resendMissing(r).catch(() => {});
       const convs = await LT.conversations(wallet.key, r.let);
       keepLetters(await LT.letters(convs, r.let));
       if (lview !== "write") renderLetters();

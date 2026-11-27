@@ -292,7 +292,7 @@ export async function writeAll(node: string, key: Hex, asks: Ask[], step: (s: st
     if (coins.length >= asks.length - 1) break;
     await new Promise(r => setTimeout(r, 15_000));
   }
-  if (coins.length < asks.length - 1) throw new Error("The first part is sent, but the network is slow to take it. Doorway tries the rest again later.");
+  if (coins.length < asks.length - 1) throw new Error("The first part is sent, and the network is slow to take it. Doorway sends the rest by itself once it can.");
   for (let i = 1; i < asks.length; i++) {
     const tx = buildAppTx([coins[i - 1]], k, asks[i].app, asks[i].fee);
     const id = (await net.api.submit(tx)).toLowerCase();
