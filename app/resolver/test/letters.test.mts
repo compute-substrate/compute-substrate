@@ -78,6 +78,37 @@ ok((await L.letters(restored, [...noteRecs, ...replyRecs])).length === 3, "with 
 ok(L.costOf(4) === 1 && L.costOf(1) === 0.25, "a record costs a post (0.25)");
 
 
+// groups: Alice starts one with Bob and Carol; invitations go in her two-person conversations
+{
+  const carol = newKey();
+  const carolBox = L.letterboxes(recs(carol, L.letterboxUris(L.letterKeys(carol)))).get(addr(carol))!;
+  const { uris: openC } = await L.openingUris(alice, addr(carol), carolBox);
+  const openCRecs = recs(alice, openC);
+  const pairsA = await L.conversations(alice, [...openRecs, ...openCRecs]);
+  const toBob = pairsA.find(c => c.b === addr(bob))!, toCarol = pairsA.find(c => c.b === addr(carol))!;
+  const g = L.newGroup(alice, "Sunday | club", [addr(bob), addr(carol)]);
+  const inv = recs(alice, [...await L.inviteUris(toBob, g), ...await L.inviteUris(toCarol, g)]);
+  ok(inv.every(r => new TextEncoder().encode(r.uri).length <= 512), `a three-person invitation is ${inv.length / 2} record(s) per member`);
+  const pairsB = await L.conversations(bob, [...openRecs, ...openCRecs]);
+  const pairsC = await L.conversations(carol, [...openRecs, ...openCRecs]);
+  const [gA] = await L.groups(pairsA, inv), [gB] = await L.groups(pairsB, inv), [gC] = await L.groups(pairsC, inv);
+  ok(gA && gB && gC && gB.id === g.id && gC.group!.members.length === 3 && gB.group!.title === "Sunday   club" || gB?.group!.title === "Sunday   club".replace(/\s+/g, " "), "Alice, Bob and Carol each find the group, its title and its three members");
+  ok((await L.letters(pairsB, inv)).length === 0, "an invitation never shows as a letter");
+  ok((await L.groups(await L.conversations(eve, [...openRecs, ...openCRecs]), inv)).length === 0, "Eve finds no group");
+  // messages
+  const hi = recs(bob, await L.noteUris(gB, { subject: "", body: "Hi both" }));
+  const fromCarol = recs(carol, await L.noteUris(gC, { subject: "", body: "Hello!" }));
+  const seenByA = await L.letters([gA], [...hi, ...fromCarol]);
+  ok(seenByA.length === 2 && seenByA.every(l => l.group === g.id) && seenByA.some(l => l.from === addr(bob) && l.body === "Hi both"), "every member reads every member's messages");
+  ok((await L.letters([gC], recs(eve, await L.noteUris(gB, { subject: "", body: "sneaky" })))).length === 0, "a message from outside the group, even sealed right, doesn't count");
+  // someone else can't take over the group with their own invitation
+  const pairsBE = await L.conversations(bob, [...openRecs]);
+  const fake = L.newGroup(bob, "Mine now", [addr(alice), eve]);
+  const takeover = recs(bob, await L.inviteUris(pairsBE[0], { ...fake, id: g.id, secret: g.secret }));
+  const [gA2] = await L.groups(pairsA, [...inv, ...takeover]);
+  ok(gA2.group!.by === addr(alice) && !gA2.group!.members.includes(eve) && gA2.group!.title !== "Mine now", "a member can't add people or rename the group: only its starter's invitations count");
+}
+
 // writing several records: the first makes a coin for each of the rest, which then all go at once
 {
   const submitted: any[] = [];

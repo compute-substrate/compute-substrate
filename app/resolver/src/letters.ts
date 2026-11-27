@@ -16,6 +16,12 @@
 //     note         one record per part of a letter, sealed with the conversation's secret: about
 //                  330 characters each, every one padded to the same size. A reply is just notes.
 //
+// A group is a secret shared by several keys, and its members: whoever starts it sends each member
+// an invitation as a note in their own two-person conversation (flagged as one, so it's never shown
+// as a letter), carrying the group's secret, its title and its members. A group's messages are notes
+// sealed with its secret, and count only when a member wrote them; members are those its starter
+// invited, so nobody else can add themselves.
+//
 // Nothing in a record says who it's to. A recipient recognises an opening by a tag only its key
 // can compute, and a note by a tag only the two in the conversation can compute. Who wrote a record
 // is public (the network records its writer), and so is when; who it's for and what it says aren't.
@@ -116,7 +122,7 @@ export function letterboxesComing(recs: Rec[]): Set<Hex> {
 }
 
 // A conversation between two keys: who started it, who it's with, and the secret they share
-export type Conversation = { id: string; a: Hex; b: Hex; secret: Uint8Array; height: number };
+export type Conversation = { id: string; a: Hex; b: Hex; secret: Uint8Array; height: number; group?: { title: string; members: Hex[]; by: Hex } };
 
 const secretOf = (xs: Uint8Array, ks: Uint8Array, group: string, a: Hex, b: Hex) =>
   hkdf(sha256, concat(xs, ks), utf8(group), info(`conversation ${low(a)} ${low(b)}`), 32);
@@ -161,14 +167,14 @@ export async function conversations(key: Hex, recs: Rec[]): Promise<Conversation
 // ── Notes ──────────────────────────────────────────────────────────────────────────────────────
 // `name` is the name the writer says is theirs, sealed in the letter with the rest; it's only a
 // claim until the reader checks that the name's holder is the key that wrote it (Doorway does)
-export type Letter = { id: string; conversation: string; from: Hex; to: Hex; at: number; subject: string; body: string; re?: string; name?: string; height: number };
+export type Letter = { id: string; conversation: string; from: Hex; to: Hex; at: number; subject: string; body: string; re?: string; name?: string; height: number; group?: string };
 
 const noteKey = (c: Conversation) => hkdf(sha256, c.secret, undefined, info("note"), 32);
 const noteTag = (c: Conversation, nonce: Uint8Array) => hkdf(sha256, c.secret, nonce, info("note tag"), 9);
 const NOTE = /^ln2\.([A-Za-z0-9_-]{12})\.([A-Za-z0-9_-]+)$/;
 
 // A letter in a conversation: one record per ~330 characters
-export async function noteUris(c: Conversation, letter: { subject: string; body: string; re?: string; name?: string }): Promise<string[]> {
+export async function noteUris(c: Conversation, letter: { subject: string; body: string; re?: string; name?: string; invite?: boolean }): Promise<string[]> {
   const re = letter.re && /^[0-9a-f]{16}$/.test(letter.re) ? hexToBytes(`0x${letter.re}`) : null;
   const clean = (t: string) => t.replace(/[\u0000\u001f]/g, " ");
   const name = letter.name && /^[a-z0-9-]{1,32}$/.test(letter.name) ? letter.name : "";
@@ -182,7 +188,7 @@ export async function noteUris(c: Conversation, letter: { subject: string; body:
     const plain = new Uint8Array(NOTE_PLAIN);
     plain.set(id, 0); plain[8] = i; plain[9] = chunks.length;
     for (let j = 0, t = at; j < 6; j++, t = Math.floor(t / 256)) plain[10 + j] = t % 256;
-    plain[16] = i === 0 ? (re ? 1 : 0) | (name ? 2 : 0) : 0;
+    plain[16] = i === 0 ? (re ? 1 : 0) | (name ? 2 : 0) | (letter.invite ? 4 : 0) : 0;
     let o = NOTE_HEAD;
     if (i === 0 && re) { plain.set(re, o); o += 8; }
     plain.set(chunks[i], o);
@@ -196,8 +202,11 @@ export async function noteUris(c: Conversation, letter: { subject: string; body:
 // The letters in these conversations, from csd.letters records, put together from their parts.
 // A note counts only when its writer is one of the conversation's two keys.
 export async function letters(convs: Conversation[], recs: Rec[]): Promise<Letter[]> {
+  return (await notes(convs, recs)).filter(l => !l.invite).map(({ invite, ...l }) => l);
+}
+async function notes(convs: Conversation[], recs: Rec[]): Promise<(Letter & { invite: boolean })[]> {
   const keys = convs.map(c => ({ c, k: noteKey(c) }));
-  const msgs = new Map<string, { c: Conversation; from: Hex; n: number; at: number; re?: string; named: boolean; got: Map<number, Uint8Array>; height: number }>();
+  const msgs = new Map<string, { c: Conversation; from: Hex; n: number; at: number; re?: string; named: boolean; invite: boolean; got: Map<number, Uint8Array>; height: number }>();
   for (const r of recs) {
     const m = NOTE.exec(r.uri);
     if (!m) continue;
@@ -209,15 +218,16 @@ export async function letters(convs: Conversation[], recs: Rec[]): Promise<Lette
       if (!eq(noteTag(c, nonce), tag)) continue;
       let plain: Uint8Array;
       try { plain = await gcm(k, nonce, sealed.slice(12), true); } catch { break; }
-      if (r.proposer !== c.a && r.proposer !== c.b) break;
+      if (c.group ? !c.group.members.includes(r.proposer) : r.proposer !== c.a && r.proposer !== c.b) break;
       const id = `${c.id}.${bytesToHex(plain.slice(0, 8)).slice(2)}`;
       const i = plain[8], n = plain[9];
       let at = 0; for (let j = 5; j >= 0; j--) at = at * 256 + plain[10 + j];
-      const g = msgs.get(id) ?? { c, from: r.proposer, n, at, re: undefined as string | undefined, named: false, got: new Map<number, Uint8Array>(), height: r.height };
+      const g = msgs.get(id) ?? { c, from: r.proposer, n, at, re: undefined as string | undefined, named: false, invite: false, got: new Map<number, Uint8Array>(), height: r.height };
       if (g.from !== r.proposer || g.n !== n || i >= n) break;
       let o = NOTE_HEAD;
       if (i === 0 && plain[16] & 1) { g.re = bytesToHex(plain.slice(o, o + 8)).slice(2); o += 8; }
       if (i === 0 && plain[16] & 2) g.named = true;
+      if (i === 0 && plain[16] & 4) g.invite = true;
       let end = plain.length; while (end > o && plain[end - 1] === 0) end--;
       g.got.set(i, plain.slice(o, end));
       g.height = Math.max(g.height, r.height);
@@ -225,7 +235,7 @@ export async function letters(convs: Conversation[], recs: Rec[]): Promise<Lette
       break;
     }
   }
-  const out: Letter[] = [];
+  const out: (Letter & { invite: boolean })[] = [];
   for (const [id, g] of msgs) {
     if (g.got.size !== g.n) continue;
     let text = new TextDecoder().decode(concat(...Array.from({ length: g.n }, (_, i) => g.got.get(i)!)));
@@ -233,10 +243,49 @@ export async function letters(convs: Conversation[], recs: Rec[]): Promise<Lette
     if (g.named) { const e = text.indexOf("\u001e"); if (e > 0 && /^[a-z0-9-]{1,32}$/.test(text.slice(0, e))) name = text.slice(0, e); if (e >= 0) text = text.slice(e + 1); }
     const cut = text.indexOf("\u001f");
     const other = g.from === g.c.a ? g.c.b : g.c.a;
-    out.push({ id, conversation: g.c.id, from: g.from, to: other, at: g.at, subject: cut < 0 ? "" : text.slice(0, cut), body: cut < 0 ? text : text.slice(cut + 1), ...(g.re ? { re: g.re } : {}), ...(name ? { name } : {}), height: g.height });
+    out.push({ id, conversation: g.c.id, from: g.from, to: g.c.group ? g.from : other, at: g.at, subject: cut < 0 ? "" : text.slice(0, cut), body: cut < 0 ? text : text.slice(cut + 1), ...(g.re ? { re: g.re } : {}), ...(name ? { name } : {}), ...(g.c.group ? { group: g.c.id } : {}), invite: g.invite, height: g.height });
   }
   return out.sort((a, b) => b.at - a.at);
 }
+// ── Groups ─────────────────────────────────────────────────────────────────────────────────────
+export const GROUP_MAX = 12;
+const GROUP_ID = /^[A-Za-z0-9_-]{11}$/;
+
+// A new group: its id and secret (members are given them by invitations)
+export function newGroup(key: Hex, title: string, members: Hex[]): Conversation {
+  const me = low(keyFromPrivate(hexToBytes(key)).addr20);
+  const all = [...new Set([me, ...members.map(low)])];
+  if (all.length < 2) throw new Error("A group needs someone besides you.");
+  if (all.length > GROUP_MAX) throw new Error(`A group holds up to ${GROUP_MAX} people.`);
+  return { id: b64u(rand(8)), a: me, b: me, secret: rand(32), height: 0, group: { title: title.replace(/[\u0000-\u001f|]/g, " ").trim().slice(0, 60), members: all, by: me } };
+}
+
+// The invitation to `g`, as a note in a two-person conversation with one of its members
+export const inviteUris = (pair: Conversation, g: Conversation, name?: string) =>
+  noteUris(pair, { subject: "", body: `G1|${g.id}|${b64u(g.secret)}|${g.group!.title}|${g.group!.members.join(",")}`, name, invite: true });
+
+// The groups this key is in, from the invitations in its two-person conversations. A group is its
+// starter's: members are the union of the lists in invitations its starter wrote, and an invitation
+// from anyone else (to a group they didn't start) is ignored.
+export async function groups(pairs: Conversation[], recs: Rec[]): Promise<Conversation[]> {
+  const found = new Map<string, Conversation>();
+  const all = (await notes(pairs, recs)).filter(l => l.invite).sort((a, b) => a.height - b.height);
+  for (const l of all) {
+    const m = /^G1\|([A-Za-z0-9_-]{11})\|([A-Za-z0-9_-]{43})\|([^|]*)\|((?:0x[0-9a-f]{40},?)+)$/.exec(l.body);
+    if (!m || !GROUP_ID.test(m[1])) continue;
+    let secret: Uint8Array; try { secret = unb64u(m[2]); } catch { continue; }
+    if (secret.length !== 32) continue;
+    const members = m[4].split(",").filter(Boolean).map(low);
+    if (!members.includes(l.from)) continue;
+    const had = found.get(m[1]);
+    if (!had) { found.set(m[1], { id: m[1], a: l.from, b: l.from, secret, height: l.height, group: { title: m[3], members: members.slice(0, GROUP_MAX), by: l.from } }); continue; }
+    if (had.group!.by !== l.from || !eq(had.secret, secret)) continue;
+    had.group!.members = [...new Set([...had.group!.members, ...members])].slice(0, GROUP_MAX);
+    if (m[3]) had.group!.title = m[3];
+  }
+  return [...found.values()];
+}
+
 // a letter's short id, as a reply refers to it
 export const shortId = (l: Letter) => l.id.split(".")[1];
 
