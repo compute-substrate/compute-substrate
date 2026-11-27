@@ -501,12 +501,26 @@ fn opened_by_address(dir: &Path) -> Vec<String> {
 
 fn route_address(app: &tauri::AppHandle, req: tiny_http::Request, cid: String) {
     if req.url().starts_with("/.doorway/") {
-        return doorway_request(app, req, cid.clone(), format!("{cid}.localhost"));
+        let host = req.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().to_string()).unwrap_or_else(|| format!("{cid}.localhost"));
+        return doorway_request(app, req, cid.clone(), host);
     }
     let Ok(dir) = sites_dir(app) else { return };
     let root = Some(dir.join(&cid)).filter(|r| r.join("index.html").is_file())
         .or_else(|| (carried_cid().as_deref() == Some(cid.as_str())).then(|| app.path().resource_dir().ok().map(|d| d.join("commonplace"))).flatten());
     match root {
+        // a kept copy of a page: served with the conversation beside it (talk.js, Doorway's own,
+        // never part of the copy)
+        Some(r) if r.join("kept.json").is_file() && matches!(req.url().split(['?', '#']).next(), Some("/" | "/index.html")) => {
+            let html = fs::read_to_string(r.join("index.html")).unwrap_or_default();
+            let tag = "<script src=\"/.doorway/talk.js\" defer></script>";
+            let html = match html.to_ascii_lowercase().rfind("</body>") {
+                Some(at) => format!("{}{tag}{}", &html[..at], &html[at..]),
+                None => format!("{html}{tag}"),
+            };
+            let _ = req.respond(tiny_http::Response::from_string(html)
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap())
+                .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap()));
+        }
         Some(r) => respond_from(req, &r),
         None => {
             // ask the window to fetch it (from the doors, checked against this address)
@@ -668,7 +682,17 @@ fn doorway_request(app: &tauri::AppHandle, mut req: tiny_http::Request, name: St
             };
             let _ = req.respond(r);
         }
-        (Post, "/.doorway/write") | (Post, "/.doorway/prove") => {
+        (Get, "/.doorway/talk.js") => {
+            let _ = req.respond(tiny_http::Response::from_string(include_str!("talk.js"))
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/javascript; charset=utf-8"[..]).unwrap())
+                .with_header(tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap()));
+        }
+        (Post, "/.doorway/write") | (Post, "/.doorway/prove") | (Post, "/.doorway/talk") => {
+            // a conversation only beside a kept copy of a page
+            if path.ends_with("talk") && !sites_dir(app).map(|d| d.join(&name).join("kept.json").is_file()).unwrap_or(false) {
+                let _ = req.respond(json_response(404, serde_json::json!({ "error": "Conversations are beside kept pages." })));
+                return;
+            }
             let own = header(&req, "Origin").is_some_and(|o| o.eq_ignore_ascii_case(&format!("http://{host}")));
             let json = header(&req, "Content-Type").is_some_and(|c| c.to_ascii_lowercase().starts_with("application/json"));
             if !own || !json {
@@ -688,7 +712,7 @@ fn doorway_request(app: &tauri::AppHandle, mut req: tiny_http::Request, name: St
             let id = asks.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let (tx, rx) = std::sync::mpsc::channel();
             asks.waiting.lock().unwrap().insert(id, tx);
-            let kind = if path.ends_with("prove") { "prove" } else { "write" };
+            let kind = if path.ends_with("prove") { "prove" } else if path.ends_with("talk") { "talk" } else { "write" };
             let _ = app.emit("site-ask", serde_json::json!({ "id": id, "site": name, "kind": kind, "body": body }));
             std::thread::spawn(move || {
                 let answer = rx.recv_timeout(Duration::from_secs(300)).unwrap_or_else(|_| Err("Nobody answered in Doorway.".into()));

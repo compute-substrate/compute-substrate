@@ -51,5 +51,28 @@ ok(hits.length === 1 && hits[0].url === "https://example.com/news?id=7" && hits[
 ok((await P.search("http://n", "www.example.com")).length === 2, "search by site: each page kept from it");
 ok((await P.search("http://n", "elsewhere")).length === 1 && (await P.search("http://n", "nothing here")).length === 0, "or words in the address");
 
+// conversations about a page
+{
+  const t1 = P.talkAsk("https://example.com/news?id=7", cid, "alice", "  This was changed later.\r\nSee the old copy. ", 150_900);
+  ok((t1.app as any).domain === P.TALK && (t1.app as any).uri === `${cid} alice This was changed later.\nSee the old copy.`, "a comment: the copy it was written on, the name it claims, what was said");
+  ok((P.talkAsk("https://example.com/x", cid, "Not A Name", "hi", 1).app as any).uri === `${cid} - hi`, "no name, or not a name: a dash");
+  let tooLong = false; try { P.talkAsk("https://example.com/x", cid, "", "x".repeat(P.talkRoom(cid) + 1), 1); } catch { tooLong = true; }
+  ok(tooLong && P.talkRoom(cid) > 400, "one record each, with room for a few sentences");
+  const talk = [
+    { height: 150_990, pos: 1, txid: "0x02", tx_raw: raw(P.talkAsk("https://EXAMPLE.com/news?id=7&utm_source=x", other, "", "Second", 150_900) as any) },
+    { height: 150_990, pos: 0, txid: "0x01", tx_raw: raw(t1 as any) },
+    { height: 150_991, pos: 0, txid: "0x03", tx_raw: raw(P.talkAsk("https://example.com/elsewhere", cid, "", "Elsewhere", 150_900) as any) },
+  ];
+  (globalThis as any).fetch = async (url: string) => {
+    const u = String(url);
+    if (u.endsWith("/tip")) return new Response(JSON.stringify({ height: 151_000 }));
+    if (u.includes(`/events/${P.TALK}/`)) return new Response(JSON.stringify({ to: 151_000, tip: 151_000, events: talk }));
+    return new Response("{}", { status: 404 });
+  };
+  const said = await P.talkOf("http://n", "https://example.com/news?id=7");
+  ok(said.length === 2 && said[0].text === "This was changed later.\nSee the old copy." && said[0].claim === "alice" && said[1].copy === other && said[1].claim === "", "a page's conversation, in order, each with its copy and the name it claims");
+  ok(said.every(x => x.by === key.addr20.toLowerCase()), "and who wrote it, from the signature");
+}
+
 if (failures) { console.log(`${failures} failed`); process.exit(1); }
 console.log("all pages checks passed");

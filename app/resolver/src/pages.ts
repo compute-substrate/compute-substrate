@@ -111,3 +111,58 @@ export async function search(node: string, words: string): Promise<(Copy & { cop
 
 // What a kept page's own files say about it (kept.json, written beside index.html)
 export type KeptNote = { url: string; title: string; at: string; by?: string };
+
+// ── Conversations about a page ──────────────────────────────────────────────────────────────────
+// What people say about a page: records under `csd.talk`, matched by the page's address (its hash,
+// as with copies), each saying which kept copy it was written on, so it's clear which version of the
+// page it's about. The text is "<copy cid> <name or -> <what was said>": the name is only what the
+// writer says is theirs; the reader checks it (Doorway does) before showing it as a name.
+export const TALK = "csd.talk";
+export const TALK_FROM = 150_900;
+export const TALK_MAX = 512;
+const talkHash = (url: string) => sha256d(utf8(`${TALK} ${pageKey(url)}`));
+const talkHead = (copy: string, name: string) => `${copy} ${name && /^[a-z0-9-]{1,32}$/.test(name) ? name : "-"} `;
+
+// how many bytes are left for what's said, on a record with this copy and name
+export const talkRoom = (copy: string, name = "") => TALK_MAX - utf8(talkHead(copy, name)).length;
+
+export function talkAsk(url: string, copy: string, name: string, text: string, tip: number): { app: AppPayload; fee: bigint; burn: bigint } {
+  if (!CID_RE.test(copy)) throw new Error("That isn't a kept copy's address.");
+  const said = text.replace(/\r\n?/g, "\n").trim();
+  if (!said) throw new Error("There's nothing to post.");
+  const uri = talkHead(copy, name) + said;
+  if (utf8(uri).length > TALK_MAX) throw new Error("That's too long for one post. Make it a little shorter.");
+  return { app: { kind: "propose", domain: TALK, payloadHash: talkHash(url), uri, expiresEpoch: BigInt(Math.floor(tip / EPOCH_LEN)) + 10_000_000n }, fee: MIN_FEE_PROPOSE, burn: 0n };
+}
+
+export type Said = { id: string; copy: string; claim: string; text: string; by: Hex; height: number; pos: number };
+
+const talkCaches = new Map<string, { next: number; all: (Said & { hash: string })[] }>();
+async function allTalk(node: string): Promise<(Said & { hash: string })[]> {
+  let c = talkCaches.get(node);
+  if (!c) talkCaches.set(node, c = { next: TALK_FROM, all: [] });
+  const tip = (await (await fetch(`${node}/tip`)).json()).height as number;
+  while (c.next <= tip) {
+    const r = await fetch(`${node}/events/${TALK}/${c.next}/2000`);
+    if (!r.ok) break;
+    const j = await r.json();
+    for (const e of j.events ?? []) {
+      let tx; try { tx = deserializeTx(Uint8Array.from((String(e.tx_raw).replace(/^0x/, "").match(/../g) ?? []).map(h => parseInt(h, 16)))); } catch { continue; }
+      if (tx.app.kind !== "propose" || tx.app.domain !== TALK) continue;
+      const m = /^(\S+) (\S+) ([\s\S]+)$/.exec(tx.app.uri);
+      const by = signerOf(tx);
+      if (!m || !CID_RE.test(m[1]) || !by) continue;
+      const hash = Array.from(tx.app.payloadHash, b => b.toString(16).padStart(2, "0")).join("");
+      c.all.push({ id: String(e.txid ?? `${e.height}:${e.pos}`), copy: m[1], claim: m[2] === "-" ? "" : m[2], text: m[3], by: by.toLowerCase() as Hex, height: e.height, pos: e.pos ?? 0, hash });
+    }
+    if (typeof j.to !== "number" || j.to < c.next) break;
+    c.next = j.to + 1;
+  }
+  return c.all;
+}
+
+// What's been said about `url`, oldest first
+export async function talkOf(node: string, url: string): Promise<Said[]> {
+  const want = Array.from(talkHash(url), b => b.toString(16).padStart(2, "0")).join("");
+  return (await allTalk(node)).filter(x => x.hash === want).sort((a, b) => a.height - b.height || a.pos - b.pos).map(({ hash, ...x }) => x);
+}

@@ -1949,7 +1949,47 @@
   let replyTo = null;
   listen("ask-reply", e => replyTo && replyTo(e.payload ?? {}));
   listen("open-add", () => openAdd());
-  listen("site-ask", e => { asks.push(e.payload); if (asks.length === 1) nextAsk(); });
+  // the conversation beside a kept copy (talk.js): reading and muting answered straight away; a post
+  // waits its turn for the approval window, like any site's
+  listen("site-ask", e => {
+    if (e.payload.kind === "talk" && !e.payload.body?.text) return talkAnswer(e.payload);
+    asks.push(e.payload); if (asks.length === 1) nextAsk();
+  });
+  const talkTried = new Set();
+  async function talkAnswer(a) {
+    const b = a.body ?? {};
+    const done = (ok, error) => invoke("answer_ask", { id: a.id, ok, error }).catch(() => {});
+    try {
+      if (b.mute) {
+        store.set("doorway.muted", [...new Set([...(store.get("doorway.muted") ?? []), String(b.mute).toLowerCase()])]);
+        return done({ ok: true }, null);
+      }
+      if (!wallet) await loadWallet().catch(() => {});
+      const node = await readingNode();
+      const [said, copies, tip] = await Promise.all([PG.talkOf(node, b.url), PG.copiesOf(node, b.url).catch(() => []), fetch(node + "/tip").then(r => r.json()).then(j => j.height)]);
+      const me = wallet?.address?.toLowerCase() ?? "", mine = (store.get("doorway.names") ?? [])[0] ?? "";
+      // names checked as with letters: shown only if that name's holder is the key that wrote it
+      for (const x of said) {
+        const t = `${x.by}:${x.claim}`;
+        if (!x.claim || x.by === me || contacts()[x.by] === x.claim || talkTried.has(t)) continue;
+        talkTried.add(t);
+        const o = await CsdResolver.lookup(x.claim, { doors: await doorList() }).catch(() => null);
+        if (o?.owner && String(o.owner).toLowerCase() === x.by) store.set("doorway.contacts", { ...contacts(), [x.by]: x.claim });
+        else if (!o) talkTried.delete(t);
+      }
+      const muted = new Set(store.get("doorway.muted") ?? []), at = new Map(copies.map(c => [c.cid, c.height]));
+      done({
+        me, room: PG.talkRoom(a.site, mine), page: shortUrl(PG.pageKey(b.url)),
+        said: said.filter(x => !muted.has(x.by)).map(x => ({
+          by: x.by, text: x.text, copy: x.copy,
+          name: x.by === me ? mine : contacts()[x.by] === x.claim ? x.claim : "",
+          friendly: CsdResolver.friendlyName(x.by),
+          when: whenSaid(W.heightToDate(x.height, tip)),
+          copyWhen: at.has(x.copy) ? keptWhen(W.heightToDate(at.get(x.copy), tip)) : "",
+        })),
+      }, null);
+    } catch (err) { done(null, String(err && err.message || err)); }
+  }
   async function nextAsk() {
     const a = asks[0];
     if (!a) return;
@@ -1957,7 +1997,10 @@
     try {
       if (!wallet) await loadWallet();
       if (a.kind === "prove") return done(W.prove(wallet.key, a.body?.authHash), null);
-      const ask = W.readAsk(a.body);
+      const talk = a.kind === "talk";
+      const ask = talk
+        ? PG.talkAsk(String(a.body?.url ?? ""), a.site, (store.get("doorway.names") ?? [])[0] ?? "", String(a.body?.text ?? ""), await readingNode().then(n => fetch(n + "/tip")).then(r => r.json()).then(j => j.height))
+        : W.readAsk(a.body);
       const csd = Number(ask.fee + ask.burn) / 1e8;
       const go = async () => {
         try {
@@ -1975,11 +2018,11 @@
         replyTo = r => { if (r.id === a.id || r.closed) resolve(r); };
         invoke("show_ask", { ask: {
           id: a.id,
-          title: W.isKeep(ask) ? `${a.site} asks to keep a site up` : `${a.site} asks to write`,
-          what: W.describe(ask),
+          title: talk ? `Post about ${shortUrl(PG.pageKey(String(a.body.url)))}` : W.isKeep(ask) ? `${a.site} asks to keep a site up` : `${a.site} asks to write`,
+          what: talk ? `“${String(a.body.text).trim().slice(0, 280)}”. Everyone can read it, and it can't be deleted.` : W.describe(ask),
           balance: /^[\d.]+$/.test(bal) ? (+bal < csd ? "You've run low: top up to do this." : `You have enough for about ${postsSaid(+bal)}.`) : "",
           short: /^[\d.]+$/.test(bal) && +bal < csd,
-          always: W.isKeep(ask) ? "" : `Allow ${a.site} without asking, up to ${postsSaid(BUDGET)}' worth a day`,
+          always: W.isKeep(ask) || talk ? "" : `Allow ${a.site} without asking, up to ${postsSaid(BUDGET)}' worth a day`,
         } }).catch(() => resolve({ allow: false }));
       });
       replyTo = null;
