@@ -78,7 +78,7 @@
   @media (prefers-color-scheme: dark) { .lpill { color: #10201b; } }
   .lpill:empty { display: none; }
   .lintro { color: var(--muted); font-size: 13px; line-height: 1.55; margin: -4px 4px 12px; max-width: 62ch; }
-  .lbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .lbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .lseg { display: inline-flex; background: var(--bg); border-radius: 10px; padding: 3px; gap: 2px; }
   .lseg .tab { border: 0; background: transparent; color: var(--muted); padding: 5px 14px; border-radius: 8px; font-weight: 550; }
   .lseg .tab[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
@@ -139,6 +139,15 @@
   .lempty .going { color: var(--busy); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
   .lempty .going::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
   #letterStatus:empty { display: none; }
+  .namecard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 16px 18px; margin-top: 26px; display: flex; flex-direction: column; gap: 6px; }
+  .namecard b { font: 650 15px/1.3 var(--display); }
+  .namecard .hint { margin: 0; font-size: 13px; }
+  .namecard form { display: flex; gap: 8px; margin-top: 6px; }
+  .namecard input { flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; -webkit-user-select: text; user-select: text; }
+  .namecard input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .lme { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; margin-right: 4px; }
+  .lme b { color: var(--ink); font-weight: 600; }
+  .lme .lav { width: 24px; height: 24px; font-size: 11px; }
   .noname { font-style: italic; font-weight: 450; color: var(--muted); }
   .noname::after { content: "no name"; font-style: normal; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; margin-left: 7px; vertical-align: 1px; }
   .lrow.new .who .noname { font-weight: 650; }
@@ -310,14 +319,10 @@
     <button class="hint" id="discoverMore" hidden style="background:none;border:0;cursor:pointer;text-decoration:underline;margin-top:8px">Show all</button>
   </div>
 
-  <h2 style="margin-top:22px">Your name</h2>
-  <div class="letters" style="padding:14px 16px">
-    <div id="myNameHave" hidden></div>
-    <form id="myNameForm" class="lwrite" style="padding:0;flex-direction:row;align-items:center" hidden>
-      <input id="myName" placeholder="Pick a name" spellcheck="false" autocomplete="off" style="flex:1;min-width:0">
-      <button class="primary" id="myNameGo">Check</button>
-    </form>
-    <p class="hint" id="myNameSaid" style="margin:8px 0 0">A name is yours alone, like guestbook. People find you and write to you there, and you can put a site on it whenever you like.</p>
+  <div class="namecard" id="nameCard" hidden>
+    <b>Get a name</b>
+    <p class="hint" id="myNameSaid">So people can find you and write to you. You can put a site on it too, whenever you like.</p>
+    <form id="myNameForm"><input id="myName" placeholder="Pick a name, like guestbook" spellcheck="false" autocomplete="off"><button class="primary" id="myNameGo">Check</button></form>
   </div>
 
   <h2 style="margin-top:22px">Letters<span id="lettersNew" class="lpill"></span></h2>
@@ -329,6 +334,7 @@
         <button class="tab" data-ltab="out" aria-pressed="false">Sent</button>
       </div>
       <span class="grow"></span>
+      <span class="lme" id="lme" hidden></span>
       <button class="primary" id="letterNew" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Write a letter</button>
     </div>
     <div id="letterView"></div>
@@ -1204,12 +1210,12 @@
   let wanting = null;
   function renderMyName() {
     const names = store.get("doorway.names") ?? [], r = store.get("doorway.reg");
-    $("myNameHave").hidden = !names.length;
-    $("myNameForm").hidden = !!names.length || !!r;
-    if (names.length) {
-      $("myNameHave").innerHTML = `You're <b>${esc(names[0])}</b>${names.length > 1 ? ` (and ${names.slice(1).map(n => esc(n) ).join(", ")})` : ""}.`;
-      $("myNameSaid").textContent = "People can find you and write to you there.";
-    } else if (r) $("myNameSaid").textContent = `Getting ${r.name}. It takes about 25 minutes while Doorway is open; you can keep using it meanwhile.`;
+    // with a name, it's simply shown where letters are; without one, a card to get one
+    $("nameCard").hidden = !!names.length;
+    $("myNameForm").hidden = !!r;
+    $("lme").hidden = !names.length;
+    if (names.length) $("lme").innerHTML = `<span class="lav" style="background:${tint(wallet?.address?.toLowerCase() ?? names[0])}">${esc(names[0][0].toUpperCase())}</span><span>You're <b>${esc(names[0])}</b></span>`;
+    else if (r) $("myNameSaid").textContent = `Getting ${r.name}. It takes about 25 minutes while Doorway is open; you can keep using it meanwhile.`;
   }
   $("myName").oninput = () => { wanting = null; $("myNameGo").textContent = "Check"; };
   $("myNameForm").onsubmit = async e => {
