@@ -291,7 +291,7 @@ export async function writeAll(node: string, key: Hex, asks: Ask[], step: (s: st
   const firstId = (await net.api.submit(first)).toLowerCase();
   note(first, firstId); ids.push(firstId);
   if (asks.length === 1) return ids;
-  step(`Sent 1 of ${asks.length}. The rest go with the next block, in a minute or two…`);
+  step(`On its way: the rest follows in a minute or two…`);
   // the coins it made, once they're in a block
   let coins: Utxo[] = [];
   for (let t = 0; t < 40; t++) {
@@ -299,7 +299,7 @@ export async function writeAll(node: string, key: Hex, asks: Ask[], step: (s: st
     if (coins.length >= asks.length - 1) break;
     await new Promise(r => setTimeout(r, 15_000));
   }
-  if (coins.length < asks.length - 1) throw new Error("The first part is sent, and the network is slow to take it. Doorway sends the rest by itself once it can.");
+  if (coins.length < asks.length - 1) throw new Error("It's on its way, and the rest is slow to follow. Doorway finishes sending it by itself.");
   for (let i = 1; i < asks.length; i++) {
     const tx = buildAppTx([coins[i - 1]], k, asks[i].app, asks[i].fee);
     const id = (await net.api.submit(tx)).toLowerCase();

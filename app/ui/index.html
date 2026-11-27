@@ -71,22 +71,74 @@
   .site small { color: var(--muted); display: block; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; padding: 14px; border: 1px dashed var(--line); border-radius: 12px; text-align: center; }
   .letters { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
-  .lbar { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-  .lbar .tab { border: 0; background: transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; }
-  .lbar .tab[aria-pressed="true"] { background: var(--bg); color: var(--ink); font-weight: 650; }
+  /* Letters: a mail-like list, a letter read on paper, and a plain page to write on */
+  :root { --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; --paper: #fffdf8; }
+  @media (prefers-color-scheme: dark) { :root { --paper: #2a2521; } }
+  .lpill { display: inline-block; vertical-align: 2px; margin-left: 6px; font: 650 11px/1 var(--display); color: #fff; background: var(--accent); border-radius: 999px; padding: 4px 8px; }
+  @media (prefers-color-scheme: dark) { .lpill { color: #10201b; } }
+  .lpill:empty { display: none; }
+  .lintro { color: var(--muted); font-size: 13px; line-height: 1.55; margin: -4px 4px 12px; max-width: 62ch; }
+  .lbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .lseg { display: inline-flex; background: var(--bg); border-radius: 10px; padding: 3px; gap: 2px; }
+  .lseg .tab { border: 0; background: transparent; color: var(--muted); padding: 5px 14px; border-radius: 8px; font-weight: 550; }
+  .lseg .tab[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
   .lbar .grow { flex: 1; }
-  .lrow { display: flex; gap: 12px; align-items: baseline; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 12px 16px; white-space: normal; }
+  .lbar .primary, .lc .primary, .lread .primary, .lempty .primary { display: inline-flex; align-items: center; gap: 7px; }
+  .lbar svg, .lc svg, .lread svg, .lempty svg.i { width: 15px; height: 15px; flex: none; }
+  .lav { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: #fff; font: 700 15px/1 var(--display); flex: none; }
+  .lrow { display: flex; gap: 12px; align-items: center; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 12px 16px; white-space: normal; color: var(--ink); }
   .lrow:last-child { border-bottom: 0; }
-  .lrow:hover { background: var(--bg); }
-  .lrow .who { font-weight: 650; flex: none; width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lrow .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-  .lrow .subj b { color: var(--ink); font-weight: 500; }
-  .lrow .when { flex: none; color: var(--muted); font-size: 12px; }
-  .lrow.new .who::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 7px; vertical-align: 1px; }
-  .lread { padding: 18px 20px; }
-  .lread h3 { margin: 0 0 2px; font: 700 18px/1.3 var(--display); }
-  .lread .meta { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
-  .lread .text { white-space: pre-wrap; font-size: 15px; line-height: 1.65; -webkit-user-select: text; user-select: text; overflow-wrap: anywhere; }
+  .lrow:hover { background: var(--bg); border-color: var(--line); }
+  .lrow .mid { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .lrow .ltop { display: flex; align-items: baseline; gap: 10px; }
+  .lrow .who { flex: 1; min-width: 0; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .when { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .lrow .line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+  .lrow .line b { color: var(--ink); font-weight: 500; }
+  .lrow.new .who { font-weight: 750; }
+  .lrow.new .line b { font-weight: 650; }
+  .lrow.new .when { color: var(--accent); font-weight: 650; }
+  .lrow.new .lav { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--accent); }
+  .lrow .going { color: var(--busy); display: inline-flex; align-items: center; gap: 5px; }
+  .lrow .going::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+  .lread { padding: 14px 16px 18px; }
+  .lread .head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .lread .head .who { flex: 1; min-width: 0; }
+  .lread .head b { display: block; font-weight: 650; }
+  .lread .head small { color: var(--muted); font-size: 12px; }
+  .lback { border: 0; background: transparent; padding: 6px; border-radius: 8px; color: var(--muted); display: grid; place-items: center; }
+  .lback:hover { background: var(--bg); color: var(--ink); }
+  .lback svg { width: 18px; height: 18px; }
+  .lpaper { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 22px 26px 24px; }
+  .lpaper h3 { margin: 0 0 12px; font: 600 21px/1.3 var(--serif); letter-spacing: -.005em; text-wrap: balance; }
+  .lpaper .re { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
+  .lpaper .text { white-space: pre-wrap; font: 16.5px/1.7 var(--serif); -webkit-user-select: text; user-select: text; overflow-wrap: anywhere; max-width: 64ch; }
+  .lfoot { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .lseal { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  .lseal svg { width: 14px; height: 14px; flex: none; color: var(--accent); }
+  .lc { padding: 6px 16px 16px; }
+  .lc .head { display: flex; align-items: center; justify-content: space-between; padding: 6px 0 8px; }
+  .lc .head b { font: 650 15px/1.2 var(--display); }
+  .lc .lf { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+  .lc .lf label { color: var(--muted); font-size: 13px; width: 58px; flex: none; }
+  .lc input, .lc textarea { font: inherit; color: var(--ink); background: transparent; border: 0; outline: none; -webkit-user-select: text; user-select: text; }
+  .lc input { flex: 1; min-width: 0; padding: 11px 0; font-size: 14px; }
+  .lc textarea { display: block; width: 100%; min-height: 220px; resize: vertical; padding: 16px 2px 8px; font: 16.5px/1.7 var(--serif); }
+  .lc input::placeholder, .lc textarea::placeholder { color: var(--muted); opacity: .7; }
+  .lc .lpaper { padding: 0 22px; margin-top: 12px; }
+  .lc .lpaper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .lc .lcost { color: var(--muted); font-size: 12px; }
+  .lc button:disabled { opacity: .55; cursor: default; }
+  .lc.sending input, .lc.sending textarea { opacity: .6; }
+  .lempty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 34px 24px 32px; }
+  .lempty svg.art { width: 64px; height: 64px; color: var(--accent); margin-bottom: 6px; }
+  .lempty b { font: 650 16px/1.3 var(--display); }
+  .lempty p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; max-width: 46ch; }
+  .lempty .primary { margin-top: 10px; }
+  .lempty small { color: var(--muted); font-size: 12px; }
+  .lempty .going { color: var(--busy); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .lempty .going::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+  #letterStatus:empty { display: none; }
   .lwrite { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
   .lwrite input, .lwrite textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; -webkit-user-select: text; user-select: text; }
   .lwrite textarea { min-height: 180px; resize: vertical; line-height: 1.6; }
@@ -265,14 +317,16 @@
     <p class="hint" id="myNameSaid" style="margin:8px 0 0">A .csd name is yours alone: people find you and write to you there, and you can put a site on it whenever you like.</p>
   </div>
 
-  <h2 style="margin-top:22px">Letters <span id="lettersNew" class="hint" style="font-weight:500"></span></h2>
-  <p class="hint" style="margin:-4px 4px 10px">Private letters to anyone with a .csd name, kept by the network itself. Only the person you write to can read one: not the doors, not anyone in between. A short letter costs a post.</p>
+  <h2 style="margin-top:22px">Letters<span id="lettersNew" class="lpill"></span></h2>
+  <p class="lintro">Write to anyone with a .csd name. A letter is sealed on your computer and can only be opened on theirs. There's no company in the middle, so nobody else can read it, delete it or shut it down, and it's still there years from now.</p>
   <div class="letters" id="letters">
     <div class="lbar">
-      <button class="tab" data-ltab="in" aria-pressed="true">Received</button>
-      <button class="tab" data-ltab="out" aria-pressed="false">Sent</button>
+      <div class="lseg" role="group" aria-label="Letters">
+        <button class="tab" data-ltab="in" aria-pressed="true">Inbox</button>
+        <button class="tab" data-ltab="out" aria-pressed="false">Sent</button>
+      </div>
       <span class="grow"></span>
-      <button class="primary" id="letterNew" type="button">Write a letter</button>
+      <button class="primary" id="letterNew" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Write a letter</button>
     </div>
     <div id="letterView"></div>
   </div>
@@ -1200,10 +1254,16 @@
   const contacts = () => store.get("doorway.contacts") ?? {};
   const whoIs = addr => contacts()[String(addr).toLowerCase()] ? contacts()[String(addr).toLowerCase()] + ".csd" : CsdResolver.friendlyName(addr);
   const whenSaid = t => { const d = new Date(t); const days = (Date.now() - d) / DAY; return days < 1 ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], days < 300 ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" }); };
+  const LOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+  const BACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
+  const REPLY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v6"/></svg>';
+  const SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg>';
+  const ENVELOPE = '<svg class="art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="16" width="48" height="34" rx="5" fill="var(--accent-soft)"/><path d="M9 19l23 17 23-17"/><circle cx="48" cy="44" r="8" fill="var(--card)"/><rect x="44.5" y="43" width="7" height="5.5" rx="1" stroke-width="1.6"/><path d="M46 43v-1.6a2 2 0 0 1 4 0V43" stroke-width="1.6"/></svg>';
+  const avatar = addr => { const w = whoIs(addr); return `<span class="lav" style="background:${tint(String(addr))}">${esc(w.slice(0, 1).toUpperCase())}</span>`; };
   const letterSay = (t, html) => { if (html) $("letterStatus").innerHTML = t; else $("letterStatus").textContent = t; };
   function keepLetters(list) {
     const m = Object.fromEntries(held());
-    for (const l of list) m[l.id] = l;
+    for (const l of list) if (!(l.pending && m[l.id] && !m[l.id].pending)) m[l.id] = l;
     store.set("doorway.letters", m);
   }
   function lettersOf(tab) {
@@ -1252,16 +1312,16 @@
     }
     store.set("doorway.lout", still);
   }
-  async function writeRecords(node, tip, topic, uris) {
+  async function writeRecords(node, tip, topic, uris, step = letterSay) {
     remember(topic, uris);
     const asks = uris.map(u => LT.recordAsk(topic, u, tip));
     for (let waited = 0; ; waited += 15) {
-      try { return await LT.writeAll(node, wallet.key, asks, letterSay, noteSent); }
+      try { return await LT.writeAll(node, wallet.key, asks, step, noteSent); }
       catch (err) {
         if (!/Not enough CSD/.test(String(err && err.message)) || waited >= 270) throw err;
         const s = await W.spendable(node, wallet.address, inFlight()).catch(() => null);
         if (!s || !s.waiting.length || s.soon < LT.costOf(asks.length) + 0.01 * asks.length) throw err;
-        letterSay("Waiting for your last post to land, then sending…");
+        letterSay("Waiting a moment for your last post to go through, then sending…");
         await new Promise(r => setTimeout(r, 15_000));
       }
     }
@@ -1278,7 +1338,7 @@
       }
       store.set("doorway.letterbox2", { addr: wallet.address, at: Date.now(), seen: false });
       const nm = (store.get("doorway.names") ?? [])[0];
-      letterSay(`Opening your letterbox: it's open once all four parts are in blocks, in a few minutes. Then anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
+      letterSay(`Your letterbox is opening. It's ready in a few minutes, and then anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`);
       renderLetters(); setTimeout(showBalance, 3000); setTimeout(checkLetters, 180_000); setTimeout(checkLetters, 360_000);
     } catch (err) {
       const m = String(err && err.message || err);
@@ -1288,7 +1348,7 @@
   }
 
   function renderLetters() {
-    document.querySelectorAll("[data-ltab]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.ltab === ltab && !lview)));
+    document.querySelectorAll("[data-ltab]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.ltab === ltab)));
     const unread = lettersOf("in").filter(l => !lseen().has(l.id)).length;
     $("lettersNew").textContent = unread ? `${unread} new` : "";
     const v = $("letterView");
@@ -1296,11 +1356,13 @@
     if (lview) {
       const l = held().get(lview);
       if (!l) { lview = null; return renderLetters(); }
-      const me = wallet.address.toLowerCase(), mineSent = l.from === me;
-      v.innerHTML = `<div class="lread"><h3>${esc(l.subject || "(no subject)")}</h3>
-        <div class="meta">${mineSent ? `To ${esc(whoIs(l.to))}` : `From ${esc(whoIs(l.from))}`}, ${esc(new Date(l.at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }))}. Written with their key, checked here.</div>
-        <div class="text">${esc(l.body)}</div>
-        <div class="actions"><button type="button" id="lback">Back</button>${mineSent ? "" : `<button class="primary" type="button" id="lreply">Reply</button>`}</div></div>`;
+      const me = wallet.address.toLowerCase(), mineSent = l.from === me, other = mineSent ? l.to : l.from;
+      const answers = l.re && [...held().values()].find(x => x.conversation === l.conversation && LT.shortId(x) === l.re);
+      v.innerHTML = `<div class="lread">
+        <div class="head"><button class="lback" type="button" id="lback" aria-label="Back">${BACK}</button>${avatar(other)}
+          <div class="who"><b>${mineSent ? "To " : ""}${esc(whoIs(other))}</b><small>${esc(new Date(l.at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }))}</small></div></div>
+        <article class="lpaper"><h3>${esc(l.subject || "(no subject)")}</h3>${answers ? `<p class="re">In reply to “${esc(answers.subject || "(no subject)")}”</p>` : ""}<div class="text">${esc(l.body)}</div></article>
+        <div class="lfoot"><span class="lseal">${LOCK}${l.pending ? `On its way. ${esc(whoIs(other))} will have it in a minute or two.` : `Only you and ${esc(whoIs(other))} can read this.`}</span>${mineSent ? "" : `<button class="primary" type="button" id="lreply">${REPLY}Reply</button>`}</div></div>`;
       $("lback").onclick = () => { lview = null; renderLetters(); };
       if (!mineSent) $("lreply").onclick = () => openWrite({ to: l.from, subject: /^re:/i.test(l.subject) ? l.subject : `Re: ${l.subject}`, re: LT.shortId(l) });
       if (!lseen().has(l.id)) { store.set("doorway.lettersSeen", [...lseen(), l.id]); renderLetters(); }
@@ -1308,15 +1370,25 @@
     }
     const list = lettersOf(ltab), seen = lseen();
     if (!list.length) {
-      const closed = ltab === "in" && !boxOpen();
-      v.innerHTML = `<div class="empty" style="margin:14px;border:0">${ltab === "in" ? (closed ? `Nobody can write to you until your letterbox is open. <button type="button" class="link" id="lopen">Open it, for four posts' worth</button>` : "No letters yet. When someone writes to you, it shows up here.") : "You haven't written any letters yet."}</div>`;
-      if (closed) $("lopen").onclick = openBox;
+      const b = store.get("doorway.letterbox2"), mine = !!b && b.addr === wallet?.address;
+      const nm = (store.get("doorway.names") ?? [])[0], at = nm ? `${esc(nm)}.csd` : "your .csd name";
+      if (ltab === "in" && !boxOpen())
+        v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Open your letterbox</b><p>Before anyone can write to you, you need a letterbox. Opening it puts up a lock that only your key opens, so people can seal letters that only you can read. You do this once.</p><button class="primary" type="button" id="lopen">Open my letterbox</button><small>Four posts' worth, once.</small></div>`;
+      else if (ltab === "in" && mine && !b.seen)
+        v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Your letterbox is opening</b><p>It's ready in a few minutes. Then anyone can write to you at ${at}.</p><span class="going">Opening</span></div>`;
+      else if (ltab === "in")
+        v.innerHTML = `<div class="lempty">${ENVELOPE}<b>No letters yet</b><p>Anyone can write to you at ${at}. When they do, it shows up here.</p></div>`;
+      else
+        v.innerHTML = `<div class="lempty">${ENVELOPE}<b>Nothing sent yet</b><p>Write to someone by their .csd name. Only they can open it.</p></div>`;
+      if ($("lopen")) $("lopen").onclick = openBox;
       return;
     }
-    v.innerHTML = list.map(l => `<button class="lrow${ltab === "in" && !seen.has(l.id) ? " new" : ""}" type="button" data-l="${esc(l.id)}">
-      <span class="who">${esc(ltab === "in" ? whoIs(l.from) : whoIs(l.to))}</span>
-      <span class="subj"><b>${esc(l.subject || "(no subject)")}</b> ${esc(l.body.slice(0, 140))}</span>
-      <span class="when">${esc(whenSaid(l.at))}</span></button>`).join("");
+    v.innerHTML = list.map(l => {
+      const other = ltab === "in" ? l.from : l.to, isNew = ltab === "in" && !seen.has(l.id);
+      return `<button class="lrow${isNew ? " new" : ""}" type="button" data-l="${esc(l.id)}">${avatar(other)}
+        <span class="mid"><span class="ltop"><span class="who">${esc(whoIs(other))}</span>${l.pending ? `<span class="when going">Sending</span>` : `<span class="when">${esc(whenSaid(l.at))}</span>`}</span>
+        <span class="line"><b>${esc(l.subject || "(no subject)")}</b>  ${esc(l.body.slice(0, 160))}</span></span></button>`;
+    }).join("");
     v.querySelectorAll("[data-l]").forEach(b => b.onclick = () => { lview = b.dataset.l; renderLetters(); });
   }
   document.querySelectorAll("[data-ltab]").forEach(b => b.onclick = () => { ltab = b.dataset.ltab; lview = null; renderLetters(); });
@@ -1327,11 +1399,12 @@
     renderLetters();
     const v = $("letterView");
     const toSaid = to ? (contacts()[to.toLowerCase()] ? contacts()[to.toLowerCase()] + ".csd" : to) : "";
-    v.innerHTML = `<form class="lwrite" id="lform">
-      <input id="lto" placeholder="To: their .csd name" spellcheck="false" autocomplete="off" value="${esc(toSaid)}">
-      <input id="lsubj" placeholder="Subject" autocomplete="off" value="${esc(subject)}">
-      <textarea id="lbody" placeholder="Write your letter…"></textarea>
-      <div class="btns"><span class="hint" id="lcost"></span><button type="button" id="lcancel">Cancel</button><button class="primary" id="lsend">Send</button></div>
+    v.innerHTML = `<form class="lc" id="lform">
+      <div class="head"><b>${re ? "Reply" : "New letter"}</b><button class="lback" type="button" id="lcancel" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      <div class="lf"><label for="lto">To</label><input id="lto" placeholder="their name, like guestbook.csd" spellcheck="false" autocomplete="off" value="${esc(toSaid)}"></div>
+      <div class="lf"><label for="lsubj">Subject</label><input id="lsubj" autocomplete="off" value="${esc(subject)}"></div>
+      <div class="lpaper"><textarea id="lbody" placeholder="Dear…"></textarea></div>
+      <div class="lfoot"><span class="lseal">${LOCK}<span>Sealed on this computer. Only they can open it.</span></span><span class="lcost" id="lcost"></span><button class="primary" id="lsend">${SEND}<span>Send</span></button></div>
     </form>`;
     $(to ? "lbody" : "lto").focus();
     // what it costs: a post per ~330 characters, and four more, once, to start a conversation with
@@ -1340,18 +1413,20 @@
     const cost = () => {
       const bytes = new TextEncoder().encode(`${$("lsubj").value}\u001f${$("lbody").value}`).length + (re ? 8 : 0);
       const n = Math.max(1, Math.ceil(bytes / LT.NOTE_TEXT));
-      $("lcost").textContent = known() ? `${n === 1 ? "A post" : `${n} posts`}' worth.` : `${n + 4} posts' worth: ${n === 1 ? "one" : n} for the letter, and four, once, to start writing to someone new.`;
+      const m = known() ? n : n + 4;
+      $("lcost").textContent = `${m === 1 ? "1 post" : `${m} posts`}' worth`;
+      $("lcost").title = known() ? `${n === 1 ? "One post" : `${n} posts`}' worth: a post for every few hundred characters.` : `${n === 1 ? "One" : n} for the letter, and four, once, the first time you write to someone.`;
     };
     ["lto", "lsubj", "lbody"].forEach(id => $(id).addEventListener("input", cost)); cost();
     $("lcancel").onclick = () => { lview = null; letterSay(""); renderLetters(); };
     $("lform").onsubmit = async e => {
       e.preventDefault();
-      if (lbusy) return;
+      if (lbusy) return letterSay("Your last letter is still going out. Try again in a minute.");
       const toIn = $("lto").value.trim(), body = $("lbody").value, subject = $("lsubj").value.trim();
       if (!toIn) return letterSay("Who is it to? Their .csd name.");
       if (!body.trim()) return letterSay("The letter is empty.");
       // while it's sending, the form shows it: the button says so, and nothing in it can change
-      const busy = on => { const f = $("lform"); if (!f) return; f.classList.toggle("sending", on); $("lsend").disabled = on; $("lsend").textContent = on ? "Sending…" : "Send"; $("lcancel").disabled = on; ["lto", "lsubj", "lbody"].forEach(id => $(id).readOnly = on); };
+      const busy = on => { const f = $("lform"); if (!f) return; f.classList.toggle("sending", on); $("lsend").disabled = on; $("lsend").querySelector("span").textContent = on ? "Sending…" : "Send"; $("lcancel").disabled = on; ["lto", "lsubj", "lbody"].forEach(id => $(id).readOnly = on); };
       lbusy = true; busy(true);
       try {
         if (!wallet) await loadWallet();
@@ -1364,25 +1439,37 @@
           addr = String(o.owner).toLowerCase(); name = o.name;
         }
         if (addr === wallet.address.toLowerCase()) throw new Error("That's you.");
-        letterSay("Reading the network…");
+        letterSay("Getting it ready…");
         const r = await letterRecords();
         const convs = await LT.conversations(wallet.key, r.let);
         let conv = convs.filter(c => c.a === addr || c.b === addr).sort((x, y) => x.height - y.height)[0], uris = [];
         if (!conv) {
           const box = LT.letterboxes(r.box).get(addr);
-          if (!box && LT.letterboxesComing(r.box).has(addr)) throw new Error(`${name ? name + ".csd's" : "Their"} letterbox is still being opened: part of it is on the network, the rest goes in with the next block or two. Try again in a few minutes.`);
-          if (!box) throw new Error(`${name ? name + ".csd" : "They"} can't get letters yet: their letterbox isn't open. They can open it in Doorway, under Letters.`);
+          if (!box && LT.letterboxesComing(r.box).has(addr)) throw new Error(`${name ? name + ".csd is" : "They're"} still opening their letterbox. Try again in a few minutes.`);
+          if (!box) throw new Error(`${name ? name + ".csd" : "They"} can't get letters yet. They need to open their letterbox first, in Doorway under Letters.`);
           const o = await LT.openingUris(wallet.key, addr, box);
           conv = o.conversation; uris = o.uris;
         }
         uris.push(...await LT.noteUris(conv, { subject, body, ...(re ? { re } : {}) }));
-        letterSay("Sealing it for them and sending it…");
-        await writeRecords(r.node, r.tip, LT.LETTERS, uris);
-        if (name) store.set("doorway.contacts", { ...contacts(), [addr]: name });
-        lview = null; ltab = "out"; renderLetters();
-        letterSay(`Sent. ${name ? name + ".csd" : "They"} can read it once it's in a block, in a minute or two.`);
-        setTimeout(showBalance, 3000);
-        setTimeout(checkLetters, 150_000); setTimeout(checkLetters, 300_000);
+        letterSay("Sealing it and sending…");
+        // as soon as the first of it is out, it's in Sent, marked as on its way; it's put in its
+        // place by the network's copy once that's read back
+        const who = name ? name + ".csd" : "They";
+        let shown = false;
+        const show = async () => {
+          if (shown) return; shown = true;
+          if (name) store.set("doorway.contacts", { ...contacts(), [addr]: name });
+          const me = wallet.address.toLowerCase();
+          const mine = await LT.letters([conv], uris.map((uri, i) => ({ id: "local" + i, proposer: me, uri, height: r.tip + 1, pos: i }))).catch(() => []);
+          keepLetters(mine.map(l => ({ ...l, pending: true })));
+          lview = null; ltab = "out"; renderLetters();
+          letterSay(`Sent. ${who === "They" ? "They'll" : who + " will"} have it in a minute or two.`);
+          setTimeout(showBalance, 3000);
+          setTimeout(checkLetters, 150_000); setTimeout(checkLetters, 300_000);
+        };
+        try { await writeRecords(r.node, r.tip, LT.LETTERS, uris, () => show()); }
+        catch (err) { if (!shown) throw err; console.warn("letters:", err); } // the rest is sent again by itself
+        await show();
       } catch (err) {
         const m = String(err && err.message || err);
         if (/Not enough CSD/.test(m)) needMore($("letterStatus"), "There isn't enough left to send it."); else letterSay(m);
@@ -1398,7 +1485,7 @@
       const r = await letterRecords(), me = wallet.address.toLowerCase();
       const prev = store.get("doorway.letterbox2");
       if (LT.letterboxes(r.box).has(me)) {
-        if (!prev?.seen && /Opening your letterbox/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`); }
+        if (!prev?.seen && /letterbox is opening/.test($("letterStatus").textContent)) { const nm = (store.get("doorway.names") ?? [])[0]; letterSay(`Your letterbox is open. Anyone can write to you${nm ? " at " + nm + ".csd" : " once you have a .csd name"}.`); }
         store.set("doorway.letterbox2", { addr: wallet.address, at: prev?.at ?? Date.now(), seen: true });
       }
       else if (prev?.seen) store.set("doorway.letterbox2", { ...prev, seen: false });

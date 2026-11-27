@@ -94,7 +94,7 @@ ok(L.costOf(4) === 1 && L.costOf(1) === 0.25, "a record costs a post (0.25)");
   ok(made === 4, "the first write also makes a coin for each of the other four");
   ok(submitted.slice(1).every((t: any) => t.inputs.length === 1), "each of the others spends just its own coin, so they can all go in the same block");
   ok(submitted.every((t: any) => t.app.Propose && t.app.Propose.domain === L.LETTERS), "every write is a letters record");
-  ok(steps.some(s => /next block/.test(s)), "it says the rest go with the next block");
+  ok(steps.some(s => /On its way/.test(s)), "it says it's on its way once the first is out");
   void me;
 }
 
