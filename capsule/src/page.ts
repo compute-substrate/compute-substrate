@@ -53,7 +53,7 @@ function waitingHtml(id: string) {
     <p class="count">Opens in <b id="countdown"></b></p>
   </section>
   <section class="card">
-    <div class="row"><h3>What we'll watch</h3><span class="small">The most backed suggestion plays when it opens.</span></div>
+    <div class="row"><h3>Suggestions this week</h3><span class="small">One is drawn the moment it opens. Backing one gives it another chance.</span></div>
     <div id="picks" class="picks"><p class="small">Reading this week's suggestions…</p></div>
     <form id="suggest" class="suggest">
       <input id="link" placeholder="Suggest a video: paste a YouTube link" autocomplete="off" spellcheck="false" aria-label="A YouTube link">
@@ -98,24 +98,42 @@ function wire(c: { id: string; open: boolean }) {
 
 async function picksOf(id: string) {
   const [ps, backing] = await Promise.all([readChecked(S.picksTopic(id), 200), net.api.resonanceIn(S.picksTopic(id)).catch(() => ({} as Record<string, number>))]);
-  const list = ps.map(p => ({ ...p, pick: S.parsePick(p.text), backers: backing[p.id.toLowerCase()] ?? 0 })).filter(p => p.pick && p.time < S.openAt(id));
-  // one row per video: its earliest suggestion, with everyone's backing of any of them
-  const byVideo = new Map<string, typeof list[number]>();
-  for (const p of list.sort((a, b) => a.time - b.time)) {
-    const had = byVideo.get(p.pick!.video);
-    if (had) had.backers += p.backers; else byVideo.set(p.pick!.video, { ...p });
-  }
-  return { rows: [...byVideo.values()].sort((a, b) => b.backers - a.backers || a.time - b.time), chosen: S.chosen(id, ps, backing) };
+  const cands = S.candidates(id, ps.filter(p => !p.pending), backing);
+  const mine = ps.filter(p => p.pending).map(p => S.parsePick(p.text)).filter(Boolean) as { video: string; title: string }[];
+  return { cands, total: cands.reduce((s, c) => s + c.chances, 0), mine };
+}
+
+// the week's video, drawn with the first block at or after the opening (null until that block
+// exists); a capsule's draw is remembered here once made, since it never changes
+const blocks = new Map<number, Promise<{ time: number; hash: string }>>();
+const blockAt = (h: number) => {
+  let b = blocks.get(h);
+  if (!b) { b = fetch(`${net.node}/block/height/${h}`).then(r => r.json()).then(j => ({ time: Number(j.header?.time ?? 0), hash: String(j.hash ?? "") })); b.catch(() => blocks.delete(h)); blocks.set(h, b); }
+  return b;
+};
+async function drawn(id: string): Promise<{ pending: true } | { pending: false; video: S.Candidate | null; of: number; height: number }> {
+  const kept = (() => { try { return JSON.parse(localStorage.getItem(`capsule.drawn.${id}`) ?? "null"); } catch { return null; } })();
+  if (kept) return kept;
+  const tip = (await net.api.tip()).height;
+  const ob = await S.openingBlock(id, tip, blockAt);
+  if (!ob) return { pending: true };
+  const { cands } = await picksOf(id);
+  const out = { pending: false as const, video: S.draw(cands, await S.rollOf(ob.hash, id)), of: cands.length, height: ob.height };
+  // kept once the block is a few deep, so a reorganisation of the newest blocks can't leave it stale
+  if (tip - ob.height >= 6) try { localStorage.setItem(`capsule.drawn.${id}`, JSON.stringify(out)); } catch {}
+  return out;
 }
 
 async function drawWaiting(id: string) {
   try {
-    const { rows } = await picksOf(id);
+    const { cands, total, mine } = await picksOf(id);
     if (!$("picks")) return;
-    $("picks").innerHTML = rows.length ? rows.map((p, i) => `<div class="pick${i === 0 ? " top" : ""}">
-      <img src="${thumb(p.pick!.video)}" alt="" loading="lazy">
-      <div class="what"><b>${esc(p.pick!.title || "A video")}</b><span class="small">${i === 0 ? "Plays on Sunday if it stays on top. " : ""}${p.backers} backer${p.backers === 1 ? "" : "s"}, suggested by ${esc(who(p.author))}${p.pending ? " (on its way)" : ""}</span></div>
-      ${p.pending ? "" : `<button class="quiet" data-back="${p.id}">Back it</button>`}</div>`).join("")
+    const rows = [...cands].sort((a, b) => b.chances - a.chances || a.first.time - b.first.time);
+    $("picks").innerHTML = rows.length || mine.length ? [...rows.map(c => `<div class="pick">
+      <img src="${thumb(c.video)}" alt="" loading="lazy">
+      <div class="what"><b>${esc(c.title || "A video")}</b><span class="small">${c.chances} chance${c.chances === 1 ? "" : "s"} of ${total}, suggested by ${esc(who(c.first.author))}</span></div>
+      <button class="quiet" data-back="${c.first.id}">Back it</button></div>`),
+      ...mine.filter(m => !cands.some(c => c.video === m.video)).map(m => `<div class="pick"><img src="${thumb(m.video)}" alt="" loading="lazy"><div class="what"><b>${esc(m.title || "A video")}</b><span class="small">Your suggestion, on its way</span></div></div>`)].join("")
       : `<p class="small">Nothing suggested yet for this Sunday. Suggest something to watch together.</p>`;
     $("picks").querySelectorAll<HTMLButtonElement>("[data-back]").forEach(b => b.onclick = async () => {
       b.disabled = true; say("pickSaid", "Backing it…");
@@ -129,15 +147,19 @@ async function drawWaiting(id: string) {
 let playing = "";
 async function drawOpen(id: string) {
   try {
-    const [{ chosen }, lines] = await Promise.all([picksOf(id), readChecked(S.saidTopic(id), 500)]);
+    const [d, lines] = await Promise.all([drawn(id), readChecked(S.saidTopic(id), 500)]);
     if (!$("screen")) return;
-    if (chosen && playing !== `${id}:${chosen.video}`) {
+    const chosen = d.pending ? null : d.video;
+    if (d.pending && playing !== `${id}:drawing`) {
+      playing = `${id}:drawing`;
+      $("screen").innerHTML = `<div class="empty-screen"><p>Drawing this week's video…</p><p class="small">It's revealed with the network's first block after ${esc(local(S.openAt(id), { hour: "2-digit", minute: "2-digit" }))}, in a minute or two.</p></div>`;
+    } else if (chosen && playing !== `${id}:${chosen.video}`) {
       playing = `${id}:${chosen.video}`;
       // everyone at the same moment of it: started as far in as the capsule has been open
       const at = Math.max(0, now() - S.openAt(id));
       $("screen").innerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${chosen.video}?autoplay=1&start=${at}&rel=0" title="${esc(chosen.title || "This week's video")}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
-        <p class="small caption">${esc(chosen.title || "This week's video")}, chosen by ${chosen.backers} backer${chosen.backers === 1 ? "" : "s"}.</p>`;
-    } else if (!chosen && playing !== `${id}:none`) {
+        <p class="small caption">${esc(chosen.title || "This week's video")}, drawn from ${(d as any).of} suggestion${(d as any).of === 1 ? "" : "s"} the moment it opened.</p>`;
+    } else if (!d.pending && !chosen && playing !== `${id}:none`) {
       playing = `${id}:none`;
       $("screen").innerHTML = `<div class="empty-screen"><p>Nobody picked a video this week.</p><p class="small">Just talk, then. Suggest something for next Sunday after it closes.</p></div>`;
     }
@@ -153,15 +175,16 @@ async function drawPast() {
   if (!ids.length) { $("past").innerHTML = `<p class="small">The first capsule opens on ${esc(dayTime(S.FIRST))}. After that, every one stays here: what was watched, and what was said.</p>`; return; }
   if (viewing) return drawOne(viewing);
   const rows = await Promise.all(ids.slice(0, 20).map(async id => {
-    const [{ chosen }, lines] = await Promise.all([picksOf(id).catch(() => ({ chosen: null })), net.read(S.saidTopic(id), { limit: 500, check: false }).catch(() => [])]);
-    return { id, chosen, n: lines.filter(l => S.inWindow(id, l.time)).length };
+    const [d, lines] = await Promise.all([drawn(id).catch(() => ({ pending: true as const })), net.read(S.saidTopic(id), { limit: 500, check: false }).catch(() => [])]);
+    return { id, chosen: d.pending ? null : d.video, n: lines.filter(l => S.inWindow(id, l.time)).length };
   }));
   $("past").innerHTML = rows.map(r => `<button class="past" data-id="${r.id}">${r.chosen ? `<img src="${thumb(r.chosen.video)}" alt="" loading="lazy">` : `<span class="noimg"></span>`}
     <span class="what"><b>${esc(local(S.openAt(r.id), { day: "numeric", month: "long", year: "numeric" }))}</b><span class="small">${r.chosen ? esc(r.chosen.title || "A video") : "No video"}, ${r.n} line${r.n === 1 ? "" : "s"} said</span></span></button>`).join("");
   $("past").querySelectorAll<HTMLButtonElement>("[data-id]").forEach(b => b.onclick = () => { viewing = b.dataset.id!; drawOne(viewing); });
 }
 async function drawOne(id: string) {
-  const [{ chosen }, lines] = await Promise.all([picksOf(id), readChecked(S.saidTopic(id), 500)]);
+  const [d, lines] = await Promise.all([drawn(id), readChecked(S.saidTopic(id), 500)]);
+  const chosen = d.pending ? null : d.video;
   const said = lines.filter(l => S.inWindow(id, l.time)).sort((a, b) => a.time - b.time);
   $("past").innerHTML = `<div class="one"><button class="quiet" id="back">All capsules</button>
     <h3>${esc(local(S.openAt(id), { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}</h3>

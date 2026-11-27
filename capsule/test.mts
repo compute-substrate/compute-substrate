@@ -18,8 +18,18 @@ const picks = [
   { id: "0xc", text: S.pickText("ccccccccccc", "C"), time: open + 10 },
   { id: "0xd", text: "not a pick", time: open - 100 },
 ];
-ok(S.chosen("2026-11-29", picks, { "0xb": 3, "0xa": 3, "0xc": 50 })?.video === "aaaaaaaaaaa", "the most backed before opening wins, the earliest on a tie, and late ones don't count");
-ok(S.chosen("2026-11-29", picks, { "0xb": 4 })?.video === "bbbbbbbbbbb", "more backing wins");
-ok(S.chosen("2026-11-29", [], {}) === null, "nothing suggested: nothing chosen");
+const cands = S.candidates("2026-11-29", [...picks, { id: "0xe", text: S.pickText("aaaaaaaaaaa", ""), time: open - 1000 }], { "0xa": 2, "0xb": 1, "0xc": 50 });
+ok(cands.length === 2 && cands.find(c => c.video === "aaaaaaaaaaa")!.chances === 4 && cands.find(c => c.video === "bbbbbbbbbbb")!.chances === 2, "chances: one per suggestion and one per backer, per video; late ones and non-videos aren't in it");
+const counts: Record<string, number> = {};
+for (let i = 0n; i < 6000n; i++) { const c = S.draw(cands, i * 7919n)!; counts[c.video] = (counts[c.video] ?? 0) + 1; }
+ok(Math.abs(counts["aaaaaaaaaaa"] / 6000 - 4 / 6) < 0.02, "a video with twice the chances is drawn about twice as often");
+ok(S.draw([], 5n) === null, "nothing suggested: nothing drawn");
+const r1 = await S.rollOf("0xABCD", "2026-11-29"), r2 = await S.rollOf("abcd", "2026-11-29"), r3 = await S.rollOf("abcd", "2026-12-06");
+ok(r1 === r2 && r1 !== r3, "the roll is the same for everyone from the same block, and differs week to week");
+// the opening block, from block times (one steps back a little after the opening)
+const times = [open - 400, open - 280, open - 150, open - 20, open + 90, open + 60, open + 200, open + 330];
+const blk = async (h: number) => ({ time: times[h], hash: "0x" + h });
+ok((await S.openingBlock("2026-11-29", 7, blk))?.height === 4, "the opening block is the first at or after the opening time");
+ok((await S.openingBlock("2026-11-29", 3, blk)) === null, "and there's none until a block reaches it");
 ok(S.inWindow("2026-11-29", open + 60) && S.inWindow("2026-11-29", S.closeAt("2026-11-29") + 120) && !S.inWindow("2026-11-29", open - 1) && !S.inWindow("2026-11-29", S.closeAt("2026-11-29") + 3600), "what's said counts while open, and if it lands just after");
 if (f) process.exit(1); console.log("all capsule checks passed");

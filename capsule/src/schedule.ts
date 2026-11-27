@@ -63,16 +63,50 @@ export function parsePick(text: string): { video: string; title: string } | null
   return m ? { video: m[1], title: (m[2] ?? "").trim() } : null;
 }
 
-// The week's video: the most backed suggestion in a block before opening (the earliest, on a tie)
-export function chosen<T extends { text: string; time: number; id: string }>(id: string, picks: T[], backing: Record<string, number>): (T & { video: string; title: string; backers: number }) | null {
-  let best: (T & { video: string; title: string; backers: number }) | null = null;
-  for (const p of picks) {
+// The week's video is drawn when the capsule opens, so nobody knows it in advance: every video
+// suggested in a block before opening is in the draw, with one chance for being suggested and one
+// more for each backer. The draw uses the fingerprint (hash) of the network's first block at or
+// after the opening time, which doesn't exist until then; everyone computes the same draw from the
+// same block, and anyone can check it afterwards.
+export type Candidate = { video: string; title: string; chances: number; first: { id: string; time: number; author?: string } };
+export function candidates<T extends { text: string; time: number; id: string; author?: string }>(id: string, picks: T[], backing: Record<string, number>): Candidate[] {
+  const by = new Map<string, Candidate>();
+  for (const p of [...picks].sort((a, b) => a.time - b.time || a.id.localeCompare(b.id))) {
     const v = parsePick(p.text);
     if (!v || !(p.time < openAt(id))) continue;
-    const b = backing[p.id.toLowerCase()] ?? 0;
-    if (!best || b > best.backers || (b === best.backers && p.time < best.time)) best = { ...p, ...v, backers: b };
+    const c = by.get(v.video);
+    const more = 1 + (backing[p.id.toLowerCase()] ?? 0);
+    if (c) { c.chances += more; if (!c.title && v.title) c.title = v.title; }
+    else by.set(v.video, { video: v.video, title: v.title, chances: more, first: { id: p.id, time: p.time, author: p.author } });
   }
-  return best;
+  return [...by.values()].sort((a, b) => (a.video < b.video ? -1 : a.video > b.video ? 1 : 0));
+}
+
+// The draw: `roll` is a number from the opening block's fingerprint (see rollOf), the same for everyone
+export function draw(cands: Candidate[], roll: bigint): Candidate | null {
+  const total = cands.reduce((s, c) => s + c.chances, 0);
+  if (!total) return null;
+  let r = Number(roll % BigInt(total));
+  for (const c of cands) { if (r < c.chances) return c; r -= c.chances; }
+  return null;
+}
+// a number from the opening block's hash and the capsule's id: sha256 of both, its first 8 bytes
+export async function rollOf(blockHash: string, id: string): Promise<bigint> {
+  const data = new TextEncoder().encode(`capsule ${id} ${blockHash.toLowerCase().replace(/^0x/, "")}`);
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+  return d.slice(0, 8).reduce((n, b) => (n << 8n) | BigInt(b), 0n);
+}
+
+// The opening block: the lowest height whose time is at or after the opening, given a way to read
+// a block's time and hash and the tip. Null until such a block exists.
+export async function openingBlock(id: string, tip: number, block: (h: number) => Promise<{ time: number; hash: string }>): Promise<{ height: number; hash: string } | null> {
+  const open = openAt(id);
+  if ((await block(tip)).time < open) return null;
+  let lo = 0, hi = tip;
+  while (lo < hi) { const mid = Math.floor((lo + hi) / 2); if ((await block(mid)).time >= open) hi = mid; else lo = mid + 1; }
+  // block times can step back a little: walk back to the first block of this run at or after it
+  for (let i = 0; i < 30 && lo > 0 && (await block(lo - 1)).time >= open; i++) lo--;
+  return { height: lo, hash: (await block(lo)).hash };
 }
 
 // What was said in a capsule: in a block while it was open, or just after
