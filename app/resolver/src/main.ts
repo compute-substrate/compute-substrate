@@ -254,3 +254,4 @@ export { packFolder } from "./pack";
 export * as wallet from "./wallet";
 export * as letters from "./letters";
 export { friendlyName } from "../../../kit/src/friendly";
+export * as pages from "./pages";

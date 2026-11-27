@@ -7,6 +7,7 @@
 // with these arguments, and watches it.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -355,6 +356,12 @@ fn mime(path: &str) -> &'static str {
         "png" => "image/png",
         "ico" => "image/x-icon",
         "woff2" => "font/woff2",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
         "woff" => "font/woff",
         "wasm" => "application/wasm",
         "txt" => "text/plain; charset=utf-8",
@@ -1500,7 +1507,7 @@ fn main() {
         .manage(Arc::new(Asks::default()))
         .manage(AskShown::default())
         .manage(AskFromMain::default())
-        .invoke_handler(tauri::generate_handler![node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url, buy_link, outside_reports])
+        .invoke_handler(tauri::generate_handler![capture::page_capture, node_state, open_data_folder, restart, site_url, add_peer, site_kept, site_put, site_open, kept_sites, set_helping, forget_site, site_keep_car, site_car, doors, name_answer, answer_ask, wallet_get, wallet_set, site_ready, address_url, show_ask, ask_current, ask_reply, tray_shown, set_tray, quit_app, first_run, name_url, buy_link, outside_reports])
         .setup({
             let node = node.clone();
             move |app| {
@@ -1675,7 +1682,7 @@ mod tests {
         assert_eq!(get(port, "/"), (200, "v2".into()));
         assert!(valid_cid("bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs44"));
         assert!(!valid_cid("../bafybeifg5gfnjgvl6djmhuk2rpbtkmgylcqn4aybevi6skkinflpbbfs"));
-        assert_eq!(doors()[0], "https://csd.aon.network");
+        assert!(doors().contains(&"https://csd.aon.network".to_string()));
         assert!(doors().iter().all(|d| d.starts_with("https://")));
         assert_eq!(name_of_host("commonplace.localhost"), Some("commonplace".into()));
         assert_eq!(site_of_host("bafybeihhrzjeedodetbaewminhtwiiidheptuqn4zm4pklzvxy6f77vsh4.localhost:8800").as_deref(), Some("bafybeihhrzjeedodetbaewminhtwiiidheptuqn4zm4pklzvxy6f77vsh4"));

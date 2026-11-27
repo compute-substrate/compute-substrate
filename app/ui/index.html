@@ -236,6 +236,30 @@
   .ask #addNo { background: var(--line); color: var(--ink); }
   button.add { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
   .years { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* Kept pages: a link pasted in, a copy saved as it stands, and the list of what's been kept here */
+  .kp { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
+  .kp form { display: flex; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+  .kp form input { flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; -webkit-user-select: text; user-select: text; }
+  .kp form input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .kp button:disabled { opacity: .55; cursor: default; }
+  .kpnow { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+  .kpnow:empty { display: none; }
+  .kpnow .said { margin: 0; font-size: 13px; line-height: 1.55; }
+  .kpnow .said b { font-weight: 650; }
+  .kpnow .going { color: var(--busy); display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13px; }
+  .kpnow .going::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+  .kpnow .row2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .kpnow .row2 .grow { flex: 1; }
+  .kpnow .before { background: var(--bg); border-radius: 10px; padding: 10px 12px; font-size: 13px; color: var(--muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .kpnow .before span { flex: 1; min-width: 200px; }
+  .kprow { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+  .kprow:last-child { border-bottom: 0; }
+  .kprow .pg { width: 34px; height: 40px; flex: none; border-radius: 5px; background: var(--paper, #fffdf8); border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); }
+  .kprow .pg svg { width: 16px; height: 16px; }
+  .kprow .what { flex: 1; min-width: 0; }
+  .kprow .what b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kprow .what small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kpempty { padding: 16px; color: var(--muted); font-size: 13px; text-align: center; }
   .years button { border-radius: 999px; padding: 8px 14px; font: 600 13px var(--display); }
   .years button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
   .tile .life { color: var(--accent); }
@@ -311,6 +335,14 @@
   </div>
   <p class="hint" id="regStatus" hidden style="margin:10px 4px 0"></p>
   <p class="note"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.4C.9 8 3 4.5 6.6 4.5c2.1 0 3.6 1.2 4.4 2.5.8-1.3 2.3-2.5 4.4-2.5 3.6 0 5.7 3.5 4.2 7.1C19.5 16.4 12 21 12 21z"/></svg>Heart a site to help keep it up from this computer. The hourglass keeps it up for years, on the doors, and anyone can add time.</p>
+  <h2 style="margin-top:22px">Kept pages</h2>
+  <p class="hint" style="margin:-4px 4px 10px;font-size:13px;line-height:1.55;max-width:62ch">Save a copy of any page on the web, as it is right now, so it can't disappear or be quietly changed. Paste its link. The copy is kept on the doors for years, and anyone can open it.</p>
+  <div class="kp">
+    <form id="kpForm"><input id="kpUrl" placeholder="Paste a link, like https://…" spellcheck="false" autocomplete="off" aria-label="A page's link"><button class="primary" id="kpGo">Keep</button></form>
+    <div class="kpnow" id="kpNow"></div>
+    <div id="kpList"></div>
+  </div>
+
   <div id="discoverBox" hidden>
     <h2 style="margin-top:22px">Discover</h2>
     <p class="hint" style="margin:-4px 4px 10px">Sites people recommend, with a star. Nobody keeps this list: it's read from the network.</p>
@@ -757,6 +789,9 @@
         renderSites();
       })();
     }
+    const pagesHere = new Set((store.get("doorway.keptPages") ?? []).map(k => k.cid));
+    const everything = list;
+    list = list.filter(x => !pagesHere.has(x.cid) || x.names.length);
     list.sort((a, b) => (b.carried - a.carried) || (a.title ?? a.names[0] ?? "").localeCompare(b.title ?? b.names[0] ?? ""));
     $("sites").innerHTML = list.map((x, i) => {
       const title = x.title || (x.carried ? "Commonplace" : x.names[0] ? x.names[0][0].toUpperCase() + x.names[0].slice(1) : "Your site");
@@ -801,7 +836,7 @@
     // its first hand-over missed, and nobody else could open it.)
     const all = Date.now() - seededAt > (seededAt === 0 ? 3_000 : 6 * 3_600_000);
     if (all) seededAt = Date.now();
-    const due = list.filter(x => (x.helping || x.names.length) && (all || (!x.carried && !onDoors.get(x.cid) && Date.now() - (triedAt.get(x.cid) ?? 0) > 10 * 60_000)));
+    const due = everything.filter(x => (x.helping || x.names.length || pagesHere.has(x.cid)) && (all || (!x.carried && !onDoors.get(x.cid) && Date.now() - (triedAt.get(x.cid) ?? 0) > 10 * 60_000)));
     if (due.length) {
       for (const x of due) { triedAt.set(x.cid, Date.now()); await seed(x.cid); }
       renderSites();
@@ -1106,7 +1141,7 @@
   const lifeOf = cid => { const u = keptInfo?.until.get(cid); return u && u > keptInfo.tip ? yearOf(u) : null; };
   // when it runs out, to the month (a day or time would be a precision a keep doesn't have)
   const lifeSaid = (cid, short) => { const u = keptInfo?.until.get(cid); return u && u > keptInfo.tip ? W.monthYear(W.heightToDate(u, keptInfo.tip), short) : null; };
-  async function refreshKept() { try { keptInfo = await W.kept(await readingNode()); renderSites(); renderDiscover(); } catch {} }
+  async function refreshKept() { try { keptInfo = await W.kept(await readingNode()); renderSites(); renderDiscover(); renderKept(); } catch {} }
   setTimeout(refreshKept, 2000);
   setInterval(refreshKept, 10 * 60_000);
   function keepDialog(cid, title, forget) {
@@ -1527,6 +1562,170 @@
   }
   setTimeout(() => { renderLetters(); checkLetters(); }, 4000);
   setInterval(checkLetters, 10 * 60_000);
+  // ── Kept pages ───────────────────────────────────────────────────────────────────────────────
+  // A page from the ordinary web, saved as it stands (capture.rs: a private, signed-out window, so
+  // it's the page anyone would see), packed as a site and kept up like one, with a record saying
+  // which address it's a copy of (resolver/src/pages.ts), so anyone can find it by that address.
+  const PG = CsdResolver.pages;
+  const PAGE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>';
+  const keptPages = () => store.get("doorway.keptPages") ?? [];
+  const shortUrl = u => { try { const x = new URL(u); return (x.host.replace(/^www\./, "") + (x.pathname === "/" ? "" : x.pathname) + x.search).slice(0, 90); } catch { return u; } };
+  const keptWhen = at => new Date(at).toLocaleString([], { day: "numeric", month: "short", year: "numeric" });
+  let kpBusy = false, kpReady = null; // kpReady: a copy saved and packed, waiting to be kept
+  const kpSay = html => { $("kpNow").innerHTML = html; };
+  listen("keep-step", e => { if (kpBusy && !kpReady) kpSay(`<span class="going">${esc(e.payload)}</span>`); });
+
+  function renderKept() {
+    const list = keptPages().slice().sort((a, b) => b.at - a.at);
+    $("kpList").innerHTML = list.length ? list.map((k, i) => `<div class="kprow"><span class="pg">${PAGE}</span>
+      <span class="what"><b>${esc(k.title || shortUrl(k.url))}</b><small>${esc(shortUrl(k.url))}, kept ${esc(keptWhen(k.at))}${lifeOf(k.cid) ? `, until ${esc(lifeSaid(k.cid, true))}` : ""}${k.noted ? "" : ", on its way"}</small></span>
+      <button type="button" data-kpopen="${i}">Open</button></div>`).join("")
+      : `<div class="kpempty">Pages you keep show up here.</div>`;
+    $("kpList").querySelectorAll("[data-kpopen]").forEach(b => b.onclick = () => openAddress(list[+b.dataset.kpopen].cid));
+  }
+
+  // the copy, made into a site: the page's own HTML with a line at the top saying what it is, and a
+  // note (kept.json) of where it came from and when
+  function keptSite(head, files, url) {
+    const at = new Date();
+    const from = head.url || url;
+    const when = at.toLocaleString("en-GB", { dateStyle: "long", timeStyle: "short", timeZone: "UTC" }) + " UTC";
+    const bar = `<div style="all:initial;display:block;box-sizing:border-box;width:100%;padding:9px 16px;background:#24201c;color:#f2ece4;font:13px/1.45 -apple-system,'Segoe UI',system-ui,sans-serif;position:relative;z-index:2147483647">A kept copy of <a href="${esc(from)}" style="all:initial;color:#7fcbb0;text-decoration:underline;cursor:pointer;font:inherit">${esc(shortUrl(from))}</a>, as it was on ${esc(when)}. Nobody can change this copy. The page itself may have changed since.</div>`;
+    const meta = `<meta name="csd-kept" content="${esc(PG.pageKey(url))} ${at.toISOString()}">`;
+    let html = new TextDecoder().decode(files.get("index.html"));
+    html = /<body\b[^>]*>/i.test(html) ? html.replace(/<body\b[^>]*>/i, m => m + bar) : bar + html;
+    html = /<head\b[^>]*>/i.test(html) ? html.replace(/<head\b[^>]*>/i, m => m + meta) : meta + html;
+    const out = new Map(files);
+    out.set("index.html", new TextEncoder().encode(html));
+    out.set("kept.json", new TextEncoder().encode(JSON.stringify({ url: PG.pageKey(url), from, title: head.title, at: at.toISOString() }, null, 1)));
+    return { files: out, at: at.getTime() };
+  }
+
+  async function keepPage(input, again) {
+    if (kpBusy) return;
+    let url, key;
+    try { url = new URL(input.trim()).href; key = PG.pageKey(url); } catch { kpSay(`<p class="said">That isn't a link to a page. Copy it from your browser's address bar.</p>`); return; }
+    if (PG.isPrivate(url)) { kpSay(`<p class="said">That's a page on this computer or your own network, so nobody else could open a copy of it.</p>`); return; }
+    kpBusy = true; kpReady = null; $("kpGo").disabled = true;
+    try {
+      // copies already kept, by anyone: shown first, so nobody pays for one that's already there
+      if (!again) {
+        kpSay(`<span class="going">Looking for copies already kept…</span>`);
+        const node = await readingNode();
+        const had = await PG.copiesOf(node, url).catch(() => []);
+        if (had.length) {
+          const tip = (await (await fetch(node + "/tip")).json()).height;
+          const last = had[0], mine = wallet && last.by === wallet.address.toLowerCase();
+          kpSay(`<div class="before"><span>${had.length === 1 ? "Someone has kept this page before" : `This page has been kept ${had.length} times`}, last on ${esc(keptWhen(W.heightToDate(last.height, tip)))}${mine ? ", by you" : ""}.</span><button type="button" id="kpLast">Open that copy</button></div>
+            <div class="row2"><span class="grow hint" style="margin:0">Or keep it again, as it is now.</span><button class="primary" type="button" id="kpAgain">Keep it as it is now</button></div>`);
+          $("kpLast").onclick = () => openAddress(last.cid);
+          $("kpAgain").onclick = () => { kpBusy = false; $("kpGo").disabled = false; keepPage(input, true); };
+          kpBusy = false; $("kpGo").disabled = false;
+          return;
+        }
+      }
+      kpSay(`<span class="going">Opening it in a private window…</span>`);
+      const buf = new Uint8Array(await invoke("page_capture", { url }));
+      const hl = new DataView(buf.buffer, buf.byteOffset).getUint32(0, true);
+      const head = JSON.parse(new TextDecoder().decode(buf.subarray(4, 4 + hl)));
+      const raw = new Map();
+      let o = 4 + hl;
+      for (const f of head.files) { raw.set(f.path, buf.slice(o, o + f.size)); o += f.size; }
+      kpSay(`<span class="going">Packing the copy…</span>`);
+      const { files, at } = keptSite(head, raw, url);
+      const packed = await CsdResolver.packFolder([...files].map(([path, b]) => ({ path, bytes: async () => b })));
+      for (const [path, b] of files) await invoke("site_put", b, { headers: { "x-cid": packed.cid, "x-path": encodeURIComponent(path) } });
+      await invoke("site_ready", { cid: packed.cid });
+      await invoke("site_keep_car", packed.car, { headers: { "x-cid": packed.cid } });
+      kpReady = { cid: packed.cid, url: key, title: head.title || "", at, bytes: packed.bytes, missing: head.missing ?? 0 };
+      askYears();
+    } catch (err) {
+      kpSay(`<p class="said">Couldn't keep it: ${esc(String(err && err.message || err))}</p>`);
+    }
+    kpBusy = false; $("kpGo").disabled = false;
+  }
+
+  // the copy is ready: how long to keep it, then keep it
+  function askYears() {
+    const k = kpReady, from = new Date().getFullYear();
+    const choices = [1, 5, 25, 2100 - from];
+    let years = 5;
+    const show = () => {
+      const posts = years + 1;
+      const mb = k.bytes / 1048576;
+      kpSay(`<p class="said">Ready: <b>${esc(k.title || shortUrl(k.url))}</b>, saved as it is now (${mb < 0.1 ? "under 0.1" : mb.toFixed(1)} MB${k.missing ? `, with ${k.missing} picture${k.missing === 1 ? "" : "s"} or file${k.missing === 1 ? "" : "s"} it couldn't get` : ""}). <button type="button" class="add" id="kpLook">Look at it first</button></p>
+        <div class="years">${choices.map(y => `<button type="button" data-y="${y}" aria-pressed="${y === years}">${from + y === 2100 ? "Until 2100" : `${y} year${y === 1 ? "" : "s"}`}</button>`).join("")}</div>
+        <div class="row2"><span class="grow hint" style="margin:0">Kept until ${from + years}, for ${postsSaid(posts * 0.25)}' worth. Nobody is paid for keeping it: it's set aside for good.</span><button type="button" id="kpDrop">Don't keep it</button><button class="primary" type="button" id="kpYes">Keep it</button></div>`);
+      $("kpNow").querySelectorAll("[data-y]").forEach(b => b.onclick = () => { years = +b.dataset.y; show(); });
+      $("kpLook").onclick = () => openAddress(k.cid);
+      $("kpDrop").onclick = async () => { kpReady = null; kpSay(""); await invoke("forget_site", { cid: k.cid }).catch(() => {}); };
+      $("kpYes").onclick = () => commitKept(years);
+    };
+    show();
+  }
+
+  async function commitKept(years) {
+    const k = kpReady;
+    if (!k || kpBusy) return;
+    kpBusy = true;
+    ["kpYes", "kpDrop"].forEach(id => $(id) && ($(id).disabled = true));
+    $("kpNow").querySelector(".row2 .grow").textContent = "Keeping it…";
+    try {
+      if (!wallet) await loadWallet();
+      const node = await readingNode();
+      let tip = (await (await fetch(node + "/tip")).json()).height;
+      await send(node, wallet.key, W.keepAsk(k.cid, years, tip), () => { $("kpNow").querySelector(".row2 .grow").textContent = "Waiting a moment for your last post to go through…"; });
+      const entry = { cid: k.cid, url: k.url, title: k.title, at: k.at, years, noted: false };
+      store.set("doorway.keptPages", [...keptPages().filter(x => x.cid !== k.cid), entry]);
+      kpReady = null;
+      kpSay(`<p class="said"><b>Kept.</b> It goes to the doors in a minute or two, and stays there until ${new Date().getFullYear() + years}. Anyone can open it.</p>`);
+      if (keptInfo) { const u = keptInfo.until.get(k.cid); keptInfo.until.set(k.cid, Math.max(u ?? 0, keptInfo.tip) + years * 262_800); }
+      renderKept();
+      setTimeout(showBalance, 3000);
+      setTimeout(refreshKept, 130_000);
+      pagesToDoors(k.cid);
+      // then the record of where it came from (it waits for the first write's change, if it must)
+      tip = (await (await fetch(node + "/tip")).json()).height;
+      await send(node, wallet.key, PG.pageAsk(k.cid, k.url, tip));
+      store.set("doorway.keptPages", keptPages().map(x => x.cid === k.cid ? { ...x, noted: true } : x));
+      renderKept();
+    } catch (err) {
+      const m = String(err && err.message || err);
+      if (kpReady) {
+        if (/Not enough CSD/.test(m)) needMore($("kpNow").querySelector(".row2 .grow"), "There isn't enough left for that many years.");
+        else $("kpNow").querySelector(".row2 .grow").textContent = m;
+        ["kpYes", "kpDrop"].forEach(id => $(id) && ($(id).disabled = false));
+      } else console.warn("kept page record:", m); // kept; the record is written again later
+    }
+    kpBusy = false;
+  }
+
+  // a kept page goes to the doors once its keep record is in a block (they take only sites someone
+  // keeps or a name points to): tried every minute for a while, then with the other sites
+  async function pagesToDoors(cid) {
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 60_000));
+      if (await seed(cid) > 0) { renderKept(); return; }
+    }
+  }
+  // records of where a copy came from that didn't get written (Doorway closed, say): written again
+  async function notePages() {
+    const due = keptPages().filter(k => !k.noted && Date.now() - k.at > 10 * 60_000);
+    if (!due.length || kpBusy) return;
+    try {
+      if (!wallet) await loadWallet();
+      const node = await readingNode();
+      const mine = new Set((await PG.allCopies(node)).filter(c => c.by === wallet.address.toLowerCase()).map(c => c.cid));
+      for (const k of due) {
+        if (!mine.has(k.cid)) { const tip = (await (await fetch(node + "/tip")).json()).height; await send(node, wallet.key, PG.pageAsk(k.cid, k.url, tip)); }
+        store.set("doorway.keptPages", keptPages().map(x => x.cid === k.cid ? { ...x, noted: true } : x));
+      }
+      renderKept();
+    } catch {}
+  }
+  $("kpForm").onsubmit = e => { e.preventDefault(); keepPage($("kpUrl").value); };
+  setTimeout(renderKept, 1500);
+  setTimeout(notePages, 60_000); setInterval(notePages, 30 * 60_000);
 
   // a newcomer's welcome, once: one of the invites people left in the shared pool, said in a card at
   // the top of the main window that stays until it's put away. Tried again later when the network
