@@ -247,6 +247,16 @@ async function notes(convs: Conversation[], recs: Rec[]): Promise<(Letter & { in
   }
   return out.sort((a, b) => b.at - a.at);
 }
+// ── The diary ─────────────────────────────────────────────────────────────────────────────────
+// Entries only their writer can read: notes (as above) in a conversation with themselves, sealed
+// with a secret derived from their key alone. They sit among letters, the same size and shape, so
+// nobody can tell a diary entry from a letter; with only the key and the records, every entry comes
+// back. info "csd.letters/v2 diary", salt "csd.letters", 32 bytes, from the key.
+export function diary(key: Hex): Conversation {
+  const me = low(keyFromPrivate(hexToBytes(key)).addr20);
+  return { id: "diary", a: me, b: me, secret: hkdf(sha256, hexToBytes(key), utf8("csd.letters"), info("diary"), 32), height: 0 };
+}
+
 // ── Groups ─────────────────────────────────────────────────────────────────────────────────────
 export const GROUP_MAX = 12;
 const GROUP_ID = /^[A-Za-z0-9_-]{11}$/;

@@ -171,6 +171,23 @@
   .gpick label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
   .gnote { padding: 0 16px 12px; color: var(--muted); font-size: 12px; display: flex; gap: 7px; align-items: center; }
   .gnote svg { width: 13px; height: 13px; color: var(--accent); }
+  /* Diary: a page to write today's, and the ones before it */
+  .dwrite { padding: 16px 16px 14px; border-bottom: 1px solid var(--line); }
+  .dday { font: italic 15px/1.3 var(--serif); color: var(--muted); margin: 0 2px 10px; }
+  .dwrite .lpaper { padding: 0 22px; }
+  .dwrite .lpaper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .dwrite textarea { display: block; width: 100%; min-height: 150px; resize: vertical; padding: 16px 2px 10px; font: 16.5px/1.7 var(--serif); color: var(--ink); background: transparent; border: 0; outline: none; -webkit-user-select: text; user-select: text; }
+  .dwrite textarea::placeholder { color: var(--muted); opacity: .7; }
+  .dwrite button:disabled { opacity: .55; cursor: default; }
+  .dwrite .primary { display: inline-flex; align-items: center; gap: 7px; }
+  .dentry { padding: 16px 22px 18px; border-bottom: 1px solid var(--line); }
+  .dentry:last-child { border-bottom: 0; }
+  .dentry h4 { margin: 0 0 6px; font: italic 600 14px/1.3 var(--serif); color: var(--muted); display: flex; gap: 10px; align-items: baseline; }
+  .dentry h4 .going { font: 600 12px var(--display); color: var(--busy); font-style: normal; }
+  .dentry .text { white-space: pre-wrap; font: 16px/1.7 var(--serif); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; max-width: 66ch; }
+  .dentry.folded .text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .dentry .more { margin-top: 6px; }
+  .dmore { padding: 12px 16px; text-align: center; border-top: 1px solid var(--line); }
   .namecard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 16px 18px; margin-top: 26px; display: flex; flex-direction: column; gap: 6px; }
   .namecard b { font: 650 15px/1.3 var(--display); }
   .namecard .hint { margin: 0; font-size: 13px; }
@@ -409,6 +426,18 @@
     <div id="letterView"></div>
   </div>
   <p class="hint" id="letterStatus" style="margin:8px 4px 0"></p>
+
+  <h2 style="margin-top:26px">Diary</h2>
+  <p class="lintro">Only you can ever read it. It's sealed with your key and kept by the network, so it comes back on any computer you restore your key on, years from now. To anyone else it looks like a letter, and they can't tell who it's to.</p>
+  <div class="letters diary" id="diary">
+    <form id="dform" class="dwrite">
+      <div class="dday" id="dday"></div>
+      <div class="lpaper"><textarea id="dtext" placeholder="Today…"></textarea></div>
+      <div class="lfoot"><span class="lseal" id="dseal"></span><span class="lcost" id="dcost"></span><button class="primary" id="dkeep"><span>Keep it</span></button></div>
+    </form>
+    <div id="dlist"></div>
+  </div>
+  <p class="hint" id="diaryStatus" style="margin:8px 4px 0"></p>
 
 
   <div class="ask" id="addDlg" hidden role="dialog" aria-modal="true" aria-labelledby="addTitle">
@@ -1370,7 +1399,7 @@
   function lettersOf(tab) {
     if (!wallet) return [];
     const me = wallet.address.toLowerCase();
-    return [...held().values()].filter(l => !l.group && (tab === "in" ? l.from !== me : l.from === me)).sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+    return [...held().values()].filter(l => !l.group && l.conversation !== "diary" && (tab === "in" ? l.from !== me : l.from === me)).sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   }
   // whether this key's letterbox is open: seen in the records, or sent from here in the last half
   // hour and not in a block yet. (Its own key: the first test build kept a flag of the same name for
@@ -1810,12 +1839,65 @@
         ...found.map(g => groupRow(g, { at: here.find(x => x.id === g.id)?.at ?? Date.now() })),
         ...here.filter(x => x.pending && !found.some(g => g.id === x.id) && Date.now() - x.at < 7 * DAY),
       ]);
-      const got = [...await LT.letters(convs, r.let), ...await LT.letters(groupsHere().map(asGroup), r.let)];
+      const got = [...await LT.letters(convs, r.let), ...await LT.letters(groupsHere().map(asGroup), r.let), ...await LT.letters([LT.diary(wallet.key)], r.let)];
       keepLetters(got);
       await checkNames(got).catch(() => {});
       if (lview !== "write") renderLetters();
+      renderDiary();
     } catch (err) { console.warn("letters:", err); }
   }
+
+  // ── Diary ──
+  // Entries in a conversation with yourself, sealed with a secret from your key alone (resolver:
+  // letters.ts, diary): read back with the letters, kept apart from them here. What you're writing
+  // stays on this computer as a draft until you keep it.
+  const diarySay = t => { $("diaryStatus").textContent = t; };
+  let dshown = 10;
+  const dayOf = t => new Date(t).toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  function renderDiary() {
+    $("dday").textContent = dayOf(Date.now());
+    $("dseal").innerHTML = `${LOCK}<span>Only you can read this.</span>`;
+    const entries = [...held().values()].filter(l => l.conversation === "diary").sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+    if (!entries.length) { $("dlist").innerHTML = `<div class="kpempty">What you keep shows up here, newest first.</div>`; return; }
+    $("dlist").innerHTML = entries.slice(0, dshown).map(l => `<article class="dentry${l.body.length > 420 ? " folded" : ""}">
+        <h4>${esc(dayOf(l.at))}, ${esc(new Date(l.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}${l.pending ? `<span class="going">On its way</span>` : ""}</h4>
+        <div class="text">${esc(l.body)}</div>${l.body.length > 420 ? `<button type="button" class="add more">Read all of it</button>` : ""}</article>`).join("")
+      + (entries.length > dshown ? `<div class="dmore"><button type="button" class="add" id="dolder">Earlier entries (${entries.length - dshown})</button></div>` : "");
+    $("dlist").querySelectorAll(".more").forEach(b => b.onclick = () => { b.closest(".dentry").classList.remove("folded"); b.remove(); });
+    if ($("dolder")) $("dolder").onclick = () => { dshown += 20; renderDiary(); };
+  }
+  const dcost = () => { const n = Math.max(1, Math.ceil(new TextEncoder().encode($("dtext").value).length / 300)); $("dcost").textContent = $("dtext").value.trim() ? `${n === 1 ? "1 post" : `${n} posts`}' worth` : ""; };
+  try { $("dtext").value = localStorage.getItem("doorway.diaryDraft") ?? ""; } catch {}
+  $("dtext").addEventListener("input", () => { try { localStorage.setItem("doorway.diaryDraft", $("dtext").value); } catch {} dcost(); });
+  $("dform").onsubmit = async e => {
+    e.preventDefault();
+    const text = $("dtext").value.trim();
+    if (!text) return;
+    if (lbusy) return diarySay("Something is still going out. Try again in a minute.");
+    lbusy = true; $("dkeep").disabled = true; $("dtext").readOnly = true; $("dkeep").querySelector("span").textContent = "Keeping…";
+    try {
+      if (!wallet) await loadWallet();
+      const r = await letterRecords(), me = wallet.address.toLowerCase(), d = LT.diary(wallet.key);
+      const uris = await LT.noteUris(d, { subject: "", body: text });
+      let shown = false;
+      const show = async () => {
+        if (shown) return; shown = true;
+        const local = await LT.letters([d], uris.map((uri, i) => ({ id: "local" + i, proposer: me, uri, height: r.tip + 1, pos: i }))).catch(() => []);
+        keepLetters(local.map(l => ({ ...l, pending: true })));
+        $("dtext").value = ""; try { localStorage.removeItem("doorway.diaryDraft"); } catch {}
+        dcost(); diarySay("Kept. Only you will ever read it."); renderDiary();
+        setTimeout(showBalance, 3000); setTimeout(checkLetters, 180_000);
+      };
+      try { await writeRecords(r.node, r.tip, LT.LETTERS, uris, show); }
+      catch (err) { if (!shown) throw err; console.warn("diary:", err); }
+      await show();
+    } catch (err) {
+      const m = String(err && err.message || err);
+      if (/Not enough CSD/.test(m)) needMore($("diaryStatus"), "There isn't enough left to keep it."); else diarySay(m);
+    }
+    lbusy = false; $("dkeep").disabled = false; $("dtext").readOnly = false; $("dkeep").querySelector("span").textContent = "Keep it";
+  };
+  setTimeout(() => { renderDiary(); dcost(); }, 1500);
   setTimeout(() => { renderLetters(); checkLetters(); }, 4000);
   setInterval(checkLetters, 10 * 60_000);
   // ── Kept pages ───────────────────────────────────────────────────────────────────────────────

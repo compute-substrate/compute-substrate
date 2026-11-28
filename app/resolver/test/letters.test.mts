@@ -119,6 +119,18 @@ ok(L.costOf(4) === 1 && L.costOf(1) === 0.25, "a record costs a post (0.25)");
   ok(gA2.group!.by === addr(alice) && !gA2.group!.members.includes(eve) && gA2.group!.title !== "Mine now", "a member can't add people or rename the group: only its starter's invitations count");
 }
 
+// the diary: entries only their writer reads, among letters
+{
+  const d = L.diary(alice);
+  const entry = recs(alice, await L.noteUris(d, { subject: "28 November", body: "Built the capsule today." }));
+  ok(entry.every(r => /^ln2\./.test(r.uri)) && new Set([...entry, ...noteRecs].map(r => r.uri.length)).size === 1, "a diary entry looks exactly like a letter on the network");
+  const back = await L.letters([L.diary(alice)], entry);
+  ok(back.length === 1 && back[0].body === "Built the capsule today." && back[0].subject === "28 November", "with only the key, the entry comes back");
+  ok((await L.letters([L.diary(bob)], entry)).length === 0 && (await L.letters([bobConv], entry)).length === 0, "nobody else can read it, not even someone Alice writes to");
+  ok((await L.letters([L.diary(alice)], recs(bob, await L.noteUris(d, { subject: "", body: "x" })))).length === 0, "and nobody can add to it");
+  ok((await L.letters([aliceConv], entry)).length === 0, "it never shows up among letters");
+}
+
 // writing several records: the first makes a coin for each of the rest, which then all go at once
 {
   const submitted: any[] = [];
