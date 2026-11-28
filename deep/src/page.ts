@@ -200,42 +200,50 @@ async function trouble(e: any) {
 }
 
 // ── the records, on their own page (#records) ──
-let tab = "floors";
+let tab = "players";
 const route = () => { const rec = location.hash === "#records"; $("game").hidden = rec; $("recordsview").hidden = !rec; if (rec) drawTab(); scrollTo(0, 0); };
 addEventListener("hashchange", route);
 document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b => b.onclick = () => { tab = b.dataset.tab!; drawTab(); });
+const dayShort = (t: number) => new Date(t * 1000).toLocaleDateString([], { day: "numeric", month: "short" });
 function drawTab() {
   if ($("recordsview").hidden) return;
-  $("standing2").textContent = standing();
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.tab === tab)));
-  const h = hist, now = h?.stateAt(Infinity);
-  const relic = (id: string) => `<span class="${rarityOf(relicName(id))}">${esc(the(id))}</span>`;
-  if (tab === "floors") {
-    // floor by floor, as far as anyone has been, and one more
-    const deepest = h?.deepest ?? 0, rows: string[] = [];
-    for (let d = 1; d <= Math.min(DEPTH, deepest + 1); d++) {
-      const first = h?.firstTo.get(d);
-      if (!first) { rows.push(`<div class="floor"><b>Floor ${d}</b><span class="small">Nobody has been this deep.</span></div>`); break; }
-      const chests = plan(d).chests.map(c => {
-        const home = h!.home.get(c.id), lies = now!.graves.find(g => g.relics.includes(c.id));
-        return `<li>${relic(c.id)}: ${home ? `brought up by ${esc(who(home.by))}, ${esc(day(home.at))}` : lies ? `lies with ${esc(who(lies.by))}, on floor ${lies.depth}` : "still down there"}</li>`;
-      });
-      const graves = (h?.falls ?? []).filter(f => f.depth === d).map(f => `<li class="small">Here lies ${esc(who(f.by))}, ${f.killedBy ? `killed by a ${esc(f.killedBy)}` : "lost in the dark"}, ${esc(day(f.at))}</li>`);
-      rows.push(`<div class="floor"><b>Floor ${d}${d === DEPTH ? ", the bottom" : ""}</b><span class="small">First reached by ${esc(who(first.by))}, ${esc(day(first.at))}${now?.rope?.depth === d ? `. ${esc(Who(now.rope.by))}'s rope comes down here` : ""}</span><ul>${chests.join("")}${graves.join("")}</ul></div>`);
-    }
-    $("tabview").innerHTML = rows.length ? rows.join("") : `<p class="small">Nobody has been down yet. The first to reach each floor is remembered here.</p>`;
+  const h = hist, now = h?.stateAt(Infinity), relics = allRelics();
+  // the four numbers at the top
+  const eye = h?.home.get(BOTTOM);
+  $("stats").innerHTML = [
+    ["Deepest", h?.deepest ? `Floor ${h.deepest}` : "None yet"],
+    ["Relics up", `${h?.home.size ?? 0} of ${relics.length}`],
+    ["Graves", `${h?.falls.length ?? 0}`],
+    [`The ${BOTTOM_NAME}`, eye ? esc(Who(eye.by)) : "Down there"],
+  ].map(([k, v]) => `<div class="stat"><span>${k}</span><b>${v}</b></div>`).join("");
+  const rank = (i: number) => `<td class="rank r${i + 1}">${i + 1}</td>`;
+  const dot = (name: string) => `<span class="dot ${rarityOf(name)}"></span>`;
+  if (tab === "players") {
+    // everyone who has gone down: deepest floor, relics held, times back up, graves
+    const by = new Map<string, { deepest: number; relics: number; ups: number; graves: number; at: number }>();
+    const of = (a: string) => by.get(a) ?? (by.set(a, { deepest: 0, relics: 0, ups: 0, graves: 0, at: 0 }), by.get(a)!);
+    for (const r of h?.returns ?? []) { const p = of(r.by); p.deepest = Math.max(p.deepest, r.depth); p.ups++; p.at = Math.max(p.at, r.height); }
+    for (const f of h?.falls ?? []) { const p = of(f.by); p.deepest = Math.max(p.deepest, f.depth); p.graves++; }
+    for (const [, x] of h?.home ?? []) of(x.by).relics++;
+    const rows = [...by.entries()].sort((a, b) => b[1].deepest - a[1].deepest || b[1].relics - a[1].relics || b[1].ups - a[1].ups);
+    $("tabview").innerHTML = rows.length ? `<table><thead><tr><th>#</th><th class="l">Name</th><th>Deepest</th><th>Relics</th><th>Back up</th><th>Graves</th></tr></thead><tbody>${rows.map(([a, p], i) =>
+      `<tr${a === mine ? ` class="me"` : ""}>${rank(i)}<td class="l">${esc(Who(a))}</td><td>${p.deepest}</td><td>${p.relics}</td><td>${p.ups}</td><td>${p.graves}</td></tr>`).join("")}</tbody></table>` : `<p class="empty">Nobody has gone down yet.</p>`;
   } else if (tab === "relics") {
-    const up = [...(h?.home.entries() ?? [])].sort((a, b) => b[1].from - a[1].from || a[1].height - b[1].height);
-    $("tabview").innerHTML = `<p class="small">${up.length} of ${allRelics().length} brought up. Each one only once, ever.</p>` + (up.length ? up.map(([id, x]) => `<div class="row"><b>Floor ${x.from}</b><span class="what"><span>${relic(id)}</span><span class="small">${esc(Who(x.by))}, ${esc(day(x.at))}</span></span></div>`).join("") : "");
-  } else if (tab === "latest") {
-    const items = [...(h?.returns ?? []).map(r => ({ at: r.height, html: `<div class="row"><b>Floor ${r.depth}</b><span class="what"><span>${esc(Who(r.by))} came back up, ${esc(day(r.at))}</span><span class="small">${r.relics.length ? `With ${r.relics.map(relic).join(", ")}` : "With nothing"}${r.beaten.length ? `. Too late for ${r.beaten.map(relic).join(", ")}` : ""}</span></span></div>` })),
-      ...(h?.falls ?? []).map(f => ({ at: f.height, html: `<div class="row"><b>Floor ${f.depth}</b><span class="what"><span>${esc(Who(f.by))} fell, ${esc(day(f.at))}</span><span class="small">${f.killedBy ? `Killed by a ${esc(f.killedBy)}` : "Lost in the dark"}${f.relics.length ? `, carrying ${f.relics.map(relic).join(", ")}` : ""}</span></span></div>` }))].sort((a, b) => b.at - a.at).slice(0, 40);
-    $("tabview").innerHTML = items.length ? items.map(x => x.html).join("") : `<p class="small">Nothing yet.</p>`;
+    // every relic in the deep, deepest first: who has it, or where it is
+    const rows = [...relics].sort((a, b) => b.depth - a.depth || a.id.localeCompare(b.id));
+    $("tabview").innerHTML = `<table><thead><tr><th class="l">Relic</th><th>Floor</th><th class="l">Held by</th><th>Since</th></tr></thead><tbody>${rows.map(r => {
+      const home = h?.home.get(r.id), lies = now?.graves.find(g => g.relics.includes(r.id));
+      return `<tr class="${home ? "" : "unclaimed"}${home?.by === mine ? " me" : ""}"><td class="l">${dot(r.name)}${esc(r.id === BOTTOM ? `The ${BOTTOM_NAME}` : cap(r.name))}</td><td>${r.depth}</td><td class="l">${home ? esc(Who(home.by)) : lies ? `<span class="muted">In ${esc(who(lies.by))}'s grave</span>` : `<span class="muted">Still down there</span>`}</td><td>${home ? esc(dayShort(home.at)) : ""}</td></tr>`;
+    }).join("")}</tbody></table>`;
   } else {
-    const ids = [...(h?.home.entries() ?? [])].filter(([, x]) => x.by === mine);
-    const falls = (h?.falls ?? []).filter(f => f.by === mine).length, rets = (h?.returns ?? []).filter(r => r.by === mine);
-    $("tabview").innerHTML = `<p class="small">${rets.length} time${rets.length === 1 ? "" : "s"} back up, ${falls} grave${falls === 1 ? "" : "s"}. Deepest: floor ${Math.max(0, ...rets.map(r => r.depth), ...(h?.falls ?? []).filter(f => f.by === mine).map(f => f.depth)) || "none yet"}.</p>` +
-      (ids.length ? ids.map(([id, x]) => `<div class="row"><b>Floor ${x.from}</b><span class="what"><span>${relic(id)}</span><span class="small">Brought up ${esc(day(x.at))}</span></span></div>`).join("") : `<p class="small">What you bring up is listed here, for good.</p>`);
+    // floor by floor: who got there first, what's left, who lies there
+    const rows: string[] = [];
+    for (let d = 1; d <= DEPTH; d++) {
+      const first = h?.firstTo.get(d), chests = plan(d).chests, left = chests.filter(c => !h?.home.has(c.id)).length, graves = (h?.falls ?? []).filter(f => f.depth === d).length;
+      rows.push(`<tr class="${first ? "" : "unclaimed"}"><td>${d}${d === DEPTH ? ` <span class="muted">bottom</span>` : ""}</td><td class="l">${first ? esc(Who(first.by)) : `<span class="muted">Nobody yet</span>`}${now?.rope?.depth === d ? ` <span class="tag">rope</span>` : ""}</td><td>${first ? esc(dayShort(first.at)) : ""}</td><td>${left} of ${chests.length}</td><td>${graves || ""}</td></tr>`);
+    }
+    $("tabview").innerHTML = `<table><thead><tr><th>Floor</th><th class="l">First there</th><th>When</th><th>Relics left</th><th>Graves</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
   }
 }
 

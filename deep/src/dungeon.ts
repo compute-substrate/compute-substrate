@@ -42,15 +42,23 @@ export const kindOf = (n: string) => KINDS.find(k => k.name === n)!;
 // ── relics: kinds of thing a chest can hold, deeper ones rarer ──
 export type Relic = { name: string; from: number; weight: number };
 export const RELICS: Relic[] = [
-  { name: "bone dice", from: 1, weight: 40 }, { name: "tin whistle", from: 1, weight: 36 },
-  { name: "copper ring", from: 1, weight: 34 }, { name: "cracked lens", from: 1, weight: 30 },
-  { name: "old key", from: 2, weight: 26 }, { name: "jade beetle", from: 3, weight: 18 },
-  { name: "silver comb", from: 3, weight: 16 }, { name: "glass eye", from: 5, weight: 14 },
-  { name: "iron crown", from: 6, weight: 10 }, { name: "ember ring", from: 7, weight: 8 },
-  { name: "moth lantern", from: 8, weight: 7 }, { name: "drowned bell", from: 10, weight: 6 },
-  { name: "star chart", from: 11, weight: 5 }, { name: "obsidian heart", from: 13, weight: 3 },
-  { name: "crown of ash", from: 15, weight: 2 }, { name: "pale key", from: 17, weight: 2 },
-  { name: "first feather", from: 18, weight: 1 },
+  // each of these exists once in the deep; the deeper, the rarer
+  { name: "bone dice", from: 1, weight: 40 }, { name: "tin whistle", from: 1, weight: 38 },
+  { name: "copper ring", from: 1, weight: 36 }, { name: "cracked lens", from: 1, weight: 34 },
+  { name: "wax seal", from: 1, weight: 32 }, { name: "old key", from: 2, weight: 30 },
+  { name: "clay owl", from: 2, weight: 30 }, { name: "brass compass", from: 2, weight: 28 },
+  { name: "pewter cup", from: 3, weight: 26 }, { name: "carved spoon", from: 3, weight: 26 },
+  { name: "jade beetle", from: 3, weight: 18 }, { name: "silver comb", from: 4, weight: 16 },
+  { name: "amber drop", from: 4, weight: 16 }, { name: "glass eye", from: 5, weight: 14 },
+  { name: "bronze mask", from: 5, weight: 14 }, { name: "iron crown", from: 6, weight: 12 },
+  { name: "ivory chess king", from: 6, weight: 12 }, { name: "ember ring", from: 7, weight: 9 },
+  { name: "moth lantern", from: 8, weight: 8 }, { name: "salt harp", from: 8, weight: 8 },
+  { name: "drowned bell", from: 9, weight: 7 }, { name: "silver hourglass", from: 10, weight: 6 },
+  { name: "star chart", from: 11, weight: 5 }, { name: "black pearl", from: 12, weight: 5 },
+  { name: "obsidian heart", from: 13, weight: 4 }, { name: "frost crown", from: 14, weight: 3 },
+  { name: "crown of ash", from: 15, weight: 2 }, { name: "pale key", from: 16, weight: 2 },
+  { name: "sun disc", from: 17, weight: 2 }, { name: "first feather", from: 18, weight: 1 },
+  { name: "last candle", from: 19, weight: 1 },
 ];
 export type Rarity = "common" | "uncommon" | "scarce" | "rare" | "legendary" | "one";
 export function rarityOf(name: string): Rarity {
@@ -119,8 +127,15 @@ export function plan(depth: number): Plan {
   const chests: Plan["chests"] = [];
   // at the bottom, in the farthest room: the one thing
   if (bottom) chests.push({ id: BOTTOM, relic: BOTTOM_NAME, ...mid(far) });
-  const n = 1 + (R("chest2") < Math.min(0.6, 0.15 + depth * 0.03) ? 1 : 0);
-  for (let i = 0; i < n; i++) { const s = take(); if (s) chests.push({ id: `${depth}.${i}`, relic: pick(RELICS, depth, R("relic", i)).name, ...s }); }
+  // every relic is placed once: each floor picks from what the floors above haven't
+  const used = new Set<string>(); for (let d = 1; d < depth; d++) for (const c of plan(d).chests) used.add(c.relic);
+  const n = bottom ? 0 : 1 + (R("chest2") < Math.min(0.6, 0.15 + depth * 0.03) ? 1 : 0);
+  for (let i = 0; i < n; i++) {
+    const left = RELICS.filter(r => !used.has(r.name)), s = take();
+    if (!left.length || !s) break;
+    const near = left.filter(r => r.from <= depth), name = near.length ? pick(near, depth, R("relic", i)).name : left[0].name;
+    used.add(name); chests.push({ id: `${depth}.${i}`, relic: name, ...s });
+  }
   const supplies: Thing[] = [];
   if (R("draught") < 0.6 + depth * 0.01) { const s = take(); if (s) supplies.push({ kind: "draught", ...s }); }
   if (R("draught2") < depth * 0.02) { const s = take(); if (s) supplies.push({ kind: "draught", ...s }); }

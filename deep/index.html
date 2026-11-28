@@ -58,6 +58,29 @@
   .relic.unseen { opacity: .45; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--common); }
   .uncommon .dot { background: var(--uncommon); } .scarce .dot { background: var(--scarce); } .rare .dot { background: var(--rare); } .legendary .dot { background: var(--legendary); }
+  /* hiscores */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 18px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; display: flex; flex-direction: column; min-width: 0; }
+  .stat span { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat b { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #tabview { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); text-align: right; padding: 12px 14px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { text-align: right; padding: 9px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 0; }
+  th.l, td.l { text-align: left; }
+  td .dot { display: inline-block; margin-right: 9px; vertical-align: 1px; }
+  tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg) 45%, transparent); }
+  tr.me td { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
+  tr.unclaimed td { color: var(--muted); }
+  .rank { color: var(--muted); width: 36px; text-align: center !important; font-weight: 600; }
+  .rank.r1 { color: #c9952a; } .rank.r2 { color: #8f99a3; } .rank.r3 { color: #a8683a; }
+  .muted { color: var(--muted); font-weight: 400; }
+  .tag { font-size: 11px; font-weight: 600; color: var(--accent); border: 1px solid currentColor; border-radius: 999px; padding: 0 7px; }
+  .empty { padding: 18px; margin: 0; color: var(--muted); }
+  .dot.uncommon { background: var(--uncommon); } .dot.scarce { background: var(--scarce); } .dot.rare { background: var(--rare); } .dot.legendary { background: var(--legendary); }
+  .dot.one { background: var(--legendary); box-shadow: 0 0 6px var(--legendary); }
+  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } td, th { padding-left: 9px; padding-right: 9px; } }
   footer { margin-top: 34px; color: var(--muted); font-size: 13px; max-width: 70ch; }
   @media (max-width: 560px) { .bar { flex-wrap: wrap; justify-content: flex-end; font-size: 13px; } .bar .text { flex-basis: 100%; } }
 </style>
@@ -77,8 +100,8 @@
   </section>
   <section id="recordsview" hidden>
     <header><h1>Records</h1><a href="#">Back down</a></header>
-    <p id="standing2" class="small standing"></p>
-    <div class="tabs" role="group"><button data-tab="floors" aria-pressed="true">Floor by floor</button><button data-tab="relics">Brought up</button><button data-tab="latest">Latest</button><button data-tab="mine">Yours</button></div>
+    <div class="stats" id="stats"></div>
+    <div class="tabs" role="group"><button data-tab="players" aria-pressed="true">Hiscores</button><button data-tab="relics">Relics</button><button data-tab="floors">Floors</button></div>
     <div id="tabview"></div>
     <footer>Nobody runs the deep. It's the same twenty floors for everyone, and every ending is every move made, so anyone can play it again and see the same thing happen. The fights in each descent are drawn from a block nobody could know in advance. Whoever climbs out of the deepest floor leaves a rope there for everyone.</footer>
   </section>
