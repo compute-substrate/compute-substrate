@@ -39,33 +39,44 @@ export const KINDS: Kind[] = [
 ];
 export const kindOf = (n: string) => KINDS.find(k => k.name === n)!;
 
-// ── relics: kinds of thing a chest can hold, deeper ones rarer ──
-export type Relic = { name: string; from: number; weight: number };
+// ── relics: near the top, a few of each; deeper, fewer; the last floors, one of each ──
+export type Relic = { name: string; from: number; copies: number };
 export const RELICS: Relic[] = [
-  // each of these exists once in the deep; the deeper, the rarer
-  { name: "bone dice", from: 1, weight: 40 }, { name: "tin whistle", from: 1, weight: 38 },
-  { name: "copper ring", from: 1, weight: 36 }, { name: "cracked lens", from: 1, weight: 34 },
-  { name: "wax seal", from: 1, weight: 32 }, { name: "old key", from: 2, weight: 30 },
-  { name: "clay owl", from: 2, weight: 30 }, { name: "brass compass", from: 2, weight: 28 },
-  { name: "pewter cup", from: 3, weight: 26 }, { name: "carved spoon", from: 3, weight: 26 },
-  { name: "jade beetle", from: 3, weight: 18 }, { name: "silver comb", from: 4, weight: 16 },
-  { name: "amber drop", from: 4, weight: 16 }, { name: "glass eye", from: 5, weight: 14 },
-  { name: "bronze mask", from: 5, weight: 14 }, { name: "iron crown", from: 6, weight: 12 },
-  { name: "ivory chess king", from: 6, weight: 12 }, { name: "ember ring", from: 7, weight: 9 },
-  { name: "moth lantern", from: 8, weight: 8 }, { name: "salt harp", from: 8, weight: 8 },
-  { name: "drowned bell", from: 9, weight: 7 }, { name: "silver hourglass", from: 10, weight: 6 },
-  { name: "star chart", from: 11, weight: 5 }, { name: "black pearl", from: 12, weight: 5 },
-  { name: "obsidian heart", from: 13, weight: 4 }, { name: "frost crown", from: 14, weight: 3 },
-  { name: "crown of ash", from: 15, weight: 2 }, { name: "pale key", from: 16, weight: 2 },
-  { name: "sun disc", from: 17, weight: 2 }, { name: "first feather", from: 18, weight: 1 },
-  { name: "last candle", from: 19, weight: 1 },
+  { name: "bone dice", from: 1, copies: 4 }, { name: "tin whistle", from: 1, copies: 4 }, { name: "copper ring", from: 1, copies: 4 },
+  { name: "cracked lens", from: 2, copies: 3 }, { name: "wax seal", from: 2, copies: 3 }, { name: "old key", from: 3, copies: 3 },
+  { name: "clay owl", from: 3, copies: 3 }, { name: "brass compass", from: 4, copies: 3 },
+  { name: "pewter cup", from: 4, copies: 2 }, { name: "carved spoon", from: 5, copies: 2 }, { name: "jade beetle", from: 5, copies: 2 },
+  { name: "silver comb", from: 6, copies: 2 }, { name: "amber drop", from: 6, copies: 2 }, { name: "glass eye", from: 7, copies: 2 },
+  { name: "bronze mask", from: 7, copies: 2 }, { name: "iron crown", from: 8, copies: 2 }, { name: "ivory chess king", from: 9, copies: 2 },
+  { name: "ember ring", from: 10, copies: 2 },
+  { name: "moth lantern", from: 11, copies: 1 }, { name: "salt harp", from: 11, copies: 1 }, { name: "drowned bell", from: 12, copies: 1 },
+  { name: "silver hourglass", from: 12, copies: 1 }, { name: "star chart", from: 13, copies: 1 }, { name: "black pearl", from: 14, copies: 1 },
+  { name: "obsidian heart", from: 15, copies: 1 }, { name: "frost crown", from: 15, copies: 1 }, { name: "crown of ash", from: 16, copies: 1 },
+  { name: "pale key", from: 17, copies: 1 }, { name: "sun disc", from: 18, copies: 1 }, { name: "first feather", from: 18, copies: 1 },
+  { name: "last candle", from: 19, copies: 1 },
 ];
 export type Rarity = "common" | "uncommon" | "scarce" | "rare" | "legendary" | "one";
+export const copiesOf = (name: string) => name === BOTTOM_NAME ? 1 : RELICS.find(r => r.name === name)?.copies ?? 1;
 export function rarityOf(name: string): Rarity {
   if (name === BOTTOM_NAME) return "one";
-  const w = RELICS.find(r => r.name === name)?.weight ?? 40;
-  return w >= 26 ? "common" : w >= 10 ? "uncommon" : w >= 5 ? "scarce" : w >= 2 ? "rare" : "legendary";
+  const r = RELICS.find(r => r.name === name);
+  if (!r) return "common";
+  return r.copies >= 4 ? "common" : r.copies === 3 ? "uncommon" : r.copies === 2 ? "scarce" : r.from < 15 ? "rare" : "legendary";
 }
+// which relics are on which floor: the copies of each spread over a few floors from where it starts
+const stockOf = (() => { let m: Map<number, string[]> | null = null; return (depth: number) => {
+  if (!m) {
+    m = new Map();
+    // each copy goes to the emptiest floor in its stretch, so no floor is crowded
+    for (const r of RELICS) for (let k = 0; k < r.copies; k++) {
+      const cost = (d: number) => (m!.get(d)?.length ?? 0) + (m!.get(d)?.includes(r.name) ? 10 : 0) + (d - r.from) * 0.3;
+      let best = r.from;
+      for (let d = r.from; d < Math.min(DEPTH, r.from + Math.min(8, r.copies * 2)); d++) if (cost(d) < cost(best)) best = d;
+      m.set(best, [...(m.get(best) ?? []), r.name]);
+    }
+  }
+  return m.get(depth) ?? [];
+}; })();
 function pick<T extends { from: number; weight: number }>(list: T[], depth: number, u: number): T {
   // deeper floors lean away from what's been there since the top
   const pool = list.filter(x => x.from <= depth).map(x => ({ x, w: x.weight * (x.from >= depth - 4 ? 1 : 0.35) }));
@@ -127,15 +138,7 @@ export function plan(depth: number): Plan {
   const chests: Plan["chests"] = [];
   // at the bottom, in the farthest room: the one thing
   if (bottom) chests.push({ id: BOTTOM, relic: BOTTOM_NAME, ...mid(far) });
-  // every relic is placed once: each floor picks from what the floors above haven't
-  const used = new Set<string>(); for (let d = 1; d < depth; d++) for (const c of plan(d).chests) used.add(c.relic);
-  const n = bottom ? 0 : 1 + (R("chest2") < Math.min(0.6, 0.15 + depth * 0.03) ? 1 : 0);
-  for (let i = 0; i < n; i++) {
-    const left = RELICS.filter(r => !used.has(r.name)), s = take();
-    if (!left.length || !s) break;
-    const near = left.filter(r => r.from <= depth), name = near.length ? pick(near, depth, R("relic", i)).name : left[0].name;
-    used.add(name); chests.push({ id: `${depth}.${i}`, relic: name, ...s });
-  }
+  stockOf(depth).forEach((name, i) => { const s = take(); if (s) chests.push({ id: `${depth}.${i}`, relic: name, ...s }); });
   const supplies: Thing[] = [];
   if (R("draught") < 0.6 + depth * 0.01) { const s = take(); if (s) supplies.push({ kind: "draught", ...s }); }
   if (R("draught2") < depth * 0.02) { const s = take(); if (s) supplies.push({ kind: "draught", ...s }); }
@@ -217,7 +220,8 @@ export function step(run: Run, m: string): string[] {
       for (const t of f.things.filter(t => !t.taken && t.x === nx && t.y === ny)) {
         if (t.kind === "chest") {
           t.taken = true; run.carried.push(t.id!);
-          ev.push(t.id === BOTTOM ? `In the chest: the ${BOTTOM_NAME}.` : `In the chest: ${a(t.relic!)}.`);
+          const c = copiesOf(t.relic!);
+          ev.push(t.id === BOTTOM ? `In the chest: the ${BOTTOM_NAME}.` : c === 1 ? `In the chest: the ${t.relic}. There is only one.` : `In the chest: ${a(t.relic!)}, one of ${c}.`);
           if (t.id === BOTTOM) for (const o of f.monsters) if (o.guard && o.hp > 0 && !o.awake) { o.awake = true; ev.push(`The ${o.kind} wakes.`); }
         } else if (t.kind === "draught") { t.taken = true; run.hp = Math.min(MAX_HP, run.hp + 6); ev.push("You drink a draught."); }
         else if (t.kind === "whetstone") { t.taken = true; run.dmg++; ev.push("You sharpen your blade on a whetstone."); }

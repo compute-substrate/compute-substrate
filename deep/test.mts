@@ -12,7 +12,9 @@ for (let d = 1; d <= DEPTH; d++) {
 }
 ok(reachable, `all ${DEPTH} floors: the stairs and every chest can be reached from the rope`);
 const relics = allRelics();
-ok(relics.length > 20 && new Set(relics.map(r => r.id)).size === relics.length, `${relics.length} relics in the deep, each its own`);
+ok(relics.length > 40 && new Set(relics.map(r => r.id)).size === relics.length, `${relics.length} relics in the deep, ${new Set(relics.map(r => r.name)).size} kinds`);
+ok(Array.from({ length: DEPTH }, (_, i) => plan(i + 1).chests.length).every(n => n >= 1 && n <= 5), "every floor has a chest or a few, and none is crowded");
+ok(relics.filter(r => r.depth >= 14).every(r => relics.filter(x => x.name === r.name).length === 1) && relics.filter(r => r.name === "bone dice").length === 4, "a few of each near the top, one of each in the deepest floors");
 ok(relics.filter(r => r.id === BOTTOM).length === 1 && !plan(DEPTH).stairs && plan(DEPTH).monsters.filter(m => m.kind === "warden" && m.guard).length === 1, "one thing at the bottom, no way further down, and a warden asleep beside it");
 const b = plan(DEPTH);
 console.log(Array.from({ length: FH }, (_, y) => Array.from({ length: FW }, (_, x) => x === b.rope.x && y === b.rope.y ? "<" : b.chests.some(c => c.x === x && c.y === y) ? "$" : b.monsters.some(m => m.x === x && m.y === y) ? "m" : b.tiles[y * FW + x] ? "." : "#").join("")).join("\n"));

@@ -3,7 +3,7 @@
 // leave your name where you fell (a post). Anyone can replay the moves, so every relic belongs to
 // whoever brought it up first, for good (src/rules.ts). Records are on their own page.
 import { connect, writingKey, claimInvite, openInvites, welcome, friendlyName, doorwayAdd } from "../../kit/src/index";
-import { start, step, pack, tileAt, onRope, plan, allRelics, relicName, rarityOf, FW, FH, FLOOR, LAMP, MAX_HP, DEPTH, BOTTOM, BOTTOM_NAME, EMPTY, type Run } from "./dungeon";
+import { start, step, pack, tileAt, onRope, plan, allRelics, relicName, rarityOf, copiesOf, RELICS, FW, FH, FLOOR, LAMP, MAX_HP, DEPTH, BOTTOM, BOTTOM_NAME, EMPTY, type Run } from "./dungeon";
 import { createScene, visible } from "./scene";
 import * as R from "./rules";
 
@@ -19,6 +19,12 @@ const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 const day = (t: number) => new Date(t * 1000).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 const list = (xs: string[]) => xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
 const the = (id: string) => id === BOTTOM ? `the ${BOTTOM_NAME}` : relicName(id);
+// which one of its kind a relic is, in the order they came up: "bone dice, the 2nd of 4"
+function nthOf(id: string) {
+  const name = relicName(id), same = [...(hist?.home.entries() ?? [])].filter(([i]) => relicName(i) === name).sort((a, b) => a[1].height - b[1].height || a[0].localeCompare(b[0]));
+  return same.findIndex(([i]) => i === id) + 1;
+}
+const owned = (id: string) => { const c = copiesOf(relicName(id)); return c === 1 ? `${the(id)}, the only one` : `${the(id)}, the ${R.ordinal(nthOf(id))} of ${c}`; };
 const say = (t: string) => { $("said").textContent = t; };
 // lines from the game name people as "@0x…"
 const named = (line: string) => line.replace(/@(0x[0-9a-fA-F]{40})/g, (_, a) => who(a));
@@ -139,8 +145,8 @@ function render() {
   else if (state === "ending") bar(`<div class="text">${r?.over === "out" ? "Bringing it home…" : "Leaving your name…"} <span>On the record in a minute or two.</span></div>`);
   else if (state === "home") {
     const ret = hist!.returns.find(x => x.go === here!.go.toLowerCase())!;
-    const got = ret.relics.map(the), lost = ret.beaten.map(the);
-    bar(`<div class="text"><b>${got.length ? `Yours for good: ${esc(list(got))}.` : `Back up from floor ${ret.depth}.`}</b> <span>${lost.length ? `Someone got ${esc(list(lost))} home before you.` : hist!.stateAt(Infinity).rope?.depth === ret.depth && ret.depth > 1 ? `Your rope down to floor ${ret.depth} is the deepest.` : got.length ? "Nobody else can ever have them." : "Nothing carried this time."}</span></div>${downsOnly}`);
+    const got = ret.relics.map(owned), lost = ret.beaten.map(the);
+    bar(`<div class="text"><b>${got.length ? `Yours for good: ${esc(got.join("; "))}.` : `Back up from floor ${ret.depth}.`}</b> <span>${lost.length ? `Someone got ${esc(list(lost))} home before you.` : hist!.stateAt(Infinity).rope?.depth === ret.depth && ret.depth > 1 ? `Your rope down to floor ${ret.depth} is the deepest.` : got.length ? "Nobody else can ever have them." : "Nothing carried this time."}</span></div>${downsOnly}`);
   } else if (state === "grave") bar(`<div class="text"><b>Your name is on floor ${r!.floor.depth}.</b> <span>${r!.carried.length ? `${esc(cap(list(r!.carried.map(the))))} lie${r!.carried.length === 1 ? "s" : ""} with you, for whoever comes next.` : "For whoever comes next."}</span></div>${downsOnly}`);
   else if (state === "late") bar(`<div class="text">This one's too old to put on the record. <span>A descent has a day to end.</span></div>${downsOnly}`);
   else if (r && (r.over === "dead" || r.over === "dark")) {
@@ -230,11 +236,17 @@ function drawTab() {
     $("tabview").innerHTML = rows.length ? `<table><thead><tr><th>#</th><th class="l">Name</th><th>Deepest</th><th>Relics</th><th>Runs</th><th>Deaths</th></tr></thead><tbody>${rows.map(([a, p], i) =>
       `<tr${a === mine ? ` class="me"` : ""}>${rank(i)}<td class="l name">${esc(Who(a))}</td><td>${p.deepest}</td><td>${p.relics}</td><td>${p.ups + p.graves}</td><td>${p.graves}</td></tr>`).join("")}</tbody></table>` : `<p class="empty">Nobody has gone down yet. The first name here is still free.</p>`;
   } else if (tab === "relics") {
-    // every relic in the deep, deepest first: who has it, or where it is
-    const rows = [...relics].sort((a, b) => b.depth - a.depth || a.id.localeCompare(b.id));
-    $("tabview").innerHTML = `<table><thead><tr><th class="l">Relic</th><th>Floor</th><th class="l">Held by</th><th>Since</th></tr></thead><tbody>${rows.map(r => {
-      const home = h?.home.get(r.id), lies = now?.graves.find(g => g.relics.includes(r.id));
-      return `<tr class="${home ? "" : "unclaimed"}${home?.by === mine ? " me" : ""}"><td class="l name">${dot(r.name)}${esc(r.id === BOTTOM ? `The ${BOTTOM_NAME}` : cap(r.name))}</td><td>${r.depth}</td><td class="l name">${home ? esc(Who(home.by)) : lies ? `<span class="muted">In ${esc(who(lies.by))}'s grave</span>` : `<span class="muted">Still down there</span>`}</td><td>${home ? esc(dayShort(home.at)) : ""}</td></tr>`;
+    // every kind of relic, deepest first: how many there are, how many are up, and who has them
+    const kinds = [...RELICS.map(r => r.name), BOTTOM_NAME].map(name => {
+      const ids = relics.filter(r => r.name === name), floors = [...new Set(ids.map(r => r.depth))].sort((a, b) => a - b);
+      const up = ids.filter(r => h?.home.has(r.id)).map(r => h!.home.get(r.id)!).sort((a, b) => a.height - b.height);
+      return { name, ids, floors, up };
+    }).sort((a, b) => b.floors[0] - a.floors[0]);
+    $("tabview").innerHTML = `<table><thead><tr><th class="l">Relic</th><th>Floors</th><th>Up</th><th class="l">${"First up by"}</th></tr></thead><tbody>${kinds.map(k => {
+      const one = k.ids.length === 1, lies = one && now?.graves.find(g => g.relics.includes(k.ids[0].id));
+      const holders = one ? (k.up[0] ? esc(Who(k.up[0].by)) : lies ? `<span class="muted">In ${esc(who(lies.by))}'s grave</span>` : `<span class="muted">Still down there</span>`) : k.up[0] ? esc(Who(k.up[0].by)) : `<span class="muted">Nobody yet</span>`;
+      const mineToo = k.up.some(u => u.by === mine);
+      return `<tr class="${k.up.length ? "" : "unclaimed"}${mineToo ? " me" : ""}"><td class="l name">${dot(k.name)}${esc(k.name === BOTTOM_NAME ? `The ${BOTTOM_NAME}` : cap(k.name))}</td><td>${k.floors.length > 1 ? `${k.floors[0]} to ${k.floors[k.floors.length - 1]}` : k.floors[0]}</td><td>${k.up.length} of ${k.ids.length}</td><td class="l name">${holders}</td></tr>`;
     }).join("")}</tbody></table>`;
   } else {
     // floor by floor: who got there first, what's left, who lies there
