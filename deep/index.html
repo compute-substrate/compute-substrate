@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>The deep</title>
-<meta name="description" content="A dungeon drawn from a block nobody could know in advance. Go down, push deeper or climb out. What you bring up is yours for good, numbered and checkable by anyone.">
+<meta name="description" content="One dungeon, the same for everyone. Every relic in it can only be brought up once, and there's one thing at the bottom. Whoever brings something up first has it for good.">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <!-- deep: each dungeon is drawn from the block after you go down; you play it here, and your moves
      are the record of coming back up. Anyone replays them (src/rules.ts). The scene: src/scene.ts. -->
@@ -47,6 +47,11 @@
   .row > b { flex: none; width: 64px; }
   .row .what { display: flex; flex-direction: column; line-height: 1.4; min-width: 0; }
   .uncommon { color: var(--uncommon); } .scarce { color: var(--scarce); } .rare { color: var(--rare); } .legendary { color: var(--legendary); }
+  .standing { margin: -4px 2px 12px; font-size: 14px; }
+  .floor { padding: 12px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
+  .floor ul { margin: 6px 0 0; padding: 0 0 0 18px; }
+  .floor li { padding: 1px 0; }
+  .one { color: var(--legendary); font-weight: 600; }
   .relics { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
   .relic { display: flex; gap: 9px; align-items: center; padding: 6px 0; color: var(--ink); }
   .relic > span:last-child { display: flex; flex-direction: column; line-height: 1.35; }
@@ -61,19 +66,21 @@
 <main>
   <section id="game">
     <header><h1>The deep</h1><a href="#records">Records</a></header>
+    <p id="standing" class="small standing"></p>
     <div class="stage">
       <canvas id="scene" aria-label="The floor you're on"></canvas>
       <div class="bar" id="bar"></div>
     </div>
-    <p id="help" hidden>Arrow keys or tap where you want to go. Walk into something to fight it. The rope you came down on is the way out.</p>
+    <p id="help" hidden>Arrow keys or tap where you want to go. Walk into something to fight it, or walk away from it: a monster that has to follow you can't hit you. The rope you came down on is the way out.</p>
     <p id="said" aria-live="polite"></p>
     <ul id="log"></ul>
   </section>
   <section id="recordsview" hidden>
     <header><h1>Records</h1><a href="#">Back down</a></header>
-    <div class="tabs" role="group"><button data-tab="deepest" aria-pressed="true">Deepest</button><button data-tab="relics">Every relic</button><button data-tab="latest">Latest</button><button data-tab="mine">Yours</button></div>
+    <p id="standing2" class="small standing"></p>
+    <div class="tabs" role="group"><button data-tab="floors" aria-pressed="true">Floor by floor</button><button data-tab="relics">Brought up</button><button data-tab="latest">Latest</button><button data-tab="mine">Yours</button></div>
     <div id="tabview"></div>
-    <footer>Nobody runs the deep. Each dungeon is drawn from a block nobody could know in advance, and every return is every move made, so anyone can play it again and see the same relics come up. Nobody can fake one.</footer>
+    <footer>Nobody runs the deep. It's the same twenty floors for everyone, and every ending is every move made, so anyone can play it again and see the same thing happen. The fights in each descent are drawn from a block nobody could know in advance. Whoever climbs out of the deepest floor leaves a rope there for everyone.</footer>
   </section>
 </main>
 <script type="module" src="page.js"></script>

@@ -1,8 +1,9 @@
-// The deep: go down (a post), play the dungeon the next block draws, right here, at your own pace;
-// climb out with what you found and post your way back up (a post). Anyone can replay the moves, so
-// what you bring up is yours for good, numbered (src/rules.ts). Records are on their own page.
+// The deep: one dungeon for everyone. Go down (a post), from the top or down the deepest rope; play
+// it here at your own pace; climb out with what you found and post your way back up, or fall and
+// leave your name where you fell (a post). Anyone can replay the moves, so every relic belongs to
+// whoever brought it up first, for good (src/rules.ts). Records are on their own page.
 import { connect, writingKey, claimInvite, openInvites, welcome, friendlyName, doorwayAdd } from "../../kit/src/index";
-import { start, step, pack, tileAt, onRope, rarity, relicOf, RELICS, FW, FH, FLOOR, LAMP, MAX_HP, type Run } from "./dungeon";
+import { start, step, pack, tileAt, onRope, plan, allRelics, relicName, rarityOf, FW, FH, FLOOR, LAMP, MAX_HP, DEPTH, BOTTOM, BOTTOM_NAME, EMPTY, type Run } from "./dungeon";
 import { createScene, visible } from "./scene";
 import * as R from "./rules";
 
@@ -13,10 +14,14 @@ const net = connect({ node: new URLSearchParams(location.search).get("node") ?? 
 const me = await writingKey("deep");
 const mine = me.address.toLowerCase();
 const who = (a?: string) => !a ? "someone" : a.toLowerCase() === mine ? "you" : friendlyName(a);
+const Who = (a?: string) => { const w = who(a); return w[0].toUpperCase() + w.slice(1); };
 const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 const day = (t: number) => new Date(t * 1000).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 const list = (xs: string[]) => xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+const the = (id: string) => id === BOTTOM ? `the ${BOTTOM_NAME}` : relicName(id);
 const say = (t: string) => { $("said").textContent = t; };
+// lines from the game name people as "@0x…"
+const named = (line: string) => line.replace(/@(0x[0-9a-fA-F]{40})/g, (_, a) => who(a));
 
 // ── reading ──
 const blocks = new Map<number, Promise<R.Block>>();
@@ -36,13 +41,13 @@ async function readChecked(topic: string, limit: number): Promise<R.Rec[]> {
   return rows.filter(r => r.pending || proven.has(r.id)).map(r => ({ ...r, author: (r as any).author ?? proven.get(r.id) }));
 }
 
-let tip = 0, gos: R.Rec[] = [], outs: R.Rec[] = [], rets: R.Return[] = [];
+let tip = 0, gos: R.Rec[] = [], ends: R.Rec[] = [], hist: R.History | null = null;
 async function refresh() {
   try {
     tip = (await net.api.tip()).height;
-    const [g, o] = await Promise.all([readChecked(R.GO, 400), readChecked(R.OUT, 800)]);
-    gos = g; outs = o;
-    rets = await R.returns(g, o, block);
+    const [g, u, f] = await Promise.all([readChecked(R.GO, 500), readChecked(R.UP, 800), readChecked(R.FELL, 800)]);
+    gos = g; ends = [...u, ...f];
+    hist = await R.history(g, ends, block);
     await sync(); drawTab();
   } catch { say("Couldn't reach the network just now. It tries again by itself."); }
 }
@@ -55,10 +60,12 @@ const saved = (go: string) => { try { return localStorage.getItem(`deep.moves.${
 const save = () => { try { if (here) localStorage.setItem(`deep.moves.${here.go}`, here.moves); } catch {} };
 const look = (h: Here) => { for (const k of visible(h.run)) h.seen.add(k); };
 
-function load(go: string, seed: string): Here {
-  const run = start(seed), h: Here = { go, run, moves: "", seen: new Set(), log: [] };
+function load(g: R.Rec, seed: string): Here {
+  const st = hist ? hist.stateAt(g.height) : EMPTY;
+  const run = start(seed, st, R.goFrom(g.text) ?? 1), h: Here = { go: g.id, run, moves: "", seen: new Set(), log: [] };
   look(h);
-  for (const m of saved(go)) {
+  h.log.push(run.from > 1 ? `Down the rope to floor ${run.from}.` : "Floor 1.");
+  for (const m of saved(g.id)) {
     const depth = run.floor.depth, ev = step(run, m);
     h.moves += m; h.log.push(...ev);
     if (run.floor.depth !== depth) h.seen = new Set();
@@ -87,11 +94,11 @@ function move(m: string) {
   render();
 }
 
-// ── where you are: nowhere, on your way down, down there, or back up ──
-type State = "none" | "going" | "opening" | "down" | "bringing" | "home" | "late";
+// ── where you are: up here, on your way down, down there, or done ──
+type State = "none" | "going" | "opening" | "down" | "ending" | "home" | "grave" | "late";
 let state: State = "none";
-const myGo = () => gos.filter(g => g.author?.toLowerCase() === mine && g.text === "go").sort((a, b) => (b.pending ? 1e12 : b.height) - (a.pending ? 1e12 : a.height))[0];
-const outFor = (go: string) => outs.find(o => o.author?.toLowerCase() === mine && R.parseOut(o.text)?.go === go.toLowerCase());
+const myGo = () => gos.filter(g => g.author?.toLowerCase() === mine && R.goFrom(g.text)).sort((a, b) => (b.pending ? 1e12 : b.height) - (a.pending ? 1e12 : a.height))[0];
+const endFor = (go: string) => ends.find(o => o.author?.toLowerCase() === mine && R.parseEnd(o.text)?.go === go.toLowerCase());
 
 async function sync() {
   const g = myGo();
@@ -99,41 +106,55 @@ async function sync() {
   else if (g.pending) state = "going";
   else if (tip < g.height + 1) state = "opening";
   else {
-    if (!here || here.go !== g.id) here = load(g.id, await R.seedFor(g, block));
-    const o = outFor(g.id);
-    state = o ? (o.pending ? "bringing" : rets.some(r => r.go === g.id.toLowerCase()) ? "home" : "down") : tip > g.height + R.OUT_WITHIN && here.run.over !== "dead" && here.run.over !== "dark" ? "late" : "down";
+    if (!here || here.go !== g.id) here = load(g, await R.seedFor(g, block));
+    const e = endFor(g.id), id = g.id.toLowerCase();
+    state = e ? (e.pending ? "ending" : hist?.returns.some(r => r.go === id) ? "home" : hist?.falls.some(f => f.go === id) ? "grave" : "down")
+      : tip > g.height + R.END_WITHIN ? "late" : "down";
   }
   render();
 }
 
-// the way in, while you're not down there: the first floor of nobody's dungeon, all of it seen
+// up here, before going down: the first floor, all of it seen
 const doorway = (() => { const run = start("the way down"), seen = new Set<string>(); for (let y = 0; y < FH; y++) for (let x = 0; x < FW; x++) if (tileAt(run.floor, x, y) === FLOOR || tileAt(run.floor, x, y + 1) === FLOOR) seen.add(`${x},${y}`); return { run, seen }; })();
+
+// the line about everyone: how deep, how much is still down there
+function standing() {
+  const h = hist, total = allRelics().length, up = h?.home.size ?? 0;
+  if (!h || !h.deepest) return `Nobody has been down yet. ${total} relics are down there, and one thing at the bottom.`;
+  const bottom = h.home.get(BOTTOM);
+  return `Deepest anyone has been: floor ${h.deepest}. ${up} of ${total} relics brought up. ${bottom ? `${Who(bottom.by)} has the ${BOTTOM_NAME}.` : h.deepest >= DEPTH ? `Someone has seen the bottom. The ${BOTTOM_NAME} is still down there.` : "Nobody has seen the bottom."}`;
+}
 
 function bar(html: string) { $("bar").innerHTML = html; }
 function render() {
   const r = here?.run;
-  if (r) scene.show(r, here!.seen); else scene.show(doorway.run, doorway.seen);
-  $("log").innerHTML = here ? here.log.slice(-6).reverse().map((l, i) => `<li${i ? "" : ` class="new"`}>${esc(l)}</li>`).join("") : "";
-  const again = `<button id="go">Go down${here ? " again" : ""}</button>`;
-  if (state === "none") bar(`<div class="text"><b>The way down.</b> <span>Your dungeon is drawn from the next block, so nobody knows it in advance. A post to go down, a post to come back up.</span></div>${again}`);
-  else if (state === "going" || state === "opening") bar(`<div class="text">Going down… <span>The way opens with the next block, in a minute or two.</span></div>`);
-  else if (state === "bringing") bar(`<div class="text">Bringing ${r && r.carried.length ? "them" : "it"} home… <span>It's yours for good in a minute or two.</span></div>`);
+  if (r && state !== "none") scene.show(r, here!.seen); else scene.show(doorway.run, doorway.seen);
+  $("log").innerHTML = here ? here.log.slice(-6).reverse().map((l, i) => `<li${i ? "" : ` class="new"`}>${esc(named(l))}</li>`).join("") : "";
+  $("standing").textContent = standing();
+  const rope = hist?.stateAt(Infinity).rope;
+  const downs = `<button class="quiet" id="go">Go down${here ? " again" : ""}</button>${rope && rope.depth > 1 ? `<button id="rope">Down ${who(rope.by) === "you" ? "your" : esc(who(rope.by)) + "'s"} rope to floor ${rope.depth}</button>` : ""}`;
+  const downsOnly = rope && rope.depth > 1 ? downs : `<button id="go">Go down${here ? " again" : ""}</button>`;
+  if (state === "none") bar(`<div class="text"><b>The way down.</b> <span>One dungeon, the same for everyone. Every relic in it can only be brought up once.</span></div>${downsOnly}`);
+  else if (state === "going" || state === "opening") bar(`<div class="text">Going down… <span>Your fights are drawn from the next block, in a minute or two.</span></div>`);
+  else if (state === "ending") bar(`<div class="text">${r?.over === "out" ? "Bringing it home…" : "Leaving your name…"} <span>On the record in a minute or two.</span></div>`);
   else if (state === "home") {
-    const ret = rets.find(x => x.go === here!.go.toLowerCase())!;
-    const got = ret.relics.map(x => `${x.name}, the ${R.ordinal(x.nth)} ever`);
-    bar(`<div class="text"><b>${got.length ? "Yours for good:" : `Back up from floor ${ret.depth}.`}</b> <span>${esc(got.length ? got.join("; ") + "." : "Nothing carried this time.")}</span></div>${again}`);
-  } else if (state === "late") bar(`<div class="text">This one's too old to bring home. <span>A run has a day to come back up.</span></div>${again}`);
+    const ret = hist!.returns.find(x => x.go === here!.go.toLowerCase())!;
+    const got = ret.relics.map(the), lost = ret.beaten.map(the);
+    bar(`<div class="text"><b>${got.length ? `Yours for good: ${esc(list(got))}.` : `Back up from floor ${ret.depth}.`}</b> <span>${lost.length ? `Someone got ${esc(list(lost))} home before you.` : hist!.stateAt(Infinity).rope?.depth === ret.depth && ret.depth > 1 ? `Your rope down to floor ${ret.depth} is the deepest.` : got.length ? "Nobody else can ever have them." : "Nothing carried this time."}</span></div>${downsOnly}`);
+  } else if (state === "grave") bar(`<div class="text"><b>Your name is on floor ${r!.floor.depth}.</b> <span>${r!.carried.length ? `${esc(cap(list(r!.carried.map(the))))} lie${r!.carried.length === 1 ? "s" : ""} with you, for whoever comes next.` : "For whoever comes next."}</span></div>${downsOnly}`);
+  else if (state === "late") bar(`<div class="text">This one's too old to put on the record. <span>A descent has a day to end.</span></div>${downsOnly}`);
   else if (r && (r.over === "dead" || r.over === "dark")) {
-    bar(`<div class="text"><b>${r.over === "dark" ? `Your lamp went out on floor ${r.floor.depth}.` : `The ${r.killedBy} killed you on floor ${r.floor.depth}.`}</b> <span>${r.carried.length ? `${cap(list(r.carried))} stay${r.carried.length === 1 ? "s" : ""} down there.` : "Nothing lost but the lamp."}</span></div>${again}`);
+    bar(`<div class="text"><b>${r.over === "dark" ? `Your lamp went out on floor ${r.floor.depth}.` : `The ${r.killedBy} killed you on floor ${r.floor.depth}.`}</b> <span>${r.carried.length ? `Leave your name here, and ${esc(list(r.carried.map(the)))} lie${r.carried.length === 1 ? "s" : ""} with you for whoever comes next.` : "Leave your name here, for whoever comes next."}</span></div><button class="quiet" id="go">Go down again</button><button id="fell">Leave your name</button>`);
   } else if (r && r.over === "out") {
-    bar(`<div class="text"><b>You're out${r.carried.length ? `, with ${esc(list(r.carried))}` : ""}.</b> <span>${r.carried.length ? "Bring them home and they're yours for good, numbered." : `Floor ${r.deepest} and back. Bring it home to put it on the record.`}</span></div><button id="home">Bring ${r.carried.length ? "them" : "it"} home</button>`);
+    bar(`<div class="text"><b>You're out${r.carried.length ? `, with ${esc(list(r.carried.map(the)))}` : ""}.</b> <span>${r.carried.length ? "Bring it home first and it's yours, for good. Nobody else can ever have it." : `Floor ${r.deepest} and back. Bring it home to put it on the record${r.deepest > (hist?.stateAt(Infinity).rope?.depth ?? 0) ? ", and leave your rope as the deepest" : ""}.`}</span></div><button id="home">Bring it home</button>`);
   } else if (r) {
-    const lampLeft = LAMP - r.turn;
-    bar(`<div class="text"><b>Floor ${r.floor.depth}.</b> <span>Strength ${r.hp} of ${MAX_HP}. Lamp ${lampLeft}.${r.carried.length ? ` Carrying ${esc(list(r.carried))}.` : ""}</span></div>
+    bar(`<div class="text"><b>Floor ${r.floor.depth}${r.floor.depth === DEPTH ? ", the bottom" : ""}.</b> <span>Strength ${r.hp} of ${MAX_HP}. Lamp ${LAMP - r.turn}.${r.carried.length ? ` Carrying ${esc(list(r.carried.map(the)))}.` : ""}</span></div>
       <button class="quiet" id="wait">Wait</button>${onRope(r) ? `<button id="climb">Climb out</button>` : ""}`);
   }
-  if ($("go")) $("go").onclick = goDown;
-  if ($("home")) $("home").onclick = bringHome;
+  if ($("go")) $("go").onclick = () => goDown(1);
+  if ($("rope")) $("rope").onclick = () => goDown(rope!.depth);
+  if ($("home")) $("home").onclick = () => end("up");
+  if ($("fell")) $("fell").onclick = () => end("fell");
   if ($("wait")) $("wait").onclick = () => move("z");
   if ($("climb")) $("climb").onclick = () => move("x");
   $("help").hidden = state !== "down" || !!r?.over || (here?.moves.length ?? 0) > 12;
@@ -147,22 +168,22 @@ addEventListener("keydown", e => {
   e.preventDefault(); move(m);
 });
 ($("scene") as HTMLCanvasElement).addEventListener("click", e => {
-  if (!here) return;
+  if (!here || state !== "down") return;
   const t = scene.at(e.clientX, e.clientY), r = here.run, dx = t.x - r.x, dy = t.y - r.y;
   if (!dx && !dy) return move("z"); // tapping yourself waits a turn
   move(Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? "e" : "w") : (dy > 0 ? "s" : "n"));
 });
 
 // ── writing ──
-async function goDown() {
+async function goDown(from: number) {
   say("Going down…");
-  try { await net.write(me.signer(net as any), R.GO, "go"); say(""); await refresh(); }
+  try { await net.write(me.signer(net as any), R.GO, R.goText(from)); say(""); await refresh(); }
   catch (e: any) { await trouble(e); }
 }
-async function bringHome() {
+async function end(kind: "up" | "fell") {
   if (!here) return;
-  say("Bringing it home…");
-  try { await net.write(me.signer(net as any), R.OUT, R.outText(here.go, pack(here.moves))); say(""); await refresh(); }
+  say(kind === "up" ? "Bringing it home…" : "Leaving your name…");
+  try { await net.write(me.signer(net as any), kind === "up" ? R.UP : R.FELL, R.endText(kind, here.go, pack(here.moves))); say(""); await refresh(); }
   catch (e: any) { await trouble(e); }
 }
 async function trouble(e: any) {
@@ -179,30 +200,42 @@ async function trouble(e: any) {
 }
 
 // ── the records, on their own page (#records) ──
-let tab = "deepest";
+let tab = "floors";
 const route = () => { const rec = location.hash === "#records"; $("game").hidden = rec; $("recordsview").hidden = !rec; if (rec) drawTab(); scrollTo(0, 0); };
 addEventListener("hashchange", route);
 document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b => b.onclick = () => { tab = b.dataset.tab!; drawTab(); });
 function drawTab() {
   if ($("recordsview").hidden) return;
+  $("standing2").textContent = standing();
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.tab === tab)));
-  const relicLine = (x: R.Brought) => `<span class="${rarity(relicOf(x.name)!)}">${esc(x.name)}</span> (the ${R.ordinal(x.nth)})`;
-  const line = (r: R.Return) => `<div class="row"><b>Floor ${r.depth}</b><span class="what"><span>${esc(cap(who(r.by)))}, ${esc(day(r.at))}, in ${r.turns} turns</span><span class="small">${r.relics.length ? `Brought up ${r.relics.map(relicLine).join(", ")}` : "Brought up nothing"}</span></span></div>`;
-  if (tab === "deepest") {
-    const best = [...rets].sort((a, b) => b.depth - a.depth || b.relics.length - a.relics.length || a.turns - b.turns).slice(0, 25);
-    $("tabview").innerHTML = best.length ? best.map(line).join("") : `<p class="small">Nobody has come back up yet.</p>`;
+  const h = hist, now = h?.stateAt(Infinity);
+  const relic = (id: string) => `<span class="${rarityOf(relicName(id))}">${esc(the(id))}</span>`;
+  if (tab === "floors") {
+    // floor by floor, as far as anyone has been, and one more
+    const deepest = h?.deepest ?? 0, rows: string[] = [];
+    for (let d = 1; d <= Math.min(DEPTH, deepest + 1); d++) {
+      const first = h?.firstTo.get(d);
+      if (!first) { rows.push(`<div class="floor"><b>Floor ${d}</b><span class="small">Nobody has been this deep.</span></div>`); break; }
+      const chests = plan(d).chests.map(c => {
+        const home = h!.home.get(c.id), lies = now!.graves.find(g => g.relics.includes(c.id));
+        return `<li>${relic(c.id)}: ${home ? `brought up by ${esc(who(home.by))}, ${esc(day(home.at))}` : lies ? `lies with ${esc(who(lies.by))}, on floor ${lies.depth}` : "still down there"}</li>`;
+      });
+      const graves = (h?.falls ?? []).filter(f => f.depth === d).map(f => `<li class="small">Here lies ${esc(who(f.by))}, ${f.killedBy ? `killed by a ${esc(f.killedBy)}` : "lost in the dark"}, ${esc(day(f.at))}</li>`);
+      rows.push(`<div class="floor"><b>Floor ${d}${d === DEPTH ? ", the bottom" : ""}</b><span class="small">First reached by ${esc(who(first.by))}, ${esc(day(first.at))}${now?.rope?.depth === d ? `. ${esc(Who(now.rope.by))}'s rope comes down here` : ""}</span><ul>${chests.join("")}${graves.join("")}</ul></div>`);
+    }
+    $("tabview").innerHTML = rows.length ? rows.join("") : `<p class="small">Nobody has been down yet. The first to reach each floor is remembered here.</p>`;
   } else if (tab === "relics") {
-    $("tabview").innerHTML = `<div class="relics">${RELICS.map(rl => {
-      const all = rets.flatMap(r => r.relics.filter(x => x.name === rl.name).map(x => ({ r, x })));
-      const first = all[0];
-      return `<div class="relic ${rarity(rl)}${all.length ? "" : " unseen"}"><span class="dot"></span><span><b>${esc(cap(rl.name))}</b><span class="small">${all.length ? `${all.length} brought up. The first by ${esc(who(first.r.by))}, ${esc(day(first.r.at))}` : `Never brought up. Found from floor ${rl.from}`}</span></span></div>`;
-    }).join("")}</div>`;
+    const up = [...(h?.home.entries() ?? [])].sort((a, b) => b[1].from - a[1].from || a[1].height - b[1].height);
+    $("tabview").innerHTML = `<p class="small">${up.length} of ${allRelics().length} brought up. Each one only once, ever.</p>` + (up.length ? up.map(([id, x]) => `<div class="row"><b>Floor ${x.from}</b><span class="what"><span>${relic(id)}</span><span class="small">${esc(Who(x.by))}, ${esc(day(x.at))}</span></span></div>`).join("") : "");
   } else if (tab === "latest") {
-    const l = [...rets].reverse().slice(0, 30);
-    $("tabview").innerHTML = l.length ? l.map(line).join("") : `<p class="small">Nobody has come back up yet.</p>`;
+    const items = [...(h?.returns ?? []).map(r => ({ at: r.height, html: `<div class="row"><b>Floor ${r.depth}</b><span class="what"><span>${esc(Who(r.by))} came back up, ${esc(day(r.at))}</span><span class="small">${r.relics.length ? `With ${r.relics.map(relic).join(", ")}` : "With nothing"}${r.beaten.length ? `. Too late for ${r.beaten.map(relic).join(", ")}` : ""}</span></span></div>` })),
+      ...(h?.falls ?? []).map(f => ({ at: f.height, html: `<div class="row"><b>Floor ${f.depth}</b><span class="what"><span>${esc(Who(f.by))} fell, ${esc(day(f.at))}</span><span class="small">${f.killedBy ? `Killed by a ${esc(f.killedBy)}` : "Lost in the dark"}${f.relics.length ? `, carrying ${f.relics.map(relic).join(", ")}` : ""}</span></span></div>` }))].sort((a, b) => b.at - a.at).slice(0, 40);
+    $("tabview").innerHTML = items.length ? items.map(x => x.html).join("") : `<p class="small">Nothing yet.</p>`;
   } else {
-    const l = rets.filter(r => r.by === mine), kinds = new Set(l.flatMap(r => r.relics.map(x => x.name)));
-    $("tabview").innerHTML = `<p class="small">${kinds.size} of ${RELICS.length} kinds of relic brought up.</p>${l.length ? [...l].reverse().map(line).join("") : `<p class="small">What you bring up is listed here, for good.</p>`}`;
+    const ids = [...(h?.home.entries() ?? [])].filter(([, x]) => x.by === mine);
+    const falls = (h?.falls ?? []).filter(f => f.by === mine).length, rets = (h?.returns ?? []).filter(r => r.by === mine);
+    $("tabview").innerHTML = `<p class="small">${rets.length} time${rets.length === 1 ? "" : "s"} back up, ${falls} grave${falls === 1 ? "" : "s"}. Deepest: floor ${Math.max(0, ...rets.map(r => r.depth), ...(h?.falls ?? []).filter(f => f.by === mine).map(f => f.depth)) || "none yet"}.</p>` +
+      (ids.length ? ids.map(([id, x]) => `<div class="row"><b>Floor ${x.from}</b><span class="what"><span>${relic(id)}</span><span class="small">Brought up ${esc(day(x.at))}</span></span></div>`).join("") : `<p class="small">What you bring up is listed here, for good.</p>`);
   }
 }
 

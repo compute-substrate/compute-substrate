@@ -1,12 +1,20 @@
-// The deep: a dungeon drawn from a seed, floor by floor, and a run through it played one move at a
-// time. Everything here is plain arithmetic on the seed and the moves, so any machine that replays
-// the same moves against the same seed ends in exactly the same place, carrying exactly the same
-// things. That's what makes what you bring up checkable by anyone (src/rules.ts).
+// The deep: one dungeon for everyone, for good. Its twenty floors are drawn once, from WORLD, so
+// every machine has the same rooms, the same monsters where they start, and the same chests in the
+// same places. Each chest holds one relic, which can only ever be brought up once; at the bottom is
+// one thing, and only one person will ever have it.
+//
+// What a descent changes is the fighting: every going-down has its own seed (from a block nobody
+// knew in advance), which decides every swing and every step a monster takes. Plain arithmetic on the
+// seed, the world as it stood when you went down, and your moves: anyone who replays them ends in
+// the same place, carrying the same things (src/rules.ts).
 
+export const WORLD = "the deep";
+export const DEPTH = 20;            // the bottom
 export const FW = 19, FH = 13;      // a floor, in squares
 export const LAMP = 860;            // turns of oil: when it runs out, you're lost in the dark
 export const MAX_HP = 12;
 export const WALL = 0, FLOOR = 1;
+export const BOTTOM = `${DEPTH}.eye`, BOTTOM_NAME = "eye of the deep";
 
 // 32-bit hashing (FNV-1a, then a mix): the same numbers on every machine
 export function hash32(...parts: (string | number)[]): number {
@@ -20,64 +28,69 @@ const rnd = (...p: (string | number)[]) => hash32(...p) / 4294967296;
 // ── what lives down there ──
 export type Kind = { name: string; hp: number; dmg: [number, number]; hit: number; from: number; weight: number; erratic?: boolean };
 export const KINDS: Kind[] = [
-  { name: "rat", hp: 2, dmg: [1, 1], hit: 0.7, from: 1, weight: 10 },
-  { name: "bat", hp: 2, dmg: [1, 2], hit: 0.6, from: 1, weight: 6, erratic: true },
-  { name: "goblin", hp: 4, dmg: [1, 2], hit: 0.7, from: 2, weight: 8 },
-  { name: "skeleton", hp: 6, dmg: [1, 3], hit: 0.7, from: 3, weight: 7 },
-  { name: "spider", hp: 4, dmg: [2, 3], hit: 0.75, from: 4, weight: 6 },
-  { name: "ogre", hp: 11, dmg: [2, 4], hit: 0.65, from: 6, weight: 4 },
-  { name: "wraith", hp: 8, dmg: [2, 5], hit: 0.75, from: 8, weight: 4, erratic: true },
-  { name: "warden", hp: 18, dmg: [3, 6], hit: 0.7, from: 11, weight: 2 },
+  { name: "rat", hp: 2, dmg: [1, 1], hit: 0.65, from: 1, weight: 10 },
+  { name: "bat", hp: 2, dmg: [1, 2], hit: 0.55, from: 1, weight: 6, erratic: true },
+  { name: "goblin", hp: 4, dmg: [1, 2], hit: 0.65, from: 2, weight: 8 },
+  { name: "skeleton", hp: 6, dmg: [1, 3], hit: 0.65, from: 4, weight: 7 },
+  { name: "spider", hp: 4, dmg: [2, 3], hit: 0.7, from: 6, weight: 6 },
+  { name: "ogre", hp: 11, dmg: [2, 4], hit: 0.6, from: 9, weight: 4 },
+  { name: "wraith", hp: 8, dmg: [2, 5], hit: 0.7, from: 12, weight: 4, erratic: true },
+  { name: "warden", hp: 18, dmg: [3, 6], hit: 0.65, from: 99, weight: 0 }, // only at the bottom
 ];
 export const kindOf = (n: string) => KINDS.find(k => k.name === n)!;
 
-// ── what you can bring up: relics, deeper ones rarer ──
+// ── relics: kinds of thing a chest can hold, deeper ones rarer ──
 export type Relic = { name: string; from: number; weight: number };
 export const RELICS: Relic[] = [
-  { name: "bone dice", from: 1, weight: 40 },
-  { name: "tin whistle", from: 1, weight: 36 },
-  { name: "copper ring", from: 1, weight: 34 },
-  { name: "cracked lens", from: 1, weight: 30 },
-  { name: "old key", from: 2, weight: 26 },
-  { name: "jade beetle", from: 3, weight: 18 },
-  { name: "silver comb", from: 3, weight: 16 },
-  { name: "glass eye", from: 4, weight: 14 },
-  { name: "iron crown", from: 4, weight: 10 },
-  { name: "ember ring", from: 5, weight: 8 },
-  { name: "moth lantern", from: 5, weight: 7 },
-  { name: "drowned bell", from: 6, weight: 6 },
-  { name: "star chart", from: 7, weight: 5 },
-  { name: "obsidian heart", from: 8, weight: 3 },
-  { name: "crown of ash", from: 9, weight: 2 },
-  { name: "pale key", from: 10, weight: 2 },
-  { name: "first feather", from: 12, weight: 1 },
-  { name: "eye of the deep", from: 14, weight: 1 },
+  { name: "bone dice", from: 1, weight: 40 }, { name: "tin whistle", from: 1, weight: 36 },
+  { name: "copper ring", from: 1, weight: 34 }, { name: "cracked lens", from: 1, weight: 30 },
+  { name: "old key", from: 2, weight: 26 }, { name: "jade beetle", from: 3, weight: 18 },
+  { name: "silver comb", from: 3, weight: 16 }, { name: "glass eye", from: 5, weight: 14 },
+  { name: "iron crown", from: 6, weight: 10 }, { name: "ember ring", from: 7, weight: 8 },
+  { name: "moth lantern", from: 8, weight: 7 }, { name: "drowned bell", from: 10, weight: 6 },
+  { name: "star chart", from: 11, weight: 5 }, { name: "obsidian heart", from: 13, weight: 3 },
+  { name: "crown of ash", from: 15, weight: 2 }, { name: "pale key", from: 17, weight: 2 },
+  { name: "first feather", from: 18, weight: 1 },
 ];
-export const relicOf = (n: string) => RELICS.find(r => r.name === n);
-export function rarity(r: Relic): "common" | "uncommon" | "scarce" | "rare" | "legendary" {
-  return r.weight >= 26 ? "common" : r.weight >= 10 ? "uncommon" : r.weight >= 5 ? "scarce" : r.weight >= 2 ? "rare" : "legendary";
+export type Rarity = "common" | "uncommon" | "scarce" | "rare" | "legendary" | "one";
+export function rarityOf(name: string): Rarity {
+  if (name === BOTTOM_NAME) return "one";
+  const w = RELICS.find(r => r.name === name)?.weight ?? 40;
+  return w >= 26 ? "common" : w >= 10 ? "uncommon" : w >= 5 ? "scarce" : w >= 2 ? "rare" : "legendary";
 }
 function pick<T extends { from: number; weight: number }>(list: T[], depth: number, u: number): T {
   // deeper floors lean away from what's been there since the top
-  const pool = list.filter(x => x.from <= depth).map(x => ({ x, w: x.weight * (x.from >= depth - 4 ? 1 : 0.4) }));
+  const pool = list.filter(x => x.from <= depth).map(x => ({ x, w: x.weight * (x.from >= depth - 4 ? 1 : 0.35) }));
   const total = pool.reduce((a, p) => a + p.w, 0);
   let t = u * total;
   for (const p of pool) { if (t < p.w) return p.x; t -= p.w; }
   return pool[pool.length - 1].x;
 }
 
+// ── the world as it stands: what's been brought up, and who lies where with what ──
+export type Grave = { by: string; depth: number; x: number; y: number; killedBy?: string; relics: string[] };
+// home: relic id -> who brought it up. ropes: the deepest floor anyone has climbed out of, and who:
+// their rope stays, so anyone can go straight down to it (and nobody further).
+export type State = { home: Map<string, string>; graves: Grave[]; rope: { depth: number; by: string } | null };
+export const EMPTY: State = { home: new Map(), graves: [], rope: null };
+export const deepestStart = (s: State) => Math.max(1, s.rope?.depth ?? 1);
+
 // ── a floor ──
-export type Thing = { kind: "chest" | "draught" | "whetstone"; x: number; y: number; relic?: string; taken?: boolean };
-export type Monster = { id: number; kind: string; x: number; y: number; hp: number; awake: boolean };
-export type Floor = { depth: number; tiles: number[]; rope: { x: number; y: number }; stairs: { x: number; y: number }; things: Thing[]; monsters: Monster[] };
+export type Thing = { kind: "chest" | "draught" | "whetstone" | "grave"; x: number; y: number; id?: string; relic?: string; taken?: boolean; empty?: string; grave?: Grave };
+export type Monster = { id: number; kind: string; x: number; y: number; hp: number; awake: boolean; guard?: boolean };
+export type Floor = { depth: number; tiles: number[]; rope: { x: number; y: number }; stairs: { x: number; y: number } | null; things: Thing[]; monsters: Monster[] };
 export const tileAt = (f: Floor, x: number, y: number) => (x < 0 || y < 0 || x >= FW || y >= FH ? WALL : f.tiles[y * FW + x]);
 
-export function floorOf(seed: string, depth: number): Floor {
-  const R = (...p: (string | number)[]) => rnd(seed, "floor", depth, ...p);
+// The plan of a floor: the same for everyone, always
+type Plan = { tiles: number[]; rope: { x: number; y: number }; stairs: { x: number; y: number } | null; chests: { id: string; relic: string; x: number; y: number }[]; supplies: Thing[]; monsters: Monster[] };
+const plans = new Map<number, Plan>();
+export function plan(depth: number): Plan {
+  const had = plans.get(depth); if (had) return had;
+  const R = (...p: (string | number)[]) => rnd(WORLD, "floor", depth, ...p);
   const tiles = new Array(FW * FH).fill(WALL);
   type Room = { x: number; y: number; w: number; h: number };
   const rooms: Room[] = [];
-  for (let i = 0; i < 60 && rooms.length < 6; i++) {
+  for (let i = 0; i < 80 && rooms.length < 6; i++) {
     const w = 3 + Math.floor(R(i, "w") * 4), h = 3 + Math.floor(R(i, "h") * 3);
     const x = 1 + Math.floor(R(i, "x") * (FW - w - 1)), y = 1 + Math.floor(R(i, "y") * (FH - h - 1));
     if (rooms.some(r => x <= r.x + r.w && r.x <= x + w && y <= r.y + r.h && r.y <= y + h)) continue;
@@ -86,7 +99,6 @@ export function floorOf(seed: string, depth: number): Floor {
   const set = (x: number, y: number) => { if (x > 0 && y > 0 && x < FW - 1 && y < FH - 1) tiles[y * FW + x] = FLOOR; };
   for (const r of rooms) for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) set(x, y);
   const mid = (r: Room) => ({ x: r.x + (r.w >> 1), y: r.y + (r.h >> 1) });
-  // rooms joined one to the next by corridors with a single bend
   for (let i = 1; i < rooms.length; i++) {
     const a = mid(rooms[i - 1]), b = mid(rooms[i]);
     if (R(i, "bend") < 0.5) { for (let x = Math.min(a.x, b.x); x <= Math.max(a.x, b.x); x++) set(x, a.y); for (let y = Math.min(a.y, b.y); y <= Math.max(a.y, b.y); y++) set(b.x, y); }
@@ -94,49 +106,77 @@ export function floorOf(seed: string, depth: number): Floor {
   }
   const rope = mid(rooms[0]);
   const far = rooms.slice(1).sort((p, q) => (Math.abs(mid(q).x - rope.x) + Math.abs(mid(q).y - rope.y)) - (Math.abs(mid(p).x - rope.x) + Math.abs(mid(p).y - rope.y)))[0];
-  const stairs = mid(far);
-  // free squares, away from where you arrive
+  const bottom = depth === DEPTH;
+  const stairs = bottom ? null : mid(far);
   const r0 = rooms[0], free: { x: number; y: number }[] = [];
   for (let y = 0; y < FH; y++) for (let x = 0; x < FW; x++) {
-    if (tiles[y * FW + x] !== FLOOR || (x === stairs.x && y === stairs.y)) continue;
+    if (tiles[y * FW + x] !== FLOOR || (stairs && x === stairs.x && y === stairs.y) || (bottom && x === mid(far).x && y === mid(far).y)) continue;
     if (x >= r0.x - 1 && x <= r0.x + r0.w && y >= r0.y - 1 && y <= r0.y + r0.h) continue;
     free.push({ x, y });
   }
   let k = 0;
   const take = () => { if (!free.length) return null; const i = Math.floor(R("place", k++) * free.length); return free.splice(i, 1)[0]; };
-  const things: Thing[] = [];
-  const chests = 1 + (R("chest2") < Math.min(0.5, depth * 0.05) ? 1 : 0);
-  for (let i = 0; i < chests; i++) { const s = take(); if (s) things.push({ kind: "chest", ...s, relic: pick(RELICS, depth, R("relic", i)).name }); }
-  if (R("draught") < 0.55) { const s = take(); if (s) things.push({ kind: "draught", ...s }); }
-  if (R("whetstone") < 0.18) { const s = take(); if (s) things.push({ kind: "whetstone", ...s }); }
+  const chests: Plan["chests"] = [];
+  // at the bottom, in the farthest room: the one thing
+  if (bottom) chests.push({ id: BOTTOM, relic: BOTTOM_NAME, ...mid(far) });
+  const n = 1 + (R("chest2") < Math.min(0.6, 0.15 + depth * 0.03) ? 1 : 0);
+  for (let i = 0; i < n; i++) { const s = take(); if (s) chests.push({ id: `${depth}.${i}`, relic: pick(RELICS, depth, R("relic", i)).name, ...s }); }
+  const supplies: Thing[] = [];
+  if (R("draught") < 0.6 + depth * 0.01) { const s = take(); if (s) supplies.push({ kind: "draught", ...s }); }
+  if (R("draught2") < depth * 0.02) { const s = take(); if (s) supplies.push({ kind: "draught", ...s }); }
+  if (R("whetstone") < 0.22) { const s = take(); if (s) supplies.push({ kind: "whetstone", ...s }); }
   const monsters: Monster[] = [];
-  const n = Math.min(9, 1 + Math.floor(depth * 0.9) + (R("more") < 0.5 ? 1 : 0));
-  for (let i = 0; i < n; i++) {
+  const count = Math.min(7, 1 + Math.floor(depth * 0.3) + (R("more") < 0.5 ? 1 : 0));
+  // the bottom is kept by a warden, asleep beside the one thing; it wakes when the thing is taken
+  if (bottom) for (const [dx, dy] of [[-1, 0]]) { const e = mid(far); const i = free.findIndex(p => p.x === e.x + dx && p.y === e.y + dy); if (i >= 0) { free.splice(i, 1); monsters.push({ id: monsters.length, kind: "warden", x: e.x + dx, y: e.y + dy, hp: 18, awake: false, guard: true }); } }
+  for (let i = 0; i < count; i++) {
     const s = take(); if (!s) break;
     const kind = pick(KINDS, depth, R("kind", i));
-    monsters.push({ id: i, kind: kind.name, ...s, hp: kind.hp + Math.floor(depth / 4), awake: false });
+    monsters.push({ id: monsters.length, kind: kind.name, ...s, hp: kind.hp + Math.floor(depth / 7), awake: false });
   }
-  return { depth, tiles, rope, stairs, things, monsters };
+  const p = { tiles, rope, stairs, chests, supplies, monsters };
+  plans.set(depth, p);
+  return p;
+}
+
+// Every relic in the deep, where it was put
+export const allRelics = () => { const out: { id: string; name: string; depth: number }[] = []; for (let d = 1; d <= DEPTH; d++) for (const c of plan(d).chests) out.push({ id: c.id, name: c.relic, depth: d }); return out; };
+export const relicName = (id: string) => { const d = +id.split(".")[0]; return plan(d)?.chests.find(c => c.id === id)?.relic ?? "relic"; };
+
+// A floor as you find it: the plan, with what others have done to it
+function floorOf(depth: number, state: State): Floor {
+  const p = plan(depth);
+  const gone = new Set<string>([...state.home.keys(), ...state.graves.flatMap(g => g.relics)]);
+  const things: Thing[] = [
+    ...p.chests.map(c => ({ kind: "chest" as const, x: c.x, y: c.y, id: c.id, relic: c.relic, taken: gone.has(c.id), empty: state.home.get(c.id) ?? (gone.has(c.id) ? "-" : undefined) })),
+    ...p.supplies.map(s => ({ ...s })),
+    ...state.graves.filter(g => g.depth === depth).map(g => ({ kind: "grave" as const, x: g.x, y: g.y, grave: { ...g, relics: g.relics.filter(id => !state.home.has(id)) } })),
+  ];
+  return { depth, tiles: p.tiles, rope: p.rope, stairs: p.stairs, things, monsters: p.monsters.map(m => ({ ...m })) };
 }
 
 // ── a run ──
 export type Run = {
-  seed: string; turn: number; floor: Floor; x: number; y: number; hp: number; dmg: number;
+  seed: string; state: State; from: number; turn: number; floor: Floor; x: number; y: number; hp: number; dmg: number;
   carried: string[]; deepest: number; over: null | "out" | "dead" | "dark"; killedBy?: string;
 };
 export const MOVES = "nsewzx"; // north, south, east, west, wait, climb out (on the rope)
 const DIR: Record<string, [number, number]> = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] };
 
-export function start(seed: string): Run {
-  const floor = floorOf(seed, 1);
-  return { seed, turn: 0, floor, x: floor.rope.x, y: floor.rope.y, hp: MAX_HP, dmg: 0, carried: [], deepest: 1, over: null };
+// a descent starts at the top, or down someone's rope to any floor no deeper than theirs
+export function start(seed: string, state: State = EMPTY, from = 1): Run {
+  const d = Math.max(1, Math.min(from, deepestStart(state)));
+  const floor = floorOf(d, state);
+  return { seed, state, from: d, turn: 0, floor, x: floor.rope.x, y: floor.rope.y, hp: MAX_HP, dmg: 0, carried: [], deepest: d, over: null };
 }
 export const onRope = (r: Run) => r.x === r.floor.rope.x && r.y === r.floor.rope.y;
 const a = (n: string) => (/^[aeiou]/.test(n) ? "an " : "a ") + n;
+// someone, in a line of the log: "@0x…" for the page to put a name to
+const at = (who: string) => `@${who}`;
 
 // One move. Returns what happened, as lines for a log. Changes the run in place.
 export function step(run: Run, m: string): string[] {
-  if (run.over || !MOVES.includes(m)) return [];
+  if (run.over || !MOVES.includes(m) || m.length !== 1) return [];
   run.turn++;
   const ev: string[] = [];
   const u = (k: string | number) => rnd(run.seed, "turn", run.turn, k);
@@ -153,19 +193,27 @@ export function step(run: Run, m: string): string[] {
       } else ev.push(`You miss the ${foe.kind}.`);
     } else if (tileAt(f, nx, ny) === FLOOR) {
       run.x = nx; run.y = ny;
-      if (nx === f.stairs.x && ny === f.stairs.y) {
-        const next = floorOf(run.seed, f.depth + 1);
+      if (f.stairs && nx === f.stairs.x && ny === f.stairs.y) {
+        const next = floorOf(f.depth + 1, run.state);
         run.floor = next; run.x = next.rope.x; run.y = next.rope.y; run.deepest = Math.max(run.deepest, next.depth);
-        ev.push(`Floor ${next.depth}.`);
+        ev.push(next.depth === DEPTH ? `Floor ${next.depth}. The bottom.` : `Floor ${next.depth}.`);
         return lamp(run, ev);
       }
-      const t = f.things.find(t => !t.taken && t.x === nx && t.y === ny);
-      if (t) {
-        t.taken = true;
-        if (t.kind === "chest") { run.carried.push(t.relic!); ev.push(`In the chest: ${a(t.relic!)}.`); }
-        else if (t.kind === "draught") { run.hp = Math.min(MAX_HP, run.hp + 6); ev.push("You drink a draught."); }
-        else { run.dmg++; ev.push("You sharpen your blade on a whetstone."); }
+      for (const t of f.things.filter(t => !t.taken && t.x === nx && t.y === ny)) {
+        if (t.kind === "chest") {
+          t.taken = true; run.carried.push(t.id!);
+          ev.push(t.id === BOTTOM ? `In the chest: the ${BOTTOM_NAME}.` : `In the chest: ${a(t.relic!)}.`);
+          if (t.id === BOTTOM) for (const o of f.monsters) if (o.guard && o.hp > 0 && !o.awake) { o.awake = true; ev.push(`The ${o.kind} wakes.`); }
+        } else if (t.kind === "draught") { t.taken = true; run.hp = Math.min(MAX_HP, run.hp + 6); ev.push("You drink a draught."); }
+        else if (t.kind === "whetstone") { t.taken = true; run.dmg++; ev.push("You sharpen your blade on a whetstone."); }
+        else if (t.kind === "grave") {
+          const g = t.grave!;
+          ev.push(`Here lies ${at(g.by)}${g.killedBy ? `, killed by a ${g.killedBy}` : ", lost in the dark"}.`);
+          if (g.relics.length) { run.carried.push(...g.relics); ev.push(`You take ${g.relics.map(id => a(relicName(id))).join(" and ")} from the grave.`); g.relics = []; }
+        }
       }
+      for (const t of f.things.filter(t => t.kind === "chest" && t.taken && t.empty && t.x === nx && t.y === ny && !run.carried.includes(t.id!)))
+        ev.push(t.empty === "-" ? "The chest is empty. Someone took it down here and never came back up." : `The chest is empty. ${at(t.empty!)} got here first.`);
     }
   }
   // resting a while mends you a little
@@ -174,7 +222,7 @@ export function step(run: Run, m: string): string[] {
   for (const o of f.monsters) {
     if (o.hp <= 0) continue;
     const k = kindOf(o.kind), dx = run.x - o.x, dy = run.y - o.y, dist = Math.abs(dx) + Math.abs(dy);
-    if (!o.awake && dist <= 5) o.awake = true;
+    if (!o.awake && !o.guard && dist <= 5) o.awake = true;
     if (!o.awake) continue;
     if (dist === 1) {
       if (u(`hit${o.id}`) < k.hit) {
@@ -197,8 +245,8 @@ function lamp(run: Run, ev: string[]) {
   return ev;
 }
 
-export function play(seed: string, moves: string): Run {
-  const r = start(seed);
+export function play(seed: string, moves: string, state: State = EMPTY, from = 1): Run {
+  const r = start(seed, state, from);
   for (const m of moves) step(r, m);
   return r;
 }

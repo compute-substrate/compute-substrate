@@ -23,6 +23,9 @@ const SPRITES: Record<string, { map: string[]; pal: Record<string, RGB> }> = {
   wraith: { map: ["  wwww  ", " wwwwww ", " weewwe ", " wwwwww ", "wwwwwwww", "wwwwwwww", " wwwwww ", " w ww w ", "w  w  w "], pal: { w: "rgba(176,196,222,.75)", e: "#151520" } },
   warden: { map: ["  kkkk  ", " kkkkkk ", " kekkek ", " kkkkkk ", "aaaaaaaa", "aakkkkaa", " akkkka ", " kk  kk ", " kk  kk "], pal: { k: "#5b5f6b", e: "#f2a33a", a: "#8c919e" } },
   chest: { map: ["          ", " cccccccc ", "cddddddddc", "cbbbbbbbbc", "cccckkcccc", "cccccccccc", "cccccccccc"], pal: { c: C.chest, d: C.chestDark, b: C.band, k: C.band } },
+  open: { map: [" dddddddd ", "dccccccccd", "d        d", "cddddddddc", "cccccccccc", "cccccccccc", "cccccccccc"], pal: { c: C.chest, d: C.chestDark } },
+  eye: { map: ["  bbbbbb  ", " bbbbbbbb ", "cbbbbbbbbc", "cccckkcccc", "cccckkcccc", "cccccccccc", "cccccccccc"], pal: { c: "#3c3550", b: "#5a4f78", k: "#f6e7a8" } },
+  grave: { map: ["  ssss  ", " ssssss ", " sssdss ", " ssddds ", " sssdss ", " ssssss ", "gggggggg"], pal: { s: "#9c97a3", d: "#6d6874", g: "#2a2730" } },
   draught: { map: ["  gg  ", "  gg  ", " rrrr ", "rrrrrr", "rrrrrr", " rrrr "], pal: { g: C.glass, r: C.draught } },
   whetstone: { map: ["        ", "  wwww  ", " wwwwww ", "wwwwwwww"], pal: { w: C.whet } },
 };
@@ -85,8 +88,18 @@ export function createScene(canvas: HTMLCanvasElement) {
     const rp = f.rope, sp = f.stairs;
     if (seen.has(`${rp.x},${rp.y}`)) { rect(rp.x * T + 2, rp.y * T + 2, T - 4, T - 4, C.light); rect(rp.x * T + 7, rp.y * T - 6, 2, T + 2, C.rope); rect(rp.x * T + 6, rp.y * T + 9, 4, 2, C.rope); }
     if (seen.has(`${sp.x},${sp.y}`)) { const b = lit(sp.x, sp.y); rect(sp.x * T + 2, sp.y * T + 2, T - 4, T - 3, "#0c0b10"); for (let i = 0; i < 3; i++) { rect(sp.x * T + 2, sp.y * T + 3 + i * 4, T - 4 - i * 3, 3, shade([70, 63, 80], b * (1 - i * 0.25))); rect(sp.x * T + 2, sp.y * T + 3 + i * 4, T - 4 - i * 3, 1, shade([120, 110, 132], b * (1 - i * 0.25))); } }
-    for (const t of f.things) if (!t.taken && vis.has(`${t.x},${t.y}`)) sprite(t.kind, t.x, t.y);
-    for (const m of f.monsters) if (m.hp > 0 && vis.has(`${m.x},${m.y}`)) sprite(m.kind, m.x, m.y, m.awake ? Math.round(Math.sin(now / 180 + m.id) * 0.6) : 0);
+    for (const t of f.things) {
+      if (!seen.has(`${t.x},${t.y}`)) continue;
+      // graves and opened chests stay where they are; other things only while they're there
+      if (t.kind === "grave") sprite("grave", t.x, t.y);
+      else if (t.kind === "chest") sprite(t.taken ? "open" : t.id?.endsWith(".eye") ? "eye" : "chest", t.x, t.y);
+      else if (!t.taken && vis.has(`${t.x},${t.y}`)) sprite(t.kind, t.x, t.y);
+      if (t.kind === "chest" && t.id?.endsWith(".eye") && !t.taken) { const g = ctx.createRadialGradient(t.x * T + 8, t.y * T + 9, 1, t.x * T + 8, t.y * T + 9, 14 + Math.sin(now / 400) * 2); g.addColorStop(0, "rgba(246,231,168,.35)"); g.addColorStop(1, "rgba(246,231,168,0)"); ctx.fillStyle = g; ctx.fillRect(t.x * T - 8, t.y * T - 8, 32, 32); }
+    }
+    for (const m of f.monsters) if (m.hp > 0 && vis.has(`${m.x},${m.y}`)) {
+      sprite(m.kind, m.x, m.y, m.awake ? Math.round(Math.sin(now / 180 + m.id) * 0.6) : 0);
+      if (!m.awake && m.guard) { const k = Math.floor(now / 600) % 3; ctx.fillStyle = "rgba(220,220,235,.8)"; ctx.font = "6px monospace"; ctx.fillText("z", m.x * T + 12 + k, m.y * T + 2 - k * 2); }
+    }
     sprite("you", run.x, run.y);
     // the lamp's warm light, flickering a little
     const cx = run.x * T + 8, cy = run.y * T + 8, rad = 74 + Math.sin(now / 130) * 2 + Math.sin(now / 47) * 1.5;
