@@ -7,7 +7,7 @@ export const T = 16, VW = 22, VH = 13;
 type RGB = [number, number, number];
 const hex = (h: string): RGB => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
 const P = {
-  deep: hex("#1c3a52"), mid: hex("#23506a"), shallow: hex("#337a90"), shallower: hex("#4b97a6"),
+  deep: hex("#1c3a52"), mid: hex("#23506a"), shallower: hex("#4b97a6"),
   foam: hex("#dcefe8"), glint: hex("#a9dbe2"),
   sand: hex("#d9c38c"), sandDark: hex("#c3a873"), wet: hex("#b39a6a"),
   grass: hex("#6d9a4c"), grassDark: hex("#5b8640"), grassLight: hex("#88b25f"),
@@ -43,10 +43,6 @@ export function createScene(canvas: HTMLCanvasElement, w: World) {
   const big = new ImageData(W * T, H * T);
   const put = (img: ImageData, x: number, y: number, c: RGB) => { if (x < 0 || y < 0 || x >= img.width || y >= img.height) return; const i = (y * img.width + x) * 4; img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = 255; };
   const r = (x: number, y: number, k = 0) => hash32(x, y, k) / 4294967296;
-  const waterColor = (tx: number, ty: number, px: number, py: number): RGB => {
-    const d = w.dist(tx, ty) + (r(px, py, 3) - 0.5) * 0.9;
-    return d < 1.4 ? P.shallower : d < 2.6 ? P.shallow : d < 5.5 ? P.mid : P.deep;
-  };
   // the shape of the shore at pixel level: how much land there is around each point (blended
   // between squares, with a little noise), so shores are rounded and depths shade into each other
   const landAt = (tx: number, ty: number) => (tx < 0 || ty < 0 || tx >= W || ty >= H ? 0 : isWater(w.tile(tx, ty)) ? 0 : 1);
@@ -58,59 +54,47 @@ export function createScene(canvas: HTMLCanvasElement, w: World) {
     const a = f(x0, y0), b = f(x0 + 1, y0), c = f(x0, y0 + 1), d = f(x0 + 1, y0 + 1);
     return (a + (b - a) * sm(u)) * (1 - sm(v)) + (c + (d - c) * sm(u)) * sm(v);
   };
+  // flat colours, few of them: the shape of the shore does the work, not texture
   for (let py = 0; py < H * T; py++) for (let px = 0; px < W * T; px++) {
     const fx = px / T - 0.5, fy = py / T - 0.5;
-    const lnd = blend(landAt, fx, fy) + (r(px >> 1, py >> 1, 5) - 0.5) * 0.16;
-    const tx = Math.floor(px / T), ty = Math.floor(py / T), n = r(px, py);
+    const lnd = blend(landAt, fx, fy) + (r(px >> 2, py >> 2, 5) - 0.5) * 0.1;
     let c: RGB;
     if (lnd > 0.5) {
-      // dry ground: the nearest dry square decides grass, sand or rocky ground
-      let t = w.tile(tx, ty);
-      if (isWater(t)) { for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) { const u = w.tile(tx + dx, ty + dy); if (!isWater(u)) { t = u; break; } } }
-      const sandy = blend(sandAt, fx, fy) + (r(px >> 1, py >> 1, 6) - 0.5) * 0.3;
-      if (sandy > 0.5 || lnd < 0.6) c = lnd < 0.56 ? P.wet : n < 0.08 ? P.sandDark : P.sand;
-      else {
-        // soft patches of lighter and darker grass, dithered into each other
-        const shade = blend((x, y) => hash32(x, y, 91) / 4294967296, px / 29, py / 29) + (n - 0.5) * 0.22;
-        c = n < 0.05 ? P.grassDark : n > 0.975 ? P.grassLight : shade > 0.7 ? P.grassLight : shade < 0.24 ? P.grassDark : P.grass;
-        if (t === ROCK && n < 0.18) c = P.rockDark;
-      }
+      const sandy = blend(sandAt, fx, fy) + (r(px >> 2, py >> 2, 6) - 0.5) * 0.2;
+      c = lnd < 0.55 ? P.wet : sandy > 0.5 ? P.sand : P.grass;
     } else {
-      // water, shading from the shallows to the deep
-      const d = blend(distAt, fx, fy) + (r(px, py, 3) - 0.5) * 0.7;
-      c = d < 1.2 ? P.shallower : d < 2.4 ? P.shallow : d < 4.6 ? P.mid : P.deep;
-      if (lnd > 0.42) c = P.foam;
+      // water in three bands, with a fine checkered edge where two bands meet
+      const d = blend(distAt, fx, fy), edge = (px + py) & 1 ? 0.12 : -0.12;
+      c = d + edge < 1.5 ? P.shallower : d + edge < 3.2 ? P.mid : P.deep;
+      if (lnd > 0.46) c = P.foam;
     }
     put(big, px, py, c);
   }
   for (let ty = 0; ty < H; ty++) for (let tx = 0; tx < W; tx++) {
     const t = w.tile(tx, ty);
-    // grass tufts, and now and then a flower
-    if (t === LAND) for (let k = 0; k < 2; k++) {
-      const gx = tx * T + 2 + ((r(tx, ty, 10 + k) * 12) | 0), gy = ty * T + 3 + ((r(tx, ty, 20 + k) * 11) | 0);
+    // now and then a tuft of grass
+    if (t === LAND && r(tx, ty, 10) < 0.35) {
+      const gx = tx * T + 3 + ((r(tx, ty, 11) * 10) | 0), gy = ty * T + 4 + ((r(tx, ty, 12) * 9) | 0);
       put(big, gx, gy, P.grassDark); put(big, gx + 1, gy - 1, P.grassDark); put(big, gx + 2, gy, P.grassDark);
-      if (r(tx, ty, 25 + k) < 0.06) put(big, gx + 1, gy - 2, r(tx, ty, 26) < 0.5 ? P.flame1 : P.foam);
     }
-    // rocky ground: a few boulders of different sizes, lit from the top left
+    // rocky ground: one boulder, sometimes two, lit from the top left
     if (t === ROCK) for (let k = 0; k < 2; k++) {
-      if (k && r(tx, ty, 80) < 0.4) continue;
-      const cx = tx * T + 3 + r(tx, ty, 81 + k) * 10, cy = ty * T + 4 + r(tx, ty, 83 + k) * 9, rx = 2.5 + r(tx, ty, 85 + k) * 4, ry = rx * (0.7 + r(tx, ty, 87 + k) * 0.3);
+      if (k && r(tx, ty, 80) < 0.6) continue;
+      const cx = tx * T + 4 + r(tx, ty, 81 + k) * 8, cy = ty * T + 5 + r(tx, ty, 83 + k) * 7, rx = 3 + r(tx, ty, 85 + k) * 3, ry = rx * 0.8;
       for (let y = Math.floor(cy - ry - 1); y <= cy + ry + 1; y++) for (let x = Math.floor(cx - rx - 1); x <= cx + rx + 1; x++) {
         const dx = (x - cx) / rx, dy = (y - cy) / ry;
         if (dx * dx + dy * dy > 1) continue;
-        put(big, x, y, dx + dy < -0.55 ? P.rockLight : dx + dy > 0.6 ? P.rockDark : P.rock);
+        put(big, x, y, dx + dy < -0.6 ? P.rockLight : dx + dy > 0.6 ? P.rockDark : P.rock);
       }
-      put(big, Math.round(cx - rx * 0.2), Math.round(cy + ry + 1), P.grassDark);
     }
-    // reeds: stems in the water, brown tips
-    if (t === REEDS) for (let k = 0; k < 7; k++) {
-      const sx = tx * T + 1 + ((r(tx, ty, 30 + k) * 14) | 0), h = 5 + ((r(tx, ty, 40 + k) * 6) | 0), base = ty * T + 14 - ((r(tx, ty, 50 + k) * 5) | 0);
-      for (let i = 0; i < h; i++) put(big, sx + (i > h - 3 ? 1 : 0), base - i, i >= h - 2 ? P.reedTip : P.reed);
+    // reeds: a few stems with brown tips
+    if (t === REEDS) for (let k = 0; k < 4; k++) {
+      const sx = tx * T + 2 + ((r(tx, ty, 30 + k) * 12) | 0), h = 5 + ((r(tx, ty, 40 + k) * 4) | 0), base = ty * T + 13 - ((r(tx, ty, 50 + k) * 4) | 0);
+      for (let i = 0; i < h; i++) put(big, sx, base - i, i >= h - 2 ? P.reedTip : P.reed);
     }
-    // the ledge: dark rocks just under the surface
-    if (t === LEDGE) for (let k = 0; k < 3; k++) { const lx = tx * T + 2 + ((r(tx, ty, 60 + k) * 11) | 0), ly = ty * T + 2 + ((r(tx, ty, 70 + k) * 11) | 0); for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) put(big, lx + i, ly + j, i === 0 && j === 0 ? P.rock : P.rockDark); }
+    // the ledge: a dark rock just under the surface
+    if (t === LEDGE && r(tx, ty, 60) < 0.5) { const lx = tx * T + 4 + ((r(tx, ty, 61) * 7) | 0), ly = ty * T + 5 + ((r(tx, ty, 62) * 6) | 0); for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++) put(big, lx + i, ly + j, P.mid); }
   }
-  const blendLand = (px: number, py: number) => blend(landAt, px / T - 0.5, py / T - 0.5);
   const base = document.createElement("canvas");
   base.width = big.width; base.height = big.height;
   base.getContext("2d")!.putImageData(big, 0, 0);
@@ -172,23 +156,13 @@ export function createScene(canvas: HTMLCanvasElement, w: World) {
     for (let ty = t0y; ty <= t0y + VH; ty++) for (let tx = t0x; tx <= t0x + VW; tx++) {
       const t = w.tile(tx, ty);
       if (!isWater(t)) continue;
-      // glints drifting on the water
-      for (let k = 0; k < 2; k++) {
-        const ph = hash32(tx, ty, k) / 4294967296;
-        const life = (now / 2600 + ph) % 1;
-        if (life > 0.35) continue;
-        const gx = tx * T + ((hash32(tx, ty, k + 5) % 13) + Math.floor(life * 8)), gy = ty * T + (hash32(tx, ty, k + 9) % 14);
-        px(gx, gy, P.glint, 0.9 - life * 2); px(gx + 1, gy, P.glint, 0.6 - life * 1.6);
-      }
-      // the edge of the water breathing in and out a little
-      const near = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => !isWater(w.tile(tx + dx, ty + dy)));
-      if (near) {
-        const wave = (Math.sin(now / 1100 + tx * 0.9 + ty * 0.5) + 1) / 2;
-        for (let k = 0; k < 5; k++) {
-          const fx = tx * T + (hash32(tx, ty, k, 3) % 16), fy = ty * T + (hash32(tx, ty, k, 4) % 16);
-          if (blendLand(fx, fy) > 0.32 - wave * 0.08) px(fx, fy, P.foam, 0.55 + wave * 0.35);
-        }
-      }
+      // now and then a glint drifting on the water
+      const ph = hash32(tx, ty, 1) / 4294967296;
+      if (ph > 0.3) continue;
+      const life = (now / 3200 + ph * 3) % 1;
+      if (life > 0.3) continue;
+      const gx = tx * T + (hash32(tx, ty, 5) % 11) + Math.floor(life * 6), gy = ty * T + (hash32(tx, ty, 9) % 14);
+      px(gx, gy, P.glint, 0.8 - life * 2); px(gx + 1, gy, P.glint, 0.8 - life * 2); px(gx + 2, gy, P.glint, 0.5 - life * 1.5);
     }
     fire(now);
     for (const p of people) if (!p.self) person(p, now);
