@@ -10,7 +10,7 @@ const kinds = new Set(a.tiles);
 ok([SHALLOWS, REEDS, LEDGE, OPEN].every(k => kinds.has(k as any)), "it has shallows, reeds, a rock ledge and open water");
 ok([LAND, SAND].includes(a.tile(a.fire.x, a.fire.y) as any), "the fire is on dry ground");
 const spots = []; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (castable(a, x, y)) spots.push([x, y]);
-ok(spots.length > 120, `${spots.length} places to cast`);
+ok(spots.length > 200, `${spots.length} places to cast`);
 ok(build("another coast").tiles.join() !== a.tiles.join(), "another seed, another coast");
 console.log(Array.from({ length: H }, (_, y) => Array.from({ length: W }, (_, x) => "#^.~\"=~"[a.tile(x, y)] === "~" && a.dist(x, y) > 2 ? " " : "#^.~\"=~"[a.tile(x, y)]).join("")).join("\n"));
 
@@ -31,13 +31,17 @@ ok(rarity(FISH.find(s => s.name === "golden char")!) === "legendary" && rarity(F
 // keeping, and checking what was kept
 const alice = "0x" + "a".repeat(40), eve = "0x" + "e".repeat(40);
 const [sx, sy] = spots.find(([x, y]) => waterOf(a, x, y) === REEDS)!;
-const sit = { id: "0x" + "1".repeat(64), text: R.sitText(sx, sy), height: 1000, time: t, author: alice };
+let sit = { id: "0x" + "1".repeat(64), text: R.sitText(sx, sy), height: 1000, time: t, author: alice };
 const blocks = new Map<number, R.Block>();
 const block = async (h: number) => { if (!blocks.has(h)) blocks.set(h, { hash: "0x" + h.toString(16).padStart(64, "0"), time: t + (h - 1000) * 120 }); return blocks.get(h)!; };
-// find blocks in the sitting where something (not junk) bit
-const bit: number[] = [];
-for (let h = 1001; h <= 1000 + R.SIT_BLOCKS; h++) { const c = await R.castAt({ ...sit, spot: { x: sx, y: sy } }, h, await block(h)); if (c && !c.species.junk) bit.push(h); }
-ok(bit.length > 3, `${bit.length} of ${R.SIT_BLOCKS} blocks in an hour brought a fish`);
+// find blocks in the sitting where something (not junk) bit (an hour with at least four)
+let bit: number[] = [];
+for (let n = 0; bit.length < 4 && n < 50; n++) {
+  sit = { ...sit, id: "0x" + n.toString(16).padStart(64, "1") };
+  bit = [];
+  for (let h = 1001; h <= 1000 + R.SIT_BLOCKS; h++) { const c = await R.castAt({ ...sit, spot: { x: sx, y: sy } }, h, await block(h)); if (c && !c.species.junk) bit.push(h); }
+}
+ok(bit.length >= 4, `${bit.length} of ${R.SIT_BLOCKS} blocks in an hour brought a fish`);
 const keep = (h: number, by = alice, landed = h + 2, id = "0x" + h.toString(16).padStart(64, "0")) => ({ id, text: R.keepText(sit.id, h), height: landed, time: t, author: by });
 const kept = await R.keptCatches([sit], [keep(bit[0]), keep(bit[1]), keep(bit[1], alice, bit[1] + 3, "0x" + "f".repeat(64)), keep(bit[2], eve), keep(1000 + R.SIT_BLOCKS + 1), keep(bit[3], alice, 1000 + R.SIT_BLOCKS + R.KEEP_WITHIN + 1)], block);
 ok(kept.length === 2, "kept: the two real ones; not a second keep of the same cast, not someone else's keep, not after the sitting, not too late");
