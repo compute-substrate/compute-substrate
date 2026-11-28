@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The deep</title>
+<meta name="description" content="A dungeon drawn from a block nobody could know in advance. Go down, push deeper or climb out. What you bring up is yours for good, numbered and checkable by anyone.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<!-- deep: each dungeon is drawn from the block after you go down; you play it here, and your moves
+     are the record of coming back up. Anyone replays them (src/rules.ts). The scene: src/scene.ts. -->
+<style>
+  :root { --bg: #f1eee6; --card: #fbf9f4; --ink: #232a2b; --muted: #727a76; --line: #e2ddd1; --accent: #8a5a32; --on: #fff;
+          --common: #9aa19c; --uncommon: #4a9a5f; --scarce: #3a78b8; --rare: #9057c6; --legendary: #d4921f; color-scheme: light; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121117; --card: #1c1b22; --ink: #e9e8ec; --muted: #9a97a3; --line: #2c2a33; --accent: #e2b04a; --on: #1a140c; color-scheme: dark; } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px max(16px, env(safe-area-inset-left)) 60px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  h1 { margin: 0; font: 600 24px/1.1 Georgia, "Iowan Old Style", "Palatino Linotype", serif; }
+  header a { color: var(--muted); font-size: 14px; text-decoration: none; }
+  header a:hover { color: var(--ink); }
+  button { font: 600 14px -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; padding: 7px 16px; border-radius: 999px; border: 0; background: var(--accent); color: var(--on); cursor: pointer; }
+
+  /* the game */
+  .stage { border-radius: 14px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.22); background: #0e0d12; }
+  #scene { width: 100%; height: auto; display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: pointer; touch-action: manipulation; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: #17151c; color: #eeebe6; font-size: 14px; min-height: 52px; }
+  .bar .text { flex: 1; min-width: 0; }
+  .bar .text span { color: #a9a4ae; }
+  .bar button { padding: 6px 14px; font-size: 13px; background: #f3b45c; color: #1a140c; }
+  .bar button.quiet { background: none; color: #c6c1cb; padding: 6px 8px; }
+  #help { margin: 10px 4px 0; color: var(--muted); font-size: 13px; }
+  #log { margin: 10px 4px 0; padding: 0; list-style: none; font-size: 14px; color: var(--muted); }
+  #log li { padding: 2px 0; }
+  #log li.new { color: var(--ink); }
+  #said { margin: 8px 4px 0; color: var(--muted); font-size: 13px; }
+  #said:empty { display: none; }
+  #said button { background: none; color: inherit; padding: 0; text-decoration: underline; font-weight: 500; font-size: 13px; }
+
+  /* records, on their own page */
+  .tabs { display: flex; gap: 4px; margin: 4px 0 12px; flex-wrap: wrap; }
+  .tabs button { background: none; color: var(--muted); padding: 6px 14px; }
+  .tabs button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+  .small { color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 16px; align-items: baseline; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .row > b { flex: none; width: 64px; }
+  .row .what { display: flex; flex-direction: column; line-height: 1.4; min-width: 0; }
+  .uncommon { color: var(--uncommon); } .scarce { color: var(--scarce); } .rare { color: var(--rare); } .legendary { color: var(--legendary); }
+  .relics { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
+  .relic { display: flex; gap: 9px; align-items: center; padding: 6px 0; color: var(--ink); }
+  .relic > span:last-child { display: flex; flex-direction: column; line-height: 1.35; }
+  .relic.unseen { opacity: .45; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--common); }
+  .uncommon .dot { background: var(--uncommon); } .scarce .dot { background: var(--scarce); } .rare .dot { background: var(--rare); } .legendary .dot { background: var(--legendary); }
+  footer { margin-top: 34px; color: var(--muted); font-size: 13px; max-width: 70ch; }
+  @media (max-width: 560px) { .bar { flex-wrap: wrap; justify-content: flex-end; font-size: 13px; } .bar .text { flex-basis: 100%; } }
+</style>
+</head>
+<body>
+<main>
+  <section id="game">
+    <header><h1>The deep</h1><a href="#records">Records</a></header>
+    <div class="stage">
+      <canvas id="scene" aria-label="The floor you're on"></canvas>
+      <div class="bar" id="bar"></div>
+    </div>
+    <p id="help" hidden>Arrow keys or tap where you want to go. Walk into something to fight it. The rope you came down on is the way out.</p>
+    <p id="said" aria-live="polite"></p>
+    <ul id="log"></ul>
+  </section>
+  <section id="recordsview" hidden>
+    <header><h1>Records</h1><a href="#">Back down</a></header>
+    <div class="tabs" role="group"><button data-tab="deepest" aria-pressed="true">Deepest</button><button data-tab="relics">Every relic</button><button data-tab="latest">Latest</button><button data-tab="mine">Yours</button></div>
+    <div id="tabview"></div>
+    <footer>Nobody runs the deep. Each dungeon is drawn from a block nobody could know in advance, and every return is every move made, so anyone can play it again and see the same relics come up. Nobody can fake one.</footer>
+  </section>
+</main>
+<script type="module" src="page.js"></script>
+</body>
+</html>

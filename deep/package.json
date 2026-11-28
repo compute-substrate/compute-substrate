@@ -1,0 +1,6 @@
+{
+  "name": "csd-deep",
+  "private": true,
+  "description": "A dungeon drawn from a block nobody could know in advance. Go down, push deeper or climb out; what you bring up is yours for good, numbered and checkable by anyone. A static site on Compute Substrate.",
+  "scripts": { "build": "node build.mjs" }
+}

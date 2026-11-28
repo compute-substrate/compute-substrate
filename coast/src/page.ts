@@ -173,11 +173,11 @@ async function trouble(e: any) {
 
 // ── the records, on their own page (#records) ──
 let tab = "records";
-const route = () => { const rec = location.hash === "#records"; $("game").hidden = rec; $("records").hidden = !rec; if (rec) drawTab(); scrollTo(0, 0); };
+const route = () => { const rec = location.hash === "#records"; $("game").hidden = rec; $("recordsview").hidden = !rec; if (rec) drawTab(); scrollTo(0, 0); };
 addEventListener("hashchange", route);
 document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b => b.onclick = () => { tab = b.dataset.tab!; drawTab(); });
 function drawTab() {
-  if ($("records").hidden) return;
+  if ($("recordsview").hidden) return;
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.tab === tab)));
   const line = (k: R.Kept) => `<div class="kept-row ${rarity(k.catch.species)}"><span class="dot"></span><span class="what"><b>${esc(cap(k.catch.species.name))}, ${cm(k.catch.cm)}</b><span class="small">The ${R.ordinal(k.nth)} ever, by ${esc(who(k.by))}, ${esc(day(k.at))}${k.catch.specimen ? ". A specimen" : ""}</span></span></div>`;
   const b = R.boards(kept);
