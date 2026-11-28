@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The coast</title>
+<meta name="description" content="A coast everyone fishes together. Sit down, and every block is a cast. Keep what's worth keeping: it's yours for good, numbered and checkable by anyone.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<!-- coast: one shore everyone fishes, drawn from a seed. Sitting and keeping are records; what bit
+     is worked out from the blocks, by anyone (src/rules.ts). -->
+<style>
+  :root { --bg: #eef1ec; --card: #fbfaf6; --ink: #1f2a2c; --muted: #6a7672; --line: #dfe3dc; --accent: #1f6f7f; --on: #fff;
+          --common: #8a948f; --uncommon: #3f8f5a; --scarce: #2f6fb0; --rare: #8a4fc0; --legendary: #d08a1c; --junk: #b9b2a5; color-scheme: light; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111819; --card: #1a2324; --ink: #e8ecea; --muted: #94a19d; --line: #2a3536; --accent: #6cc4d3; --on: #0b1b1e; color-scheme: dark; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
+  main { max-width: 1240px; margin: 0 auto; padding: 30px max(16px, env(safe-area-inset-left)) 60px; }
+  header { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
+  header img { width: 44px; height: 44px; border-radius: 12px; }
+  h1 { margin: 0; font: 600 28px/1.1 Georgia, "Iowan Old Style", "Palatino Linotype", serif; }
+  .lede { margin: 2px 0 0; color: var(--muted); max-width: 70ch; }
+  .play { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: start; }
+  @media (max-width: 960px) { .play { grid-template-columns: 1fr; } }
+  canvas { width: 100%; height: auto; border-radius: 16px; display: block; image-rendering: pixelated; box-shadow: 0 6px 30px rgba(0,0,0,.12); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; }
+  h3 { margin: 0 0 4px; font-size: 17px; }
+  h4 { margin: 18px 0 8px; font-size: 12px; color: var(--muted); letter-spacing: .07em; text-transform: uppercase; }
+  .small { color: var(--muted); font-size: 13px; }
+  button { font: 650 14px -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; padding: 8px 16px; border-radius: 999px; border: 0; background: var(--accent); color: var(--on); cursor: pointer; }
+  button.quiet { background: none; color: var(--muted); padding: 4px 6px; font-weight: 550; }
+  .casts { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: 480px; overflow-y: auto; }
+  .cast { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; background: var(--bg); }
+  .cast.nothing, .cast.wait { color: var(--muted); font-size: 13px; background: none; padding: 2px 10px; }
+  .cast .what { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .cast .kept { color: var(--accent); font-weight: 650; margin-top: 4px; }
+  .cast { align-items: flex-start; }
+  .cast .dot { margin-top: 6px; }
+  .cast .acts { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .cast.fresh { animation: bite 1.4s ease-out; }
+  @keyframes bite { 0% { transform: translateX(-4px); box-shadow: 0 0 0 2px var(--accent); } 20% { transform: translateX(4px); } 40% { transform: translateX(-2px); } 100% { transform: none; box-shadow: 0 0 0 0 transparent; } }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--common); }
+  .uncommon .dot { background: var(--uncommon); } .scarce .dot { background: var(--scarce); } .rare .dot { background: var(--rare); } .legendary .dot { background: var(--legendary); box-shadow: 0 0 8px var(--legendary); } .junk .dot { background: var(--junk); }
+  .wait { color: var(--muted); }
+  #said { min-height: 1.4em; margin: 10px 2px 0; }
+  .tabs { display: flex; gap: 4px; margin: 26px 0 12px; }
+  .tabs button { background: none; color: var(--muted); padding: 6px 14px; }
+  .tabs button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+  .kept-row { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .kept-row .what { display: flex; flex-direction: column; }
+  .species { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+  .sp { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; border-left: 4px solid var(--common); }
+  .sp.uncommon { border-left-color: var(--uncommon); } .sp.scarce { border-left-color: var(--scarce); } .sp.rare { border-left-color: var(--rare); } .sp.legendary { border-left-color: var(--legendary); }
+  .sp.unseen { opacity: .62; }
+  footer { margin-top: 30px; color: var(--muted); font-size: 13px; max-width: 72ch; }
+</style>
+</head>
+<body>
+<main>
+  <header><img src="icon.svg" alt=""><div><h1>The coast</h1><p class="lede">Sit down anywhere along the water, and every block that lands is a cast. Let most of it go. What you keep is yours for good: numbered, and anyone can check it.</p></div></header>
+  <div class="play">
+    <canvas id="map" aria-label="The coast"></canvas>
+    <aside><div class="card" id="sit"></div><p id="said" class="small" aria-live="polite"></p></aside>
+  </div>
+  <div class="tabs" role="group"><button data-tab="recent" aria-pressed="true">Kept on the coast</button><button data-tab="records">Records</button><button data-tab="mine">Yours</button></div>
+  <div id="tabview"></div>
+  <footer>Nobody runs this coast. What bites is decided by each new block, which nobody can know in advance, and every kept catch can be worked out again by anyone, so nobody can fake one. The coast's clock is UTC: dawn is 5 to 8.</footer>
+</main>
+<script type="module" src="page.js"></script>
+</body>
+</html>

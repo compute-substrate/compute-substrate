@@ -1,0 +1,6 @@
+{
+  "name": "csd-coast",
+  "private": true,
+  "description": "A coast everyone fishes together. Sit down at a spot and every block is a cast; keep what's worth keeping, and it's yours for good, numbered and checkable by anyone. A static site on Compute Substrate.",
+  "scripts": { "build": "node build.mjs" }
+}
