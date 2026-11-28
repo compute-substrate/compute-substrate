@@ -200,12 +200,18 @@ export function createScene(canvas: HTMLCanvasElement, w: World) {
 }
 
 // the whole coast, small: for choosing where to go
-export function drawMap(canvas: HTMLCanvasElement, w: World, people: Person[], picked: { x: number; y: number } | null) {
+// water you haven't the level for is shaded over
+export function drawMap(canvas: HTMLCanvasElement, w: World, people: Person[], picked: { x: number; y: number } | null, level = 99) {
   const S = 6;
   canvas.width = W * S; canvas.height = H * S;
   const c = canvas.getContext("2d")!;
   const col: Record<number, string> = { [LAND]: "#6d9a4c", [ROCK]: "#8d877d", [SAND]: "#d9c38c", [SHALLOWS]: "#4b97a6", [REEDS]: "#4f8a6c", [LEDGE]: "#337a90", [OPEN]: "#23506a" };
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const t = w.tile(x, y); c.fillStyle = t === OPEN && w.dist(x, y) > 5 ? "#1c3a52" : col[t]; c.fillRect(x * S, y * S, S, S); }
+  const need: Record<number, number> = { [SHALLOWS]: 1, [REEDS]: 10, [LEDGE]: 25, [OPEN]: 40 };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const t = w.tile(x, y); c.fillStyle = t === OPEN && w.dist(x, y) > 5 ? "#1c3a52" : col[t]; c.fillRect(x * S, y * S, S, S);
+    const water = t === OPEN || w.dist(x, y) > 2 ? OPEN : t;
+    if (isWater(t) && w.dist(x, y) <= 4 && (need[water] ?? 1) > level) { c.fillStyle = "rgba(10,20,30,.45)"; c.fillRect(x * S, y * S, S, S); if ((x + y) % 2 === 0) { c.fillStyle = "rgba(255,255,255,.08)"; c.fillRect(x * S + 2, y * S + 2, 2, 2); } }
+  }
   c.fillStyle = "#f08436"; c.beginPath(); c.arc(w.fire.x * S + 3, w.fire.y * S + 3, 3, 0, 7); c.fill();
   for (const p of people) { c.fillStyle = p.self ? "#d8483a" : `rgb(${p.color.join(",")})`; c.beginPath(); c.arc(p.spot.x * S + 3, p.spot.y * S + 3, p.self ? 3.5 : 2.6, 0, 7); c.fill(); c.strokeStyle = "#fff"; c.lineWidth = 1; c.stroke(); }
   if (picked) { c.strokeStyle = "#fff"; c.lineWidth = 1.5; c.strokeRect(picked.x * S - 1, picked.y * S - 1, S + 2, S + 2); }

@@ -1,36 +1,50 @@
 // The coast's records, and how anyone checks them. Nothing here trusts anybody.
 //
-//   coast.sit    "sit <x> <y>"            you sit down at a spot. Every block after the one this
-//                                         lands in, for SIT_BLOCKS blocks (about an hour), is a cast.
-//                                         Your spot is fixed before any of those blocks exist, so
-//                                         you can't pick the lucky spot after seeing a block.
-//   coast.keep   "keep <sit id> <height>" you keep what bit at that block, written by whoever sat,
-//                                         within KEEP_WITHIN blocks of the sitting ending.
+//   coast.sit    "sit <x> <y>" or         you sit down at a spot for an hour (or up to MAX_HOURS).
+//                "sit <x> <y> <hours>"    Every block after the one this lands in is a cast, until
+//                                         the time is up or you sit down somewhere else. Your spot is
+//                                         fixed before any of those blocks exist, so you can't pick
+//                                         the lucky spot after seeing a block.
+//   coast.keep   "keep <sit id> <h>,<h>…" you keep what bit at those blocks (up to MAX_KEEP at once),
+//                                         written by whoever sat, within KEEP_WITHIN blocks of the
+//                                         sitting ending.
 //
-// A catch is worked out again from the block's fingerprint, the sitting and the spot, so it can't
-// be faked; kept catches are numbered per species in the order they landed ("the 3rd golden char
-// ever"), and the biggest of each kind is on the boards.
-import { build, castable, waterOf, type World } from "./world";
-import { roll, type Catch, FISH } from "./fish";
+// Fishing level: every cast is experience, and every fish kept is more, by how rare it is. Some
+// waters need a level to fish (a sitting there before you have it doesn't count). A catch is worked
+// out again from the block's fingerprint, the sitting and the spot, so it can't be faked; kept fish
+// are numbered per species in the order they landed ("the 3rd golden char ever").
+import { build, castable, waterOf, SHALLOWS, REEDS, LEDGE, OPEN, type World } from "./world";
+import { roll, rarity, type Catch, FISH } from "./fish";
 
 export const SIT = "coast.sit", KEEP = "coast.keep";
-export const SIT_BLOCKS = 30, KEEP_WITHIN = 90;
+export const SIT_BLOCKS = 30, MAX_HOURS = 8, KEEP_WITHIN = 360, MAX_KEEP = 40;
 export const world: World = build();
 
 export type Rec = { id: string; text: string; height: number; time: number; author?: string; pending?: boolean };
 export type Block = { hash: string; time: number };
 
-export const sitText = (x: number, y: number) => `sit ${x} ${y}`;
-export const keepText = (sit: string, height: number) => `keep ${sit.toLowerCase()} ${height}`;
-export function parseSit(text: string): { x: number; y: number } | null {
-  const m = /^sit (\d{1,2}) (\d{1,2})$/.exec(text);
+// ── fishing level ──
+export const XP_CAST = 100;
+export const XP_KEEP: Record<string, number> = { common: 250, uncommon: 600, scarce: 1500, rare: 5000, legendary: 20000, junk: 0 };
+export const WATER_LEVEL: Record<number, number> = { [SHALLOWS]: 1, [REEDS]: 10, [LEDGE]: 25, [OPEN]: 40 };
+// the experience a level starts at (the old familiar curve: quick at first, then very slow; 99 is 13 million)
+const XP_TABLE = (() => { const t = [0, 0]; let p = 0; for (let l = 1; l < 99; l++) { p += Math.floor(l + 300 * Math.pow(2, l / 7)); t.push(Math.floor(p / 4)); } return t; })();
+export const xpForLevel = (l: number) => XP_TABLE[Math.max(1, Math.min(99, l))];
+export const levelFor = (xp: number) => { let l = 1; while (l < 99 && xp >= XP_TABLE[l + 1]) l++; return l; };
+export const levelNeeded = (x: number, y: number) => WATER_LEVEL[waterOf(world, x, y)] ?? 1;
+
+// ── the records' text ──
+export const sitText = (x: number, y: number, hours = 1) => hours > 1 ? `sit ${x} ${y} ${hours}` : `sit ${x} ${y}`;
+export const keepText = (sit: string, heights: number[]) => `keep ${sit.toLowerCase()} ${[...new Set(heights)].sort((a, b) => a - b).join(",")}`;
+export function parseSit(text: string): { x: number; y: number; hours: number } | null {
+  const m = /^sit (\d{1,2}) (\d{1,2})(?: ([2-8]))?$/.exec(text);
   if (!m) return null;
   const x = +m[1], y = +m[2];
-  return castable(world, x, y) ? { x, y } : null;
+  return castable(world, x, y) ? { x, y, hours: m[3] ? +m[3] : 1 } : null;
 }
-export function parseKeep(text: string): { sit: string; height: number } | null {
-  const m = /^keep (0x[0-9a-f]{64}) (\d{1,10})$/.exec(text);
-  return m ? { sit: m[1], height: +m[2] } : null;
+export function parseKeep(text: string): { sit: string; heights: number[] } | null {
+  const m = /^keep (0x[0-9a-f]{64}) (\d{1,10}(?:,\d{1,10}){0,39})$/.exec(text);
+  return m ? { sit: m[1], heights: [...new Set(m[2].split(",").map(Number))] } : null;
 }
 
 // The 32 bytes a cast is decided by
@@ -39,36 +53,55 @@ export async function castBytes(blockHash: string, sit: string, x: number, y: nu
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
 }
 
+export type Sitting = { id: string; by: string; height: number; spot: { x: number; y: number }; hours: number; end: number; valid: boolean; pending?: boolean };
 // What a sitting got at a block (null: nothing bit)
-export async function castAt(sit: Rec & { spot: { x: number; y: number } }, height: number, block: Block): Promise<Catch | null> {
-  if (height <= sit.height || height > sit.height + SIT_BLOCKS) return null;
-  return roll(await castBytes(block.hash, sit.id, sit.spot.x, sit.spot.y), waterOf(world, sit.spot.x, sit.spot.y), block.time);
+export async function castAt(s: { id: string; height: number; spot: { x: number; y: number }; end: number }, height: number, block: Block): Promise<Catch | null> {
+  if (height <= s.height || height > s.end) return null;
+  return roll(await castBytes(block.hash, s.id, s.spot.x, s.spot.y), waterOf(world, s.spot.x, s.spot.y), block.time);
 }
 
 export type Kept = { id: string; by: string; sit: string; height: number; at: number; spot: { x: number; y: number }; catch: Catch; nth: number; landed: number };
+export type Coast = { sittings: Sitting[]; kept: Kept[]; xpOf: (who: string, at?: number) => number; fishers: string[] };
 
-// Every kept catch that checks out, numbered per species in the order they landed
-export async function keptCatches(sits: Rec[], keeps: Rec[], block: (h: number) => Promise<Block>): Promise<Kept[]> {
-  const sitBy = new Map<string, Rec & { spot: { x: number; y: number } }>();
-  for (const s of sits) { const spot = parseSit(s.text); if (spot && s.author && !s.pending) sitBy.set(s.id.toLowerCase(), { ...s, spot }); }
-  const seen = new Set<string>(), out: Kept[] = [];
-  for (const k of [...keeps].filter(k => !k.pending && k.author).sort((a, b) => a.height - b.height || a.id.localeCompare(b.id))) {
-    const p = parseKeep(k.text);
-    const s = p && sitBy.get(p.sit);
-    if (!p || !s || s.author!.toLowerCase() !== k.author!.toLowerCase()) continue;
-    if (p.height <= s.height || p.height > s.height + SIT_BLOCKS || k.height > s.height + SIT_BLOCKS + KEEP_WITHIN || k.height <= p.height) continue;
-    const key = `${p.sit}:${p.height}`;
-    if (seen.has(key)) continue;
-    const b = await block(p.height).catch(() => null);
-    if (!b) continue;
-    const c = await castAt(s, p.height, b);
-    if (!c || c.species.junk) continue;
-    seen.add(key);
-    out.push({ id: k.id, by: k.author!.toLowerCase(), sit: p.sit, height: p.height, at: b.time, spot: s.spot, catch: c, nth: 0, landed: k.height });
+// Every sitting and every kept fish that checks out, and everyone's experience, worked out in the
+// order things landed
+export async function coast(sits: Rec[], keeps: Rec[], block: (h: number) => Promise<Block>, tip: number): Promise<Coast> {
+  const all: Sitting[] = [];
+  for (const s of sits) { const p = !s.pending && s.author ? parseSit(s.text) : null; if (p) all.push({ id: s.id.toLowerCase(), by: s.author!.toLowerCase(), height: s.height, spot: { x: p.x, y: p.y }, hours: p.hours, end: s.height + p.hours * SIT_BLOCKS, valid: false }); }
+  all.sort((a, b) => a.height - b.height || a.id.localeCompare(b.id));
+  // sitting down somewhere new ends where you were
+  const lastBy = new Map<string, Sitting>();
+  for (const s of all) { const prev = lastBy.get(s.by); if (prev) prev.end = Math.min(prev.end, s.height); lastBy.set(s.by, s); }
+  const byId = new Map(all.map(s => [s.id, s]));
+  const keptXp: { by: string; height: number; xp: number }[] = [];
+  const xpOf = (who: string, at = tip) => {
+    let xp = 0;
+    for (const s of all) if (s.valid && s.by === who) xp += Math.max(0, Math.min(s.end, at) - s.height) * XP_CAST;
+    for (const k of keptXp) if (k.by === who && k.height <= at) xp += k.xp;
+    return xp;
+  };
+  type Ev = { h: number; kind: 0 | 1; s?: Sitting; k?: Rec };
+  const events: Ev[] = [...all.map(s => ({ h: s.height, kind: 0 as const, s })), ...keeps.filter(k => !k.pending && k.author).map(k => ({ h: k.height, kind: 1 as const, k }))]
+    .sort((a, b) => a.h - b.h || a.kind - b.kind || (a.s?.id ?? a.k!.id).localeCompare(b.s?.id ?? b.k!.id));
+  const kept: Kept[] = [], seen = new Set<string>();
+  for (const e of events) {
+    if (e.s) { e.s.valid = levelFor(xpOf(e.s.by, e.h)) >= levelNeeded(e.s.spot.x, e.s.spot.y); continue; }
+    const k = e.k!, p = parseKeep(k.text), s = p && byId.get(p.sit);
+    if (!p || !s || !s.valid || s.by !== k.author!.toLowerCase() || k.height > s.end + KEEP_WITHIN) continue;
+    for (const h of p.heights) {
+      if (h <= s.height || h > s.end || k.height <= h || seen.has(`${s.id}:${h}`)) continue;
+      const b = await block(h).catch(() => null);
+      if (!b) continue;
+      const c = await castAt(s, h, b);
+      if (!c || c.species.junk) continue;
+      seen.add(`${s.id}:${h}`);
+      kept.push({ id: k.id, by: s.by, sit: s.id, height: h, at: b.time, spot: s.spot, catch: c, nth: 0, landed: k.height });
+      keptXp.push({ by: s.by, height: k.height, xp: XP_KEEP[rarity(c.species)] });
+    }
   }
   const counts = new Map<string, number>();
-  for (const k of out) { const n = (counts.get(k.catch.species.name) ?? 0) + 1; counts.set(k.catch.species.name, n); k.nth = n; }
-  return out;
+  for (const k of kept) { const n = (counts.get(k.catch.species.name) ?? 0) + 1; counts.set(k.catch.species.name, n); k.nth = n; }
+  return { sittings: all, kept, xpOf, fishers: [...new Set(all.filter(s => s.valid).map(s => s.by))] };
 }
 
 // The boards: the first of each species and the biggest of each, and the biggest of all

@@ -30,29 +30,51 @@ ok(rarity(FISH.find(s => s.name === "golden char")!) === "legendary" && rarity(F
 
 // keeping, and checking what was kept
 const alice = "0x" + "a".repeat(40), eve = "0x" + "e".repeat(40);
-const [sx, sy] = spots.find(([x, y]) => waterOf(a, x, y) === REEDS)!;
-let sit = { id: "0x" + "1".repeat(64), text: R.sitText(sx, sy), height: 1000, time: t, author: alice };
+const [sx, sy] = spots.find(([x, y]) => waterOf(a, x, y) === SHALLOWS)!;
 const blocks = new Map<number, R.Block>();
 const block = async (h: number) => { if (!blocks.has(h)) blocks.set(h, { hash: "0x" + h.toString(16).padStart(64, "0"), time: t + (h - 1000) * 120 }); return blocks.get(h)!; };
-// find blocks in the sitting where something (not junk) bit (an hour with at least four)
-let bit: number[] = [];
+const sitRec = (n: number, height: number, text = R.sitText(sx, sy), by = alice) => ({ id: "0x" + n.toString(16).padStart(64, "1"), text, height, time: t, author: by });
+const view = (s: R.Rec) => { const p = R.parseSit(s.text)!; return { id: s.id, height: s.height, spot: { x: p.x, y: p.y }, end: s.height + p.hours * R.SIT_BLOCKS }; };
+// find a sitting where at least four fish (not junk) bit
+let sit = sitRec(0, 1000), bit: number[] = [];
 for (let n = 0; bit.length < 4 && n < 50; n++) {
-  sit = { ...sit, id: "0x" + n.toString(16).padStart(64, "1") };
-  bit = [];
-  for (let h = 1001; h <= 1000 + R.SIT_BLOCKS; h++) { const c = await R.castAt({ ...sit, spot: { x: sx, y: sy } }, h, await block(h)); if (c && !c.species.junk) bit.push(h); }
+  sit = sitRec(n, 1000); bit = [];
+  for (let h = 1001; h <= 1000 + R.SIT_BLOCKS; h++) { const c = await R.castAt(view(sit), h, await block(h)); if (c && !c.species.junk) bit.push(h); }
 }
 ok(bit.length >= 4, `${bit.length} of ${R.SIT_BLOCKS} blocks in an hour brought a fish`);
-const keep = (h: number, by = alice, landed = h + 2, id = "0x" + h.toString(16).padStart(64, "0")) => ({ id, text: R.keepText(sit.id, h), height: landed, time: t, author: by });
-const kept = await R.keptCatches([sit], [keep(bit[0]), keep(bit[1]), keep(bit[1], alice, bit[1] + 3, "0x" + "f".repeat(64)), keep(bit[2], eve), keep(1000 + R.SIT_BLOCKS + 1), keep(bit[3], alice, 1000 + R.SIT_BLOCKS + R.KEEP_WITHIN + 1)], block);
-ok(kept.length === 2, "kept: the two real ones; not a second keep of the same cast, not someone else's keep, not after the sitting, not too late");
-ok(kept.every(k => k.by === alice) && kept[0].height === bit[0], "each credited to whoever sat");
-const nothing = []; for (let h = 1001; h <= 1030; h++) if (!bit.includes(h) && !(await R.castAt({ ...sit, spot: { x: sx, y: sy } }, h, await block(h)))) nothing.push(h);
-ok((await R.keptCatches([sit], [keep(nothing[0])], block)).length === 0, "keeping a cast where nothing bit counts for nothing");
-ok((await R.keptCatches([{ ...sit, text: "sit 0 0" }], [keep(bit[0])], block)).length === 0, "a sitting on dry land isn't a sitting");
+const keep = (hs: number[], landed = Math.max(...hs) + 2, by = alice, id = "0x" + landed.toString(16).padStart(64, "0"), s = sit) => ({ id, text: R.keepText(s.id, hs), height: landed, time: t, author: by });
+const TIP = 99999;
+let c = await R.coast([sit], [keep([bit[0], bit[1]]), keep([bit[1]], bit[1] + 3, alice, "0x" + "f".repeat(64)), keep([bit[2]], bit[2] + 2, eve), keep([1000 + R.SIT_BLOCKS + 1]), keep([bit[3]], 1000 + R.SIT_BLOCKS + R.KEEP_WITHIN + 1)], block, TIP);
+ok(c.kept.length === 2, "kept: two at once in one record; not the same cast again, not someone else's keep, not after the sitting, not too late");
+ok(c.kept.every(k => k.by === alice) && c.kept[0].height === bit[0], "each credited to whoever sat");
+const nothing: number[] = []; for (let h = 1001; h <= 1030; h++) if (!bit.includes(h) && !(await R.castAt(view(sit), h, await block(h)))) nothing.push(h);
+ok((await R.coast([sit], [keep([nothing[0]])], block, TIP)).kept.length === 0, "keeping a cast where nothing bit counts for nothing");
+ok((await R.coast([{ ...sit, text: "sit 0 0" }], [keep([bit[0]])], block, TIP)).kept.length === 0, "a sitting on dry land isn't a sitting");
+ok(R.parseKeep(R.keepText(sit.id, [5, 3, 5]))!.heights.join() === "3,5" && !R.parseKeep(`keep ${sit.id} ${Array.from({ length: 41 }, (_, i) => i + 1).join(",")}`), "a keep holds up to 40 casts");
+// a long sitting, and sitting down somewhere else ending the first
+const longSit = sitRec(70, 2000, R.sitText(sx, sy, 8));
+ok(R.parseSit(longSit.text)?.hours === 8 && !R.parseSit(`sit ${sx} ${sy} 9`), "sit for up to eight hours");
+c = await R.coast([longSit], [], block, TIP);
+ok(c.xpOf(alice) === 8 * R.SIT_BLOCKS * R.XP_CAST, "every cast is experience: a night by the water");
+ok(c.xpOf(alice, 2010) === 10 * R.XP_CAST, "counted as the blocks come, not all at once");
+c = await R.coast([longSit, sitRec(71, 2050)], [], block, TIP);
+ok(c.sittings[0].end === 2050 && c.xpOf(alice) === (50 + R.SIT_BLOCKS) * R.XP_CAST, "sitting down somewhere else ends where you were");
+// levels
+ok(R.levelFor(0) === 1 && R.levelFor(R.xpForLevel(10)) === 10 && R.levelFor(R.xpForLevel(10) - 1) === 9 && R.xpForLevel(99) === 13034431, "levels 1 to 99, 99 at 13,034,431");
+const reeds = spots.find(([x, y]) => waterOf(a, x, y) === REEDS)!, open = spots.find(([x, y]) => waterOf(a, x, y) === OPEN)!;
+ok(R.levelNeeded(sx, sy) === 1 && R.levelNeeded(reeds[0], reeds[1]) === 10 && R.levelNeeded(open[0], open[1]) === 40, "the shallows for everyone, the reeds from 10, the ledge from 25, open water from 40");
+const early = sitRec(80, 3000, R.sitText(reeds[0], reeds[1]));
+c = await R.coast([early], [], block, TIP);
+ok(!c.sittings[0].valid && c.xpOf(alice) === 0, "a sitting in the reeds at level 1 doesn't count");
+const enough = Math.ceil(R.xpForLevel(10) / R.XP_CAST);
+c = await R.coast([sitRec(81, 3000, R.sitText(sx, sy, 8)), sitRec(82, 3000 + enough, R.sitText(reeds[0], reeds[1]))], [], block, TIP);
+ok(c.sittings[1].valid && R.levelFor(c.xpOf(alice, 3000 + enough)) === 10, `after ${enough} casts in the shallows (level 10), the reeds count`);
+const k1 = (await R.coast([sit], [keep([bit[0]])], block, TIP));
+ok(k1.xpOf(alice) === R.SIT_BLOCKS * R.XP_CAST + R.XP_KEEP[rarity(k1.kept[0].catch.species)], "and every fish you keep is experience too, more for rarer ones");
 // numbering and boards
-const sit2 = { ...sit, id: "0x" + "2".repeat(64), height: 2000 };
-const more: number[] = []; for (let h = 2001; h <= 2030; h++) { const c = await R.castAt({ ...sit2, spot: { x: sx, y: sy } }, h, await block(h)); if (c && !c.species.junk) more.push(h); }
-const all = await R.keptCatches([sit, sit2], [keep(bit[0]), ...more.map(h => ({ ...keep(h), text: R.keepText(sit2.id, h) }))], block);
+const sit2 = sitRec(90, 4000);
+const more: number[] = []; for (let h = 4001; h <= 4030; h++) { const cc = await R.castAt(view(sit2), h, await block(h)); if (cc && !cc.species.junk) more.push(h); }
+const all = (await R.coast([sit, sit2], [keep([bit[0]]), keep(more, 4035, alice, "0x" + "e".repeat(64), sit2)], block, TIP)).kept;
 const byName: Record<string, number[]> = {}; for (const k of all) (byName[k.catch.species.name] ??= []).push(k.nth);
 ok(Object.values(byName).every(ns => ns.join() === ns.map((_, i) => i + 1).join()), "each species numbered 1st, 2nd, 3rd… in the order they were kept");
 const bd = R.boards(all);
