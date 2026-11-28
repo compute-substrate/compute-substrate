@@ -214,9 +214,9 @@ function drawTab() {
   $("stats").innerHTML = [
     ["Deepest", h?.deepest ? `Floor ${h.deepest}` : "None yet"],
     ["Relics up", `${h?.home.size ?? 0} of ${relics.length}`],
-    ["Graves", `${h?.falls.length ?? 0}`],
-    [`The ${BOTTOM_NAME}`, eye ? esc(Who(eye.by)) : "Down there"],
-  ].map(([k, v]) => `<div class="stat"><span>${k}</span><b>${v}</b></div>`).join("");
+    ["Deaths", `${h?.falls.length ?? 0}`],
+    ["The bottom", eye ? esc(Who(eye.by)) : "Unclaimed"],
+  ].map(([k, v]) => `<div class="stat frame"><span>${k}</span><b>${v}</b></div>`).join("");
   const rank = (i: number) => `<td class="rank r${i + 1}">${i + 1}</td>`;
   const dot = (name: string) => `<span class="dot ${rarityOf(name)}"></span>`;
   if (tab === "players") {
@@ -227,23 +227,23 @@ function drawTab() {
     for (const f of h?.falls ?? []) { const p = of(f.by); p.deepest = Math.max(p.deepest, f.depth); p.graves++; }
     for (const [, x] of h?.home ?? []) of(x.by).relics++;
     const rows = [...by.entries()].sort((a, b) => b[1].deepest - a[1].deepest || b[1].relics - a[1].relics || b[1].ups - a[1].ups);
-    $("tabview").innerHTML = rows.length ? `<table><thead><tr><th>#</th><th class="l">Name</th><th>Deepest</th><th>Relics</th><th>Back up</th><th>Graves</th></tr></thead><tbody>${rows.map(([a, p], i) =>
-      `<tr${a === mine ? ` class="me"` : ""}>${rank(i)}<td class="l">${esc(Who(a))}</td><td>${p.deepest}</td><td>${p.relics}</td><td>${p.ups}</td><td>${p.graves}</td></tr>`).join("")}</tbody></table>` : `<p class="empty">Nobody has gone down yet.</p>`;
+    $("tabview").innerHTML = rows.length ? `<table><thead><tr><th>#</th><th class="l">Name</th><th>Deepest</th><th>Relics</th><th>Runs</th><th>Deaths</th></tr></thead><tbody>${rows.map(([a, p], i) =>
+      `<tr${a === mine ? ` class="me"` : ""}>${rank(i)}<td class="l name">${esc(Who(a))}</td><td>${p.deepest}</td><td>${p.relics}</td><td>${p.ups + p.graves}</td><td>${p.graves}</td></tr>`).join("")}</tbody></table>` : `<p class="empty">Nobody has gone down yet. The first name here is still free.</p>`;
   } else if (tab === "relics") {
     // every relic in the deep, deepest first: who has it, or where it is
     const rows = [...relics].sort((a, b) => b.depth - a.depth || a.id.localeCompare(b.id));
     $("tabview").innerHTML = `<table><thead><tr><th class="l">Relic</th><th>Floor</th><th class="l">Held by</th><th>Since</th></tr></thead><tbody>${rows.map(r => {
       const home = h?.home.get(r.id), lies = now?.graves.find(g => g.relics.includes(r.id));
-      return `<tr class="${home ? "" : "unclaimed"}${home?.by === mine ? " me" : ""}"><td class="l">${dot(r.name)}${esc(r.id === BOTTOM ? `The ${BOTTOM_NAME}` : cap(r.name))}</td><td>${r.depth}</td><td class="l">${home ? esc(Who(home.by)) : lies ? `<span class="muted">In ${esc(who(lies.by))}'s grave</span>` : `<span class="muted">Still down there</span>`}</td><td>${home ? esc(dayShort(home.at)) : ""}</td></tr>`;
+      return `<tr class="${home ? "" : "unclaimed"}${home?.by === mine ? " me" : ""}"><td class="l name">${dot(r.name)}${esc(r.id === BOTTOM ? `The ${BOTTOM_NAME}` : cap(r.name))}</td><td>${r.depth}</td><td class="l name">${home ? esc(Who(home.by)) : lies ? `<span class="muted">In ${esc(who(lies.by))}'s grave</span>` : `<span class="muted">Still down there</span>`}</td><td>${home ? esc(dayShort(home.at)) : ""}</td></tr>`;
     }).join("")}</tbody></table>`;
   } else {
     // floor by floor: who got there first, what's left, who lies there
     const rows: string[] = [];
     for (let d = 1; d <= DEPTH; d++) {
       const first = h?.firstTo.get(d), chests = plan(d).chests, left = chests.filter(c => !h?.home.has(c.id)).length, graves = (h?.falls ?? []).filter(f => f.depth === d).length;
-      rows.push(`<tr class="${first ? "" : "unclaimed"}"><td>${d}${d === DEPTH ? ` <span class="muted">bottom</span>` : ""}</td><td class="l">${first ? esc(Who(first.by)) : `<span class="muted">Nobody yet</span>`}${now?.rope?.depth === d ? ` <span class="tag">rope</span>` : ""}</td><td>${first ? esc(dayShort(first.at)) : ""}</td><td>${left} of ${chests.length}</td><td>${graves || ""}</td></tr>`);
+      rows.push(`<tr class="${first ? "" : "unclaimed"}"><td>${d}${d === DEPTH ? ` <span class="muted">bottom</span>` : ""}</td><td class="l name">${first ? esc(Who(first.by)) : `<span class="muted">Nobody yet</span>`}${now?.rope?.depth === d ? ` <span class="tag">rope</span>` : ""}</td><td>${first ? esc(dayShort(first.at)) : ""}</td><td>${left} of ${chests.length}</td><td>${graves || ""}</td></tr>`);
     }
-    $("tabview").innerHTML = `<table><thead><tr><th>Floor</th><th class="l">First there</th><th>When</th><th>Relics left</th><th>Graves</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+    $("tabview").innerHTML = `<table><thead><tr><th>Floor</th><th class="l">First there</th><th>When</th><th>Relics left</th><th>Deaths</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
   }
 }
 

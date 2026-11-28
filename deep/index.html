@@ -9,9 +9,10 @@
 <!-- deep: each dungeon is drawn from the block after you go down; you play it here, and your moves
      are the record of coming back up. Anyone replays them (src/rules.ts). The scene: src/scene.ts. -->
 <style>
-  :root { --bg: #f1eee6; --card: #fbf9f4; --ink: #232a2b; --muted: #727a76; --line: #e2ddd1; --accent: #8a5a32; --on: #fff;
-          --common: #9aa19c; --uncommon: #4a9a5f; --scarce: #3a78b8; --rare: #9057c6; --legendary: #d4921f; color-scheme: light; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #121117; --card: #1c1b22; --ink: #e9e8ec; --muted: #9a97a3; --line: #2c2a33; --accent: #e2b04a; --on: #1a140c; color-scheme: dark; } }
+  /* the deep is dark, whatever the time of day */
+  :root { --bg: #0f0e13; --card: #18161d; --ink: #ece6d8; --muted: #8d8796; --line: #2b2833; --accent: #e2b04a; --on: #1a140c;
+          --gold: #d7b26a; --stone: #3b3546; --stone-dark: #1e1b24;
+          --common: #a7a29a; --uncommon: #6cbf7c; --scarce: #6aa3e0; --rare: #b48be8; --legendary: #f0b44a; color-scheme: dark; }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
@@ -58,29 +59,35 @@
   .relic.unseen { opacity: .45; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--common); }
   .uncommon .dot { background: var(--uncommon); } .scarce .dot { background: var(--scarce); } .rare .dot { background: var(--rare); } .legendary .dot { background: var(--legendary); }
-  /* hiscores */
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 18px; }
-  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; display: flex; flex-direction: column; min-width: 0; }
-  .stat span { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .stat b { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #tabview { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
-  th { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); text-align: right; padding: 12px 14px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  td { text-align: right; padding: 9px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  /* hiscores: stone frames, gold lettering */
+  .serif { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif; }
+  .frame { background: #16141b; border: 2px solid var(--stone); border-radius: 6px; box-shadow: inset 0 0 0 1px #0b0a0e, inset 0 0 0 2px #26222e, 0 10px 40px rgba(0,0,0,.5); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 6px 0 18px; }
+  .stat { padding: 12px 16px 13px; display: flex; flex-direction: column; min-width: 0; text-align: center; }
+  .stat span { font: 600 11px/1.4 Georgia, serif; letter-spacing: .12em; text-transform: uppercase; color: var(--gold); opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat b { font: 600 21px/1.3 Georgia, serif; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .tabs { gap: 8px; }
+  .tabs button { background: var(--stone-dark); color: var(--muted); border: 1px solid var(--stone); border-radius: 6px; padding: 7px 16px; font: 600 13px Georgia, serif; letter-spacing: .06em; text-transform: uppercase; }
+  .tabs button[aria-pressed="true"] { color: var(--gold); border-color: var(--gold); background: #221e18; box-shadow: none; }
+  #tabview { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums lining-nums; }
+  th { font: 600 11px Georgia, serif; letter-spacing: .12em; text-transform: uppercase; color: var(--gold); text-align: right; padding: 13px 16px 11px; background: var(--stone-dark); border-bottom: 2px solid var(--stone); white-space: nowrap; }
+  td { text-align: right; padding: 10px 16px; border-bottom: 1px solid #221f29; white-space: nowrap; }
   tbody tr:last-child td { border-bottom: 0; }
   th.l, td.l { text-align: left; }
-  td .dot { display: inline-block; margin-right: 9px; vertical-align: 1px; }
-  tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg) 45%, transparent); }
-  tr.me td { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
-  tr.unclaimed td { color: var(--muted); }
-  .rank { color: var(--muted); width: 36px; text-align: center !important; font-weight: 600; }
-  .rank.r1 { color: #c9952a; } .rank.r2 { color: #8f99a3; } .rank.r3 { color: #a8683a; }
-  .muted { color: var(--muted); font-weight: 400; }
-  .tag { font-size: 11px; font-weight: 600; color: var(--accent); border: 1px solid currentColor; border-radius: 999px; padding: 0 7px; }
-  .empty { padding: 18px; margin: 0; color: var(--muted); }
-  .dot.uncommon { background: var(--uncommon); } .dot.scarce { background: var(--scarce); } .dot.rare { background: var(--rare); } .dot.legendary { background: var(--legendary); }
-  .dot.one { background: var(--legendary); box-shadow: 0 0 6px var(--legendary); }
-  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } td, th { padding-left: 9px; padding-right: 9px; } }
+  td.name { font-family: Georgia, serif; font-size: 16px; }
+  td .dot { display: inline-block; margin-right: 10px; vertical-align: 1px; }
+  tbody tr:hover td { background: #1d1a23; }
+  tr.me td { background: #262013; color: var(--gold); }
+  tr.unclaimed td { color: #6d6875; }
+  .rank { width: 44px; text-align: center !important; font: 700 15px Georgia, serif; color: var(--muted); }
+  .rank.r1 { color: #f0c35a; text-shadow: 0 0 10px rgba(240,195,90,.45); } .rank.r2 { color: #c3cbd3; } .rank.r3 { color: #c98a55; }
+  .muted { color: #6d6875; font-weight: 400; }
+  .tag { font: 600 10px Georgia, serif; letter-spacing: .1em; text-transform: uppercase; color: var(--gold); border: 1px solid currentColor; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+  .empty { padding: 22px; margin: 0; color: var(--muted); text-align: center; font-family: Georgia, serif; }
+  .dot.common { background: var(--common); } .dot.uncommon { background: var(--uncommon); } .dot.scarce { background: var(--scarce); } .dot.rare { background: var(--rare); } .dot.legendary { background: var(--legendary); }
+  .dot.one { background: var(--legendary); box-shadow: 0 0 8px var(--legendary); }
+  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } td, th { padding-left: 10px; padding-right: 10px; } }
   footer { margin-top: 34px; color: var(--muted); font-size: 13px; max-width: 70ch; }
   @media (max-width: 560px) { .bar { flex-wrap: wrap; justify-content: flex-end; font-size: 13px; } .bar .text { flex-basis: 100%; } }
 </style>
@@ -88,7 +95,7 @@
 <body>
 <main>
   <section id="game">
-    <header><h1>The deep</h1><a href="#records">Records</a></header>
+    <header><h1>The deep</h1><a href="#records">Hiscores</a></header>
     <p id="standing" class="small standing"></p>
     <div class="stage">
       <canvas id="scene" aria-label="The floor you're on"></canvas>
@@ -99,10 +106,10 @@
     <ul id="log"></ul>
   </section>
   <section id="recordsview" hidden>
-    <header><h1>Records</h1><a href="#">Back down</a></header>
+    <header><h1>Hiscores</h1><a href="#">Back down</a></header>
     <div class="stats" id="stats"></div>
-    <div class="tabs" role="group"><button data-tab="players" aria-pressed="true">Hiscores</button><button data-tab="relics">Relics</button><button data-tab="floors">Floors</button></div>
-    <div id="tabview"></div>
+    <div class="tabs" role="group"><button data-tab="players" aria-pressed="true">Players</button><button data-tab="relics">Relics</button><button data-tab="floors">Floors</button></div>
+    <div id="tabview" class="frame"></div>
     <footer>Nobody runs the deep. It's the same twenty floors for everyone, and every ending is every move made, so anyone can play it again and see the same thing happen. The fights in each descent are drawn from a block nobody could know in advance. Whoever climbs out of the deepest floor leaves a rope there for everyone.</footer>
   </section>
 </main>
